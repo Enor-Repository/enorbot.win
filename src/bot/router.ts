@@ -1,16 +1,19 @@
 import type { WASocket, proto } from '@whiskeysockets/baileys'
-import { isPriceTrigger } from '../utils/triggers.js'
+import { isPriceTrigger, hasTronscanLink } from '../utils/triggers.js'
 import {
   type ReceiptType,
   RECEIPT_MIME_TYPES,
   SUPPORTED_IMAGE_MIME_TYPES,
 } from '../types/handlers.js'
+import { isTrainingMode } from './state.js'
 
 /**
  * Route destinations for message handling.
  * Story 6.1: Added RECEIPT_HANDLER for document/image processing
+ * Training Mode: Added OBSERVE_ONLY for training/data collection mode
+ * Tronscan: Added TRONSCAN_HANDLER for transaction link processing
  */
-export type RouteDestination = 'CONTROL_HANDLER' | 'PRICE_HANDLER' | 'RECEIPT_HANDLER' | 'IGNORE'
+export type RouteDestination = 'CONTROL_HANDLER' | 'PRICE_HANDLER' | 'RECEIPT_HANDLER' | 'TRONSCAN_HANDLER' | 'OBSERVE_ONLY' | 'IGNORE'
 
 /**
  * Raw Baileys message structure for document/image detection.
@@ -34,7 +37,10 @@ export interface RouterContext {
   groupId: string
   groupName: string
   message: string
+  /** Sender's JID (phone number format) */
   sender: string
+  /** Sender's WhatsApp display name (pushName), may be undefined */
+  senderName?: string
   isControlGroup: boolean
   hasTrigger?: boolean
   /** WhatsApp socket for sending responses (Story 2.3) */
@@ -45,6 +51,8 @@ export interface RouterContext {
   receiptType?: ReceiptType
   /** Story 6.1 - Raw Baileys message for media download */
   rawMessage?: proto.IWebMessageInfo
+  /** Whether this message contains a Tronscan transaction link */
+  hasTronscan?: boolean
 }
 
 /**
@@ -87,7 +95,7 @@ export function detectReceiptType(baileysMessage: BaileysMessage | undefined): R
 
   // AC2: Check for supported image types
   const imageMime = baileysMessage.imageMessage?.mimetype
-  if (imageMime && SUPPORTED_IMAGE_MIME_TYPES.has(imageMime)) {
+  if (imageMime && SUPPORTED_IMAGE_MIME_TYPES.has(imageMime as typeof RECEIPT_MIME_TYPES.JPEG)) {
     return 'image'
   }
 
@@ -97,6 +105,16 @@ export function detectReceiptType(baileysMessage: BaileysMessage | undefined): R
 /**
  * Route a message to the appropriate handler.
  * Pure function - no side effects, easy to test.
+ *
+ * Routing priority:
+ * 1. Control group → Process normally (even in training mode)
+ * 2. Training mode + non-control → OBSERVE_ONLY (log but don't respond)
+ * 3. Price triggers → PRICE_HANDLER
+ * 4. Receipt messages → RECEIPT_HANDLER
+ * 5. Otherwise → IGNORE
+ *
+ * Training Mode: When enabled, non-control groups only log messages
+ * without sending any responses. Control group works 100% normally.
  *
  * Story 6.1 - Added receipt detection and routing
  *
@@ -108,8 +126,11 @@ export function routeMessage(
   context: RouterContext,
   baileysMessage?: BaileysMessage
 ): RouteResult {
-  // Check for price trigger (used for logging even in control group)
+  // Check for price trigger - used for context enrichment
   const hasTrigger = isPriceTrigger(context.message)
+
+  // Check for Tronscan transaction link
+  const hasTronscan = hasTronscanLink(context.message)
 
   // Story 6.1 - Detect receipt type (only for non-control-group messages)
   const receiptType = context.isControlGroup ? null : detectReceiptType(baileysMessage)
@@ -118,27 +139,42 @@ export function routeMessage(
   const enrichedContext: RouterContext = {
     ...context,
     hasTrigger,
+    hasTronscan,
     isReceipt,
     receiptType,
   }
 
-  // Control group messages always go to control handler (AC5)
-  // Story 6.1 AC4: Control group excluded from receipt detection
-  // Note: hasTrigger is still set for consistent logging
+  // Priority 1: Control group works normally (even in training mode)
   if (context.isControlGroup) {
+    // Price triggers in control group go to price handler
+    if (hasTrigger) {
+      return { destination: 'PRICE_HANDLER', context: enrichedContext }
+    }
+    // Non-trigger messages (pause, resume, status, training) go to control handler
     return { destination: 'CONTROL_HANDLER', context: enrichedContext }
   }
 
-  // Story 6.1 AC3: Receipt messages go to receipt handler
-  if (isReceipt) {
-    return { destination: 'RECEIPT_HANDLER', context: enrichedContext }
+  // Priority 2: Training mode - observe only (log but don't respond)
+  // Messages are logged in connection.ts before dispatch, so logging still works
+  if (isTrainingMode()) {
+    return { destination: 'OBSERVE_ONLY', context: enrichedContext }
   }
 
-  // Price trigger messages go to price handler (AC1, AC2)
+  // Priority 3: Price triggers go to price handler
   if (hasTrigger) {
     return { destination: 'PRICE_HANDLER', context: enrichedContext }
   }
 
-  // No trigger - ignore message (AC4)
+  // Priority 4: Tronscan links go to tronscan handler (update Excel row)
+  if (hasTronscan) {
+    return { destination: 'TRONSCAN_HANDLER', context: enrichedContext }
+  }
+
+  // Priority 5: Receipt messages go to receipt handler
+  if (isReceipt) {
+    return { destination: 'RECEIPT_HANDLER', context: enrichedContext }
+  }
+
+  // No trigger - ignore message
   return { destination: 'IGNORE', context: enrichedContext }
 }

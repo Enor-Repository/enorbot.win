@@ -23,14 +23,23 @@ import { queueLogEntry, flushQueuedEntries, setAppendRowFn } from './logQueue.js
 /**
  * Log entry for price quotes.
  * Contains all information needed for audit trail.
+ *
+ * Excel columns: Timestamp, Group_name, Client_identifier, Volume_brl, Quote, Acquired_usdt, Onchain_tx
  */
 export interface LogEntry {
   timestamp: Date
   groupName: string
   groupId: string
+  /** Client display name (pushName) or phone number as fallback */
   clientIdentifier: string
-  quoteValue: number
-  quoteFormatted: string
+  /** BRL volume extracted from trigger message (e.g., "compro 5000" → 5000), null if not specified */
+  volumeBrl: number | null
+  /** Numeric quote price (e.g., 5.8234) */
+  quote: number
+  /** Calculated: volumeBrl / quote, null if volumeBrl is null */
+  acquiredUsdt: number | null
+  /** Tronscan transaction hash, filled later when link is posted */
+  onchainTx: string | null
 }
 
 /**
@@ -98,7 +107,7 @@ function buildFileUrl(): string {
 
 /**
  * Format log entry as row data array.
- * Order: [timestamp, groupName, clientIdentifier, quoteFormatted]
+ * Order: [Timestamp, Group_name, Client_identifier, Volume_brl, Quote, Acquired_usdt, Onchain_tx]
  */
 function formatRowData(entry: LogEntry): string[][] {
   return [
@@ -106,7 +115,10 @@ function formatRowData(entry: LogEntry): string[][] {
       entry.timestamp.toISOString(),
       entry.groupName,
       entry.clientIdentifier,
-      entry.quoteFormatted,
+      entry.volumeBrl !== null ? entry.volumeBrl.toString() : '',
+      entry.quote.toString(),
+      entry.acquiredUsdt !== null ? entry.acquiredUsdt.toFixed(2) : '',
+      entry.onchainTx ?? '',
     ],
   ]
 }
@@ -181,7 +193,9 @@ export async function logPriceQuote(entry: LogEntry): Promise<Result<{ rowNumber
       event: 'excel_row_appended',
       rowNumber,
       groupName: entry.groupName,
-      quote: entry.quoteFormatted,
+      quote: entry.quote,
+      volumeBrl: entry.volumeBrl,
+      acquiredUsdt: entry.acquiredUsdt,
     })
 
     // Story 5.3: Opportunistic queue flush after successful write
@@ -339,6 +353,160 @@ export async function appendRowDirect(entry: LogEntry): Promise<Result<{ rowNumb
       groupName: entry.groupName,
     })
     return err(error instanceof Error ? error.message : 'Excel direct append failed')
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+// =============================================================================
+// Row Tracking for Onchain Transaction Updates
+// =============================================================================
+
+/**
+ * Track last row number per group for transaction updates.
+ * Key: groupId, Value: row number in Excel table
+ */
+const lastRowByGroup = new Map<string, number>()
+
+/**
+ * Record the row number for a group after appending.
+ * Called internally after successful logPriceQuote.
+ *
+ * @param groupId - The group ID
+ * @param rowNumber - The row number in the Excel table
+ */
+export function recordLastRow(groupId: string, rowNumber: number): void {
+  lastRowByGroup.set(groupId, rowNumber)
+}
+
+/**
+ * Get the last row number for a group.
+ *
+ * @param groupId - The group ID
+ * @returns Row number or null if no row recorded
+ */
+export function getLastRow(groupId: string): number | null {
+  return lastRowByGroup.get(groupId) ?? null
+}
+
+/**
+ * Build URL for updating a specific cell in the table.
+ * Uses range notation to target the Onchain_tx column (column G, 7th column).
+ */
+function buildCellUpdateUrl(rowIndex: number): string {
+  const config = getConfig()
+  const siteId = config.EXCEL_SITE_ID || ''
+  const driveId = config.EXCEL_DRIVE_ID || ''
+  const fileId = config.EXCEL_FILE_ID || ''
+  const worksheetName = config.EXCEL_WORKSHEET_NAME || 'Quotes'
+  const tableName = config.EXCEL_TABLE_NAME || 'Table1'
+
+  // Table rows are 0-indexed from the data rows (header is row 0)
+  // Onchain_tx is column 7 (G) - use ItemAt to get specific row then update
+  return `${GRAPH_API_BASE}/sites/${siteId}/drives/${driveId}/items/${fileId}/workbook/worksheets/${worksheetName}/tables/${tableName}/rows/itemAt(index=${rowIndex})`
+}
+
+/**
+ * Update the Onchain_tx column for a specific row.
+ *
+ * @param groupId - The group ID (to find the row)
+ * @param txHash - The Tronscan transaction hash
+ * @returns Result indicating success or failure
+ */
+export async function updateOnchainTx(groupId: string, txHash: string): Promise<Result<void>> {
+  const rowNumber = getLastRow(groupId)
+
+  if (rowNumber === null) {
+    logger.warn('No row found for group to update onchain_tx', {
+      event: 'onchain_tx_update_no_row',
+      groupId,
+      txHash,
+    })
+    return err('No row found for group')
+  }
+
+  // Get valid token
+  const tokenResult = await ensureValidToken()
+  if (!tokenResult.ok) {
+    logger.error('Excel update auth failed', {
+      event: 'excel_update_auth_error',
+      error: tokenResult.error,
+      groupId,
+    })
+    return err(`Auth failed: ${tokenResult.error}`)
+  }
+
+  const url = buildCellUpdateUrl(rowNumber)
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), GRAPH_TIMEOUT_MS)
+
+  try {
+    // First get the current row values
+    const getResponse = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${tokenResult.data}`,
+      },
+      signal: controller.signal,
+    })
+
+    if (!getResponse.ok) {
+      logger.error('Excel get row failed', {
+        event: 'excel_get_row_error',
+        status: getResponse.status,
+        rowNumber,
+        groupId,
+      })
+      return err(`Excel API error: ${getResponse.status}`)
+    }
+
+    const rowData = (await getResponse.json()) as ExcelRowResponse
+    const currentValues = rowData.values?.[0] ?? []
+
+    // Update the 7th column (Onchain_tx) - index 6
+    const updatedValues = [...currentValues]
+    while (updatedValues.length < 7) {
+      updatedValues.push('')
+    }
+    updatedValues[6] = txHash
+
+    // PATCH the row with updated values
+    const patchResponse = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${tokenResult.data}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ values: [updatedValues] }),
+      signal: controller.signal,
+    })
+
+    if (!patchResponse.ok) {
+      logger.error('Excel update row failed', {
+        event: 'excel_update_row_error',
+        status: patchResponse.status,
+        rowNumber,
+        groupId,
+      })
+      return err(`Excel update failed: ${patchResponse.status}`)
+    }
+
+    logger.info('Onchain_tx updated in Excel', {
+      event: 'onchain_tx_updated',
+      rowNumber,
+      groupId,
+      txHash,
+    })
+
+    return ok(undefined)
+  } catch (error) {
+    logger.error('Excel update exception', {
+      event: 'excel_update_exception',
+      error: error instanceof Error ? error.message : String(error),
+      groupId,
+    })
+    return err(error instanceof Error ? error.message : 'Excel update failed')
   } finally {
     clearTimeout(timeoutId)
   }

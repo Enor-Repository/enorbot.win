@@ -30,6 +30,7 @@ import { clearAuthState, checkSupabaseHealth } from '../services/supabase.js'
 import { routeMessage, isControlGroupMessage, type RouterContext } from './router.js'
 import { handleControlMessage, registerKnownGroup } from '../handlers/control.js'
 import { handlePriceMessage } from '../handlers/price.js'
+import { handleTronscanMessage } from '../handlers/tronscan.js'
 import type { EnvConfig } from '../types/config.js'
 import {
   classifyWhatsAppError,
@@ -43,15 +44,50 @@ import { recordTransientError, recordSuccessfulOperation } from '../services/tra
 import { initExcelService } from '../services/excel.js'
 import { initLogQueue, startPeriodicSync } from '../services/logQueue.js'
 import { isExcelLoggingConfigured } from '../types/config.js'
+// Message history logging to Supabase
+import { initMessageHistory, logMessageToHistory } from '../services/messageHistory.js'
 
 let sock: WASocket | null = null
+
+/**
+ * Maximum number of groups to cache metadata for.
+ * Prevents unbounded memory growth in long-running sessions.
+ */
+const GROUP_CACHE_MAX_SIZE = 500
 
 /**
  * In-memory cache for group metadata to avoid repeated API calls.
  * Key: groupId, Value: group subject (name)
  * Persists for session lifetime - group names rarely change.
+ * Issue fix: Limited to GROUP_CACHE_MAX_SIZE entries with LRU eviction.
  */
 const groupMetadataCache = new Map<string, string>()
+
+/**
+ * Add entry to group metadata cache with LRU eviction.
+ * When cache exceeds max size, removes the oldest entry (first inserted).
+ */
+function cacheGroupMetadata(groupId: string, groupName: string): void {
+  // If already exists, delete first to update insertion order (move to end)
+  if (groupMetadataCache.has(groupId)) {
+    groupMetadataCache.delete(groupId)
+  }
+
+  // Evict oldest entry if at capacity
+  if (groupMetadataCache.size >= GROUP_CACHE_MAX_SIZE) {
+    const oldestKey = groupMetadataCache.keys().next().value
+    if (oldestKey) {
+      groupMetadataCache.delete(oldestKey)
+      logger.debug('Group metadata cache evicted oldest entry', {
+        event: 'group_cache_eviction',
+        evictedGroupId: oldestKey,
+        cacheSize: GROUP_CACHE_MAX_SIZE,
+      })
+    }
+  }
+
+  groupMetadataCache.set(groupId, groupName)
+}
 
 /**
  * Create and initialize WhatsApp connection using pairing code authentication.
@@ -261,6 +297,10 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         logger.info('Excel logging services initialized', { event: 'excel_services_init' })
       }
 
+      // Initialize message history logging to Supabase
+      initMessageHistory(config)
+      logger.info('Message history service initialized', { event: 'message_history_init' })
+
       if (wasReconnecting) {
         logger.info('Reconnected to WhatsApp', {
           event: 'reconnected',
@@ -307,6 +347,8 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       if (!messageText.trim()) return
 
       const sender = msg.key.participant || msg.key.remoteJid || ''
+      // Extract sender's WhatsApp display name (pushName) if available
+      const senderName = msg.pushName || undefined
 
       // Get group name from cache or fetch from metadata (with caching)
       let groupName = groupMetadataCache.get(groupId)
@@ -316,12 +358,13 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         try {
           const groupMetadata = await currentSock.groupMetadata(groupId)
           groupName = groupMetadata.subject || ''
-          // Cache the result for future messages
-          groupMetadataCache.set(groupId, groupName)
+          // Cache the result for future messages (with LRU eviction)
+          cacheGroupMetadata(groupId, groupName)
           logger.info('Group metadata cached', {
             event: 'group_metadata_cached',
             groupId,
             groupName,
+            cacheSize: groupMetadataCache.size,
           })
         } catch {
           // CRITICAL: If metadata fetch fails and we have no cache,
@@ -348,6 +391,7 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         groupName,
         message: messageText,
         sender,
+        senderName,
         isControlGroup,
         sock: currentSock,
       }
@@ -361,6 +405,21 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       })
 
       const route = routeMessage(context)
+
+      // Log message to Supabase history (fire-and-forget)
+      // Story 7.3 AC6: Pass hasTrigger from router
+      logMessageToHistory({
+        messageId: msg.key.id || undefined,
+        groupJid: groupId,
+        groupName,
+        senderJid: sender,
+        senderName,
+        isControlGroup,
+        messageType: 'text',
+        content: messageText,
+        isFromBot: false,
+        isTrigger: route.context.hasTrigger ?? false,
+      })
 
       logger.info('Message routed', {
         event: 'message_routed',
@@ -402,8 +461,19 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         await handleControlMessage(context)
       } else if (route.destination === 'PRICE_HANDLER') {
         await handlePriceMessage(context)
+      } else if (route.destination === 'TRONSCAN_HANDLER') {
+        // Handle Tronscan transaction links - update Excel row with tx hash
+        await handleTronscanMessage(context)
+      } else if (route.destination === 'OBSERVE_ONLY') {
+        // Training mode: Message was logged above, but no response sent
+        logger.debug('Training mode: message observed', {
+          event: 'training_mode_observe',
+          groupId,
+          groupName,
+          hasTrigger: route.context.hasTrigger,
+        })
       }
-      // IGNORE destination: no action (reserved for future use)
+      // IGNORE and RECEIPT_HANDLER destinations: no action in text message handler
     } catch (error) {
       // Top-level error handler to prevent message processing crashes
       logger.error('Error processing message', {

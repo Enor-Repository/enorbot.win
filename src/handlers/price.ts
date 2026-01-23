@@ -31,9 +31,12 @@ import {
 import { recordMessageSent } from '../bot/state.js'
 import { triggerAutoPause } from '../services/autoPause.js'
 import { recordTransientError, recordSuccessfulOperation } from '../services/transientErrors.js'
-import { logPriceQuote, type LogEntry } from '../services/excel.js'
+import { logPriceQuote, recordLastRow, type LogEntry } from '../services/excel.js'
+import { extractVolumeBrl } from '../utils/triggers.js'
 import { isExcelLoggingConfigured } from '../types/config.js'
 import { getConfig } from '../config.js'
+// Story 7.4: Bot message logging to Supabase
+import { logBotMessage } from '../services/messageHistory.js'
 
 // Story 2.4: Retry Constants (Task 1)
 /** Maximum number of retry attempts after initial failure */
@@ -96,6 +99,14 @@ export async function handlePriceMessage(
       event: 'price_ack_send_failed',
       error: ackResult.error,
       groupId: context.groupId,
+    })
+  } else {
+    // Story 7.4 AC2: Log stall message to history
+    logBotMessage({
+      groupJid: context.groupId,
+      content: INSTANT_ACK_MESSAGE,
+      messageType: 'stall',
+      isControlGroup: false,
     })
   }
 
@@ -250,12 +261,21 @@ async function sendPriceResponse(
 
   const timestamp = new Date().toISOString()
 
+  // Story 7.4 AC1: Log price response to history
+  logBotMessage({
+    groupJid: context.groupId,
+    content: formattedPrice,
+    messageType: 'price_response',
+    isControlGroup: false,
+    metadata: { price, recovered: !!recoveryMeta },
+  })
+
   if (recoveryMeta) {
     // Story 4.3: Record activity for status command
     recordMessageSent(context.groupId)
 
     // Story 5.2: Log to Excel (fire-and-forget)
-    logToExcel(context, price, formattedPrice)
+    logToExcel(context, price)
 
     // Recovery success logging (AC3)
     logger.info('Recovered after retry', {
@@ -280,7 +300,7 @@ async function sendPriceResponse(
   recordMessageSent(context.groupId)
 
   // Story 5.2: Log to Excel (fire-and-forget)
-  logToExcel(context, price, formattedPrice)
+  logToExcel(context, price)
 
   // Normal success logging (Story 2.3)
   logger.info('Price response sent', {
@@ -299,14 +319,32 @@ async function sendPriceResponse(
 }
 
 /**
+ * Get client identifier from context.
+ * Prefers display name (pushName), falls back to phone number.
+ *
+ * @param context - Router context
+ * @returns Client identifier string
+ */
+function getClientIdentifier(context: RouterContext): string {
+  // Prefer senderName (WhatsApp display name) if available
+  if (context.senderName && context.senderName.trim()) {
+    return context.senderName.trim()
+  }
+  // Fallback to sender JID, extracting phone number
+  // Format: 5511999999999@s.whatsapp.net → 5511999999999
+  return context.sender.replace(/@.*$/, '')
+}
+
+/**
  * Log price quote to Excel Online (fire-and-forget).
  * Story 5.2 Task 5: Integration with price handler.
  *
+ * New schema: Timestamp, Group_name, Client_identifier, Volume_brl, Quote, Acquired_usdt, Onchain_tx
+ *
  * @param context - Router context with message metadata
- * @param price - Raw price from Binance
- * @param formattedPrice - Formatted price string
+ * @param price - Raw price from Binance (Quote)
  */
-function logToExcel(context: RouterContext, price: number, formattedPrice: string): void {
+function logToExcel(context: RouterContext, price: number): void {
   // Skip if Excel logging is not configured
   try {
     const config = getConfig()
@@ -318,21 +356,36 @@ function logToExcel(context: RouterContext, price: number, formattedPrice: strin
     return
   }
 
+  // Extract volume from trigger message
+  const volumeBrl = extractVolumeBrl(context.message)
+
+  // Calculate acquired USDT if volume is available
+  const acquiredUsdt = volumeBrl !== null ? volumeBrl / price : null
+
   const entry: LogEntry = {
     timestamp: new Date(),
     groupName: context.groupName,
     groupId: context.groupId,
-    clientIdentifier: context.sender,
-    quoteValue: price,
-    quoteFormatted: formattedPrice,
+    clientIdentifier: getClientIdentifier(context),
+    volumeBrl,
+    quote: price,
+    acquiredUsdt,
+    onchainTx: null, // Filled later when tronscan link is posted
   }
 
   // Fire-and-forget - don't await, don't block price response
-  logPriceQuote(entry).catch((error) => {
-    logger.warn('Excel logging failed, will retry', {
-      event: 'excel_log_fire_forget_error',
-      error: error instanceof Error ? error.message : String(error),
-      groupName: context.groupName,
+  logPriceQuote(entry)
+    .then((result) => {
+      if (result.ok) {
+        // Record row number for potential onchain_tx update later
+        recordLastRow(context.groupId, result.data.rowNumber)
+      }
     })
-  })
+    .catch((error) => {
+      logger.warn('Excel logging failed, will retry', {
+        event: 'excel_log_fire_forget_error',
+        error: error instanceof Error ? error.message : String(error),
+        groupName: context.groupName,
+      })
+    })
 }

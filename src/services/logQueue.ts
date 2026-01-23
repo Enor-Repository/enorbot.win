@@ -35,6 +35,7 @@ export interface QueuedEntry {
 
 /**
  * Supabase row structure for log_queue table.
+ * Updated to match new Excel schema.
  */
 interface LogQueueRow {
   id: string
@@ -42,8 +43,10 @@ interface LogQueueRow {
   group_name: string
   group_id: string
   client_identifier: string
-  quote_value: number
-  quote_formatted: string
+  volume_brl: number | null
+  quote: number
+  acquired_usdt: number | null
+  onchain_tx: string | null
   created_at: string
   attempts: number
   last_attempt_at: string | null
@@ -167,8 +170,10 @@ export async function queueLogEntry(entry: LogEntry): Promise<void> {
       group_name: entry.groupName,
       group_id: entry.groupId,
       client_identifier: entry.clientIdentifier,
-      quote_value: entry.quoteValue,
-      quote_formatted: entry.quoteFormatted,
+      volume_brl: entry.volumeBrl,
+      quote: entry.quote,
+      acquired_usdt: entry.acquiredUsdt,
+      onchain_tx: entry.onchainTx,
     })
 
     if (error) {
@@ -226,8 +231,10 @@ export async function getQueuedEntries(): Promise<Result<QueuedEntry[]>> {
         groupName: row.group_name,
         groupId: row.group_id,
         clientIdentifier: row.client_identifier,
-        quoteValue: row.quote_value,
-        quoteFormatted: row.quote_formatted,
+        volumeBrl: row.volume_brl,
+        quote: row.quote,
+        acquiredUsdt: row.acquired_usdt,
+        onchainTx: row.onchain_tx,
       },
       createdAt: new Date(row.created_at),
       attempts: row.attempts,

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import type { WASocket } from '@whiskeysockets/baileys'
 import {
   routeMessage,
@@ -8,6 +8,7 @@ import {
   type BaileysMessage,
 } from './router.js'
 import { RECEIPT_MIME_TYPES } from '../types/handlers.js'
+import { setTrainingMode, resetTrainingMode } from './state.js'
 
 describe('routeMessage', () => {
   // Mock socket for tests
@@ -70,13 +71,12 @@ describe('routeMessage', () => {
     })
   })
 
-  // AC5: Control group bypass
+  // AC5: Control group routing
   describe('control group priority', () => {
-    it('routes control group message to CONTROL_HANDLER (even with trigger)', () => {
+    it('routes control group price trigger to PRICE_HANDLER', () => {
       const context = { ...baseContext, message: 'preço', isControlGroup: true }
       const result = routeMessage(context)
-      expect(result.destination).toBe('CONTROL_HANDLER')
-      // hasTrigger is still set for consistent logging
+      expect(result.destination).toBe('PRICE_HANDLER')
       expect(result.context.hasTrigger).toBe(true)
     })
 
@@ -87,11 +87,10 @@ describe('routeMessage', () => {
       expect(result.context.hasTrigger).toBe(false)
     })
 
-    it('enriches control group context with hasTrigger for logging', () => {
+    it('routes control group cotação to PRICE_HANDLER', () => {
       const context = { ...baseContext, message: 'cotação', isControlGroup: true }
       const result = routeMessage(context)
-      expect(result.destination).toBe('CONTROL_HANDLER')
-      // Control group messages get hasTrigger for consistent logging
+      expect(result.destination).toBe('PRICE_HANDLER')
       expect(result.context.hasTrigger).toBe(true)
     })
   })
@@ -287,16 +286,16 @@ describe('routeMessage receipt routing', () => {
     })
   })
 
-  // Receipt priority over price trigger
-  describe('receipt priority', () => {
-    it('routes message with both receipt and trigger to RECEIPT_HANDLER', () => {
+  // Price trigger priority over receipt
+  describe('price trigger priority', () => {
+    it('routes message with both receipt and trigger to PRICE_HANDLER (trigger has priority)', () => {
       const context = { ...baseContext, message: 'preço' }
       const baileysMessage: BaileysMessage = {
         documentMessage: { mimetype: 'application/pdf' },
       }
       const result = routeMessage(context, baileysMessage)
 
-      expect(result.destination).toBe('RECEIPT_HANDLER')
+      expect(result.destination).toBe('PRICE_HANDLER')
       expect(result.context.isReceipt).toBe(true)
       expect(result.context.hasTrigger).toBe(true)
     })
@@ -324,6 +323,116 @@ describe('routeMessage receipt routing', () => {
 
       expect(result.destination).toBe('IGNORE')
       expect(result.context.isReceipt).toBe(false)
+    })
+  })
+})
+
+// Training Mode Routing Tests
+describe('routeMessage training mode', () => {
+  const mockSock = {} as WASocket
+
+  const baseContext: RouterContext = {
+    groupId: '123456789@g.us',
+    groupName: 'Test Group',
+    message: '',
+    sender: 'user@s.whatsapp.net',
+    isControlGroup: false,
+    sock: mockSock,
+  }
+
+  beforeEach(() => {
+    resetTrainingMode()
+  })
+
+  describe('OBSERVE_ONLY routing when training mode enabled', () => {
+    it('routes price trigger to OBSERVE_ONLY when training mode is on', () => {
+      setTrainingMode(true)
+      const context = { ...baseContext, message: 'preço' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('OBSERVE_ONLY')
+      expect(result.context.hasTrigger).toBe(true)
+    })
+
+    it('routes non-trigger message to OBSERVE_ONLY when training mode is on', () => {
+      setTrainingMode(true)
+      const context = { ...baseContext, message: 'hello world' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('OBSERVE_ONLY')
+      expect(result.context.hasTrigger).toBe(false)
+    })
+
+    it('routes receipt to OBSERVE_ONLY when training mode is on', () => {
+      setTrainingMode(true)
+      const context = { ...baseContext }
+      const baileysMessage: BaileysMessage = {
+        documentMessage: { mimetype: 'application/pdf' },
+      }
+      const result = routeMessage(context, baileysMessage)
+
+      expect(result.destination).toBe('OBSERVE_ONLY')
+      expect(result.context.isReceipt).toBe(true)
+    })
+  })
+
+  describe('Control group works normally in training mode', () => {
+    it('routes control group price trigger to PRICE_HANDLER in training mode', () => {
+      setTrainingMode(true)
+      const context = { ...baseContext, message: 'preço', isControlGroup: true }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('PRICE_HANDLER')
+      expect(result.context.hasTrigger).toBe(true)
+    })
+
+    it('routes control group non-trigger to CONTROL_HANDLER in training mode', () => {
+      setTrainingMode(true)
+      const context = { ...baseContext, message: 'status', isControlGroup: true }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('CONTROL_HANDLER')
+    })
+
+    it('routes control group receipt to CONTROL_HANDLER in training mode (not RECEIPT_HANDLER)', () => {
+      setTrainingMode(true)
+      const context = { ...baseContext, isControlGroup: true }
+      const baileysMessage: BaileysMessage = {
+        documentMessage: { mimetype: 'application/pdf' },
+      }
+      const result = routeMessage(context, baileysMessage)
+
+      expect(result.destination).toBe('CONTROL_HANDLER')
+      expect(result.context.isReceipt).toBe(false) // Control group doesn't get receipt detection
+    })
+  })
+
+  describe('Normal routing when training mode disabled', () => {
+    it('routes price trigger to PRICE_HANDLER when training mode is off', () => {
+      setTrainingMode(false)
+      const context = { ...baseContext, message: 'preço' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('PRICE_HANDLER')
+    })
+
+    it('routes non-trigger to IGNORE when training mode is off', () => {
+      setTrainingMode(false)
+      const context = { ...baseContext, message: 'hello' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('IGNORE')
+    })
+
+    it('routes receipt to RECEIPT_HANDLER when training mode is off', () => {
+      setTrainingMode(false)
+      const context = { ...baseContext }
+      const baileysMessage: BaileysMessage = {
+        documentMessage: { mimetype: 'application/pdf' },
+      }
+      const result = routeMessage(context, baileysMessage)
+
+      expect(result.destination).toBe('RECEIPT_HANDLER')
     })
   })
 })

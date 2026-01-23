@@ -79,9 +79,11 @@ const testLogEntry: LogEntry = {
   timestamp: new Date('2026-01-16T12:00:00Z'),
   groupName: 'Crypto OTC Brasil',
   groupId: '551199999999-1234567890@g.us',
-  clientIdentifier: '+55 11 99999-9999',
-  quoteValue: 5.82,
-  quoteFormatted: 'R$5,82',
+  clientIdentifier: 'João Silva',
+  volumeBrl: 5000,
+  quote: 5.82,
+  acquiredUsdt: 859.11,
+  onchainTx: null,
 }
 
 const testQueueRow = {
@@ -89,9 +91,11 @@ const testQueueRow = {
   timestamp: '2026-01-16T12:00:00Z',
   group_name: 'Crypto OTC Brasil',
   group_id: '551199999999-1234567890@g.us',
-  client_identifier: '+55 11 99999-9999',
-  quote_value: 5.82,
-  quote_formatted: 'R$5,82',
+  client_identifier: 'João Silva',
+  volume_brl: 5000,
+  quote: 5.82,
+  acquired_usdt: 859.11,
+  onchain_tx: null,
   created_at: '2026-01-16T12:00:00Z',
   attempts: 0,
   last_attempt_at: null,
@@ -138,9 +142,11 @@ describe('logQueue.ts - Story 5.3: Offline Queue & Sync', () => {
           timestamp: '2026-01-16T12:00:00.000Z',
           group_name: 'Crypto OTC Brasil',
           group_id: '551199999999-1234567890@g.us',
-          client_identifier: '+55 11 99999-9999',
-          quote_value: 5.82,
-          quote_formatted: 'R$5,82',
+          client_identifier: 'João Silva',
+          volume_brl: 5000,
+          quote: 5.82,
+          acquired_usdt: 859.11,
+          onchain_tx: null,
         })
       )
     })

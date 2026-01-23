@@ -97,10 +97,12 @@ describe('handlePriceMessage', () => {
       expect(mockFetchPrice).toHaveBeenCalledTimes(1)
 
       // Assert - sendWithAntiDetection called with correct args (AC3)
-      expect(mockSend).toHaveBeenCalledWith(
+      // Price is 2nd call (after instant ack), with 4 decimal places
+      expect(mockSend).toHaveBeenNthCalledWith(
+        2,
         mockSock,
         '123456789@g.us',
-        'R$5,82' // Truncated and formatted
+        'R$5,8234' // Truncated to 4 decimal places
       )
 
       // Assert - success result
@@ -115,27 +117,29 @@ describe('handlePriceMessage', () => {
       // Act
       await handlePriceMessage(baseContext)
 
-      // Assert - verify formatted price (AC1, AC2)
-      expect(mockSend).toHaveBeenCalledWith(
+      // Assert - verify formatted price (AC1, AC2) - 2nd call after instant ack
+      expect(mockSend).toHaveBeenNthCalledWith(
+        2,
         expect.anything(),
         expect.anything(),
-        'R$5,82'
+        'R$5,8200'
       )
     })
 
-    it('truncates price to 2 decimal places (not rounds)', async () => {
-      // Arrange - 5.829 would round to 5.83, but should truncate to 5.82
-      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.829 })
+    it('truncates price to 4 decimal places (not rounds)', async () => {
+      // Arrange - 5.82999 would round to 5.83, but should truncate to 5.8299
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.82999 })
       mockSend.mockResolvedValue({ ok: true, data: undefined })
 
       // Act
       await handlePriceMessage(baseContext)
 
-      // Assert - truncation not rounding
-      expect(mockSend).toHaveBeenCalledWith(
+      // Assert - truncation not rounding (2nd call after instant ack)
+      expect(mockSend).toHaveBeenNthCalledWith(
+        2,
         expect.anything(),
         expect.anything(),
-        'R$5,82' // Truncated, not R$5,83
+        'R$5,8299' // Truncated, not R$5,8300
       )
     })
   })
@@ -206,10 +210,10 @@ describe('handlePriceMessage', () => {
       // Act
       const result = await handlePriceMessage(baseContext)
 
-      // Assert - timestamp should be AFTER the send (500ms later)
+      // Assert - timestamp should be AFTER both sends (1000ms later: 500ms for ack + 500ms for price)
       expect(result.ok).toBe(true)
       if (result.ok) {
-        const expectedTime = new Date('2026-01-16T12:00:00.500Z').toISOString()
+        const expectedTime = new Date('2026-01-16T12:00:01.000Z').toISOString()
         expect(result.data.timestamp).toBe(expectedTime)
       }
     })
@@ -289,7 +293,7 @@ describe('handlePriceMessage', () => {
           error: 'Socket disconnected',
           groupId: '123456789@g.us',
           price: 5.82,
-          formattedPrice: 'R$5,82',
+          formattedPrice: 'R$5,8200',
         })
       )
     })
@@ -326,13 +330,13 @@ describe('handlePriceMessage', () => {
       // Act
       await handlePriceMessage(baseContext)
 
-      // Assert
+      // Assert - formatted price has 4 decimal places (truncated, not rounded)
       expect(logger.info).toHaveBeenCalledWith(
         'Price response sent',
         expect.objectContaining({
           event: 'price_response_sent',
           price: 5.8234,
-          formattedPrice: 'R$5,82',
+          formattedPrice: 'R$5,8234',
           groupId: '123456789@g.us',
         })
       )
@@ -349,11 +353,12 @@ describe('handlePriceMessage', () => {
       // Act
       const result = await handlePriceMessage(baseContext)
 
-      // Assert
-      expect(mockSend).toHaveBeenCalledWith(
+      // Assert - price is sent as 2nd call (after instant ack), with 4 decimal places
+      expect(mockSend).toHaveBeenNthCalledWith(
+        2,
         expect.anything(),
         expect.anything(),
-        'R$0,00'
+        'R$0,0000'
       )
       expect(result.ok).toBe(true)
     })
@@ -366,11 +371,12 @@ describe('handlePriceMessage', () => {
       // Act
       await handlePriceMessage(baseContext)
 
-      // Assert
-      expect(mockSend).toHaveBeenCalledWith(
+      // Assert - price is sent as 2nd call (after instant ack), with 4 decimal places
+      expect(mockSend).toHaveBeenNthCalledWith(
+        2,
         expect.anything(),
         expect.anything(),
-        'R$99999,99'
+        'R$99999,9900'
       )
     })
 
@@ -405,7 +411,7 @@ describe('handlePriceMessage', () => {
       })
 
       it('exports STALL_MESSAGE in Portuguese', () => {
-        expect(STALL_MESSAGE).toBe('Um momento, verificando...')
+        expect(STALL_MESSAGE).toBe('Puxando o valor pra você, um momento...')
       })
     })
 
@@ -465,16 +471,16 @@ describe('handlePriceMessage', () => {
         await vi.runAllTimersAsync()
         await promise
 
-        // Assert - stall message was sent first
+        // Assert - instant ack message was sent first
         expect(mockSend).toHaveBeenNthCalledWith(
           1,
           mockSock,
           '123456789@g.us',
-          'Um momento, verificando...'
+          STALL_MESSAGE
         )
       })
 
-      it('logs price_stall_sent event', async () => {
+      it('logs price_trigger_detected event on handler entry', async () => {
         // Arrange
         mockFetchPrice
           .mockResolvedValueOnce({ ok: false, error: 'Binance timeout' })
@@ -486,13 +492,12 @@ describe('handlePriceMessage', () => {
         await vi.runAllTimersAsync()
         await promise
 
-        // Assert
+        // Assert - instant ack sends first, logging happens at entry
         expect(logger.info).toHaveBeenCalledWith(
-          'Stall message sent',
+          'Price trigger detected',
           expect.objectContaining({
-            event: 'price_stall_sent',
+            event: 'price_trigger_detected',
             groupId: '123456789@g.us',
-            reason: 'Binance timeout',
           })
         )
       })
@@ -513,9 +518,9 @@ describe('handlePriceMessage', () => {
 
         // Assert - logs warning but continues
         expect(logger.warn).toHaveBeenCalledWith(
-          'Failed to send stall message',
+          'Failed to send instant ack message',
           expect.objectContaining({
-            event: 'price_stall_send_failed',
+            event: 'price_ack_send_failed',
           })
         )
 
@@ -596,7 +601,7 @@ describe('handlePriceMessage', () => {
           2,
           mockSock,
           '123456789@g.us',
-          'R$5,82'
+          'R$5,8200'
         )
       })
 
@@ -618,7 +623,7 @@ describe('handlePriceMessage', () => {
           2,
           mockSock,
           '123456789@g.us',
-          'R$5,82'
+          'R$5,8200'
         )
       })
 
@@ -657,13 +662,13 @@ describe('handlePriceMessage', () => {
         await vi.runAllTimersAsync()
         await promise
 
-        // Assert
+        // Assert - verify the recovery log was called (among other logs)
         expect(logger.info).toHaveBeenCalledWith(
           'Recovered after retry',
           expect.objectContaining({
             event: 'price_recovered_after_retry',
             price: 5.82,
-            formattedPrice: 'R$5,82',
+            formattedPrice: 'R$5,8200',
             retryCount: 1,
             groupId: '123456789@g.us',
           })
@@ -682,12 +687,12 @@ describe('handlePriceMessage', () => {
         await vi.runAllTimersAsync()
         await promise
 
-        // Assert - only stall message sent, no price
-        expect(mockSend).toHaveBeenCalledTimes(1) // Only stall
+        // Assert - only instant ack message sent, no price
+        expect(mockSend).toHaveBeenCalledTimes(1) // Only instant ack
         expect(mockSend).toHaveBeenCalledWith(
           mockSock,
           '123456789@g.us',
-          'Um momento, verificando...'
+          STALL_MESSAGE
         )
       })
 
@@ -757,12 +762,12 @@ describe('handlePriceMessage', () => {
         await vi.runAllTimersAsync()
         await promise
 
-        // Assert - exact Portuguese text
+        // Assert - exact Portuguese text from exported constant
         expect(mockSend).toHaveBeenNthCalledWith(
           1,
           expect.anything(),
           expect.anything(),
-          'Um momento, verificando...'
+          STALL_MESSAGE
         )
       })
 
@@ -865,7 +870,7 @@ describe('handlePriceMessage', () => {
     })
 
     describe('Happy Path - No Retry Needed', () => {
-      it('does not send stall or retry when first attempt succeeds', async () => {
+      it('sends instant ack then price when first attempt succeeds', async () => {
         // Arrange - immediate success
         mockFetchPrice.mockResolvedValue({ ok: true, data: 5.82 })
         mockSend.mockResolvedValue({ ok: true, data: undefined })
@@ -873,13 +878,22 @@ describe('handlePriceMessage', () => {
         // Act
         await handlePriceMessage(baseContext)
 
-        // Assert - only one fetch, one send (the price)
+        // Assert - one fetch, two sends (instant ack + price)
         expect(mockFetchPrice).toHaveBeenCalledTimes(1)
-        expect(mockSend).toHaveBeenCalledTimes(1)
-        expect(mockSend).toHaveBeenCalledWith(
+        expect(mockSend).toHaveBeenCalledTimes(2)
+        // First call: instant ack
+        expect(mockSend).toHaveBeenNthCalledWith(
+          1,
           mockSock,
           '123456789@g.us',
-          'R$5,82'
+          STALL_MESSAGE
+        )
+        // Second call: price
+        expect(mockSend).toHaveBeenNthCalledWith(
+          2,
+          mockSock,
+          '123456789@g.us',
+          'R$5,8200'
         )
       })
 

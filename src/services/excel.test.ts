@@ -55,9 +55,11 @@ const testLogEntry: LogEntry = {
   timestamp: new Date('2026-01-16T12:00:00Z'),
   groupName: 'Crypto OTC Brasil',
   groupId: '551199999999-1234567890@g.us',
-  clientIdentifier: '+55 11 99999-9999',
-  quoteValue: 5.82,
-  quoteFormatted: 'R$5,82',
+  clientIdentifier: 'João Silva',
+  volumeBrl: 5000,
+  quote: 5.82,
+  acquiredUsdt: 859.11,
+  onchainTx: null,
 }
 
 // =============================================================================
@@ -139,13 +141,13 @@ describe('excel.ts - Story 5.2: Excel Logging Service', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          body: expect.stringContaining('+55 11 99999-9999'),
+          body: expect.stringContaining('João Silva'),
         })
       )
       expect(mockFetch).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          body: expect.stringContaining('R$5,82'),
+          body: expect.stringContaining('5.82'),
         })
       )
     })
@@ -396,18 +398,20 @@ describe('excel.ts - Story 5.2: Excel Logging Service', () => {
     })
 
     it('handles decimal quote values correctly', async () => {
-      const entryWithDecimal = {
+      const entryWithDecimal: LogEntry = {
         ...testLogEntry,
-        quoteValue: 5.824567,
-        quoteFormatted: 'R$5,82',
+        quote: 5.824567,
+        volumeBrl: 10000,
+        acquiredUsdt: 10000 / 5.824567, // ~1716.91
       }
 
       await logPriceQuote(entryWithDecimal)
 
+      // Check that the quote value is passed correctly
       expect(mockFetch).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          body: expect.stringContaining('R$5,82'),
+          body: expect.stringContaining('5.824567'),
         })
       )
     })
