@@ -67,6 +67,9 @@ export const envSchema = z.object({
   CONTROL_GROUP_PATTERN: z.string().min(1).default('CONTROLE'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   HEALTH_PORT: z.string().default('3000').transform(Number).pipe(z.number().int().min(1).max(65535)),
+
+  // Group modes - default mode for newly discovered groups
+  DEFAULT_GROUP_MODE: z.enum(['learning', 'assisted', 'active', 'paused']).default('learning'),
 })
 
 export type EnvConfig = z.infer<typeof envSchema>

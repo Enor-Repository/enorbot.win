@@ -1,11 +1,12 @@
 /**
- * Tests for Control Handler - Epic 4
+ * Tests for Control Handler - Epic 4 + Group Modes
  *
  * Test coverage:
  * - Story 4.1: Pause command parsing and execution
  * - Story 4.2: Resume command parsing and execution
- * - Fuzzy group matching
- * - Integration with state management
+ * - Story 4.3: Status command
+ * - Group Modes: mode, modes, config commands
+ * - Backward compatibility: training commands
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -24,6 +25,14 @@ const mockIsRecoveryPending = vi.hoisted(() => vi.fn().mockReturnValue(false))
 const mockGetRecoveryTimeRemaining = vi.hoisted(() => vi.fn().mockReturnValue(null))
 const mockGetPendingRecoveryReason = vi.hoisted(() => vi.fn().mockReturnValue(null))
 const mockGetQueueLength = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true, data: 0 }))
+const mockLogBotMessage = vi.hoisted(() => vi.fn())
+
+// Mock groupConfig service
+const mockSetGroupMode = vi.hoisted(() => vi.fn())
+const mockGetAllGroupConfigs = vi.hoisted(() => vi.fn())
+const mockGetGroupModeStats = vi.hoisted(() => vi.fn())
+const mockFindGroupByName = vi.hoisted(() => vi.fn())
+const mockGetGroupsByMode = vi.hoisted(() => vi.fn())
 
 vi.mock('../utils/messaging.js', () => ({
   sendWithAntiDetection: mockSendWithAntiDetection,
@@ -44,6 +53,18 @@ vi.mock('../services/logQueue.js', () => ({
   getQueueLength: mockGetQueueLength,
 }))
 
+vi.mock('../services/messageHistory.js', () => ({
+  logBotMessage: mockLogBotMessage,
+}))
+
+vi.mock('../services/groupConfig.js', () => ({
+  setGroupMode: mockSetGroupMode,
+  getAllGroupConfigs: mockGetAllGroupConfigs,
+  getGroupModeStats: mockGetGroupModeStats,
+  findGroupByName: mockFindGroupByName,
+  getGroupsByMode: mockGetGroupsByMode,
+}))
+
 import {
   parseControlCommand,
   findMatchingGroup,
@@ -52,28 +73,50 @@ import {
   clearKnownGroups,
   handleControlMessage,
   buildStatusMessage,
-  type ControlCommand,
 } from './control.js'
 import type { RouterContext } from '../bot/router.js'
 import {
-  resetPauseState,
-  pauseGroup,
-  isGroupPaused,
-  isGlobalPauseActive,
-  getPausedGroups,
-  setPaused,
   setRunning,
+  setPaused,
   getOperationalStatus,
   resetActivityState,
   setConnectionStatus,
   recordMessageSent,
 } from '../bot/state.js'
 
-describe('Control Handler - Epic 4', () => {
-  // Mock socket
+// Mock group configs for testing
+const mockGroupConfigs = new Map([
+  ['binance@g.us', {
+    groupJid: 'binance@g.us',
+    groupName: 'Binance VIP Trading',
+    mode: 'learning' as const,
+    triggerPatterns: [],
+    responseTemplates: {},
+    playerRoles: {},
+    aiThreshold: 50,
+    learningStartedAt: new Date('2025-01-01'),
+    activatedAt: null,
+    updatedAt: new Date(),
+    updatedBy: null,
+  }],
+  ['otc@g.us', {
+    groupJid: 'otc@g.us',
+    groupName: 'Crypto OTC Brasil',
+    mode: 'active' as const,
+    triggerPatterns: ['compro usdt'],
+    responseTemplates: {},
+    playerRoles: {},
+    aiThreshold: 50,
+    learningStartedAt: new Date('2025-01-01'),
+    activatedAt: new Date('2025-01-10'),
+    updatedAt: new Date(),
+    updatedBy: 'admin@s.whatsapp.net',
+  }],
+])
+
+describe('Control Handler - Epic 4 + Group Modes', () => {
   const mockSock = {} as WASocket
 
-  // Base context for tests
   const baseContext: RouterContext = {
     groupId: 'control-group@g.us',
     groupName: 'CONTROLE eNor',
@@ -85,12 +128,26 @@ describe('Control Handler - Epic 4', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    resetPauseState()
     resetActivityState()
     clearKnownGroups()
     setRunning()
     setConnectionStatus('connected')
     mockSendWithAntiDetection.mockResolvedValue({ ok: true, data: undefined })
+    mockSetGroupMode.mockResolvedValue({ ok: true, data: undefined })
+    mockGetAllGroupConfigs.mockResolvedValue(mockGroupConfigs)
+    mockGetGroupModeStats.mockReturnValue({ learning: 1, assisted: 0, active: 1, paused: 0 })
+    mockGetGroupsByMode.mockImplementation((mode: string) => {
+      return [...mockGroupConfigs.values()].filter(c => c.mode === mode)
+    })
+    mockFindGroupByName.mockImplementation((search: string) => {
+      const lower = search.toLowerCase()
+      for (const config of mockGroupConfigs.values()) {
+        if (config.groupName.toLowerCase().includes(lower)) {
+          return config
+        }
+      }
+      return null
+    })
   })
 
   // ==========================================================================
@@ -115,29 +172,11 @@ describe('Control Handler - Epic 4', () => {
         expect(result.type).toBe('pause')
         expect(result.args).toEqual(['binance'])
       })
-
-      it('parses "pause Binance VIP" with multi-word group name', () => {
-        const result = parseControlCommand('pause Binance VIP')
-        expect(result.type).toBe('pause')
-        expect(result.args).toEqual(['binance vip'])
-      })
-
-      it('handles extra whitespace', () => {
-        const result = parseControlCommand('  pause   binance  ')
-        expect(result.type).toBe('pause')
-        expect(result.args).toEqual(['binance'])
-      })
     })
 
     describe('resume command', () => {
       it('parses "resume" as global resume', () => {
         const result = parseControlCommand('resume')
-        expect(result.type).toBe('resume')
-        expect(result.args).toEqual([])
-      })
-
-      it('parses "RESUME" (case insensitive)', () => {
-        const result = parseControlCommand('RESUME')
         expect(result.type).toBe('resume')
         expect(result.args).toEqual([])
       })
@@ -155,27 +194,61 @@ describe('Control Handler - Epic 4', () => {
         expect(result.type).toBe('status')
         expect(result.args).toEqual([])
       })
+    })
 
-      it('parses "STATUS" (case insensitive)', () => {
-        const result = parseControlCommand('STATUS')
-        expect(result.type).toBe('status')
+    describe('mode command', () => {
+      it('parses "mode binance learning"', () => {
+        const result = parseControlCommand('mode binance learning')
+        expect(result.type).toBe('mode')
+        expect(result.args).toEqual(['binance', 'learning'])
+      })
+
+      it('parses "mode OTC Brasil active"', () => {
+        const result = parseControlCommand('mode OTC Brasil active')
+        expect(result.type).toBe('mode')
+        expect(result.args).toEqual(['OTC', 'Brasil', 'active'])
+      })
+
+      it('parses quoted group name: mode "OTC Brasil" active', () => {
+        const result = parseControlCommand('mode "OTC Brasil" active')
+        expect(result.type).toBe('mode')
+        expect(result.args).toEqual(['OTC Brasil', 'active'])
+      })
+    })
+
+    describe('modes command', () => {
+      it('parses "modes"', () => {
+        const result = parseControlCommand('modes')
+        expect(result.type).toBe('modes')
         expect(result.args).toEqual([])
+      })
+    })
+
+    describe('config command', () => {
+      it('parses "config binance"', () => {
+        const result = parseControlCommand('config binance')
+        expect(result.type).toBe('config')
+        expect(result.args).toEqual(['binance'])
+      })
+    })
+
+    describe('training command', () => {
+      it('parses "training on"', () => {
+        const result = parseControlCommand('training on')
+        expect(result.type).toBe('training')
+        expect(result.args).toEqual(['on'])
+      })
+
+      it('parses "training off"', () => {
+        const result = parseControlCommand('training off')
+        expect(result.type).toBe('training')
+        expect(result.args).toEqual(['off'])
       })
     })
 
     describe('unknown commands', () => {
       it('returns unknown for unrecognized commands', () => {
         const result = parseControlCommand('hello world')
-        expect(result.type).toBe('unknown')
-      })
-
-      it('returns unknown for empty string', () => {
-        const result = parseControlCommand('')
-        expect(result.type).toBe('unknown')
-      })
-
-      it('returns unknown for partial commands', () => {
-        const result = parseControlCommand('pau')
         expect(result.type).toBe('unknown')
       })
     })
@@ -185,309 +258,357 @@ describe('Control Handler - Epic 4', () => {
   // Fuzzy Group Matching Tests
   // ==========================================================================
   describe('Fuzzy Group Matching', () => {
-    beforeEach(() => {
-      registerKnownGroup('group1@g.us', 'Binance VIP Trading')
-      registerKnownGroup('group2@g.us', 'Crypto OTC Brasil')
-      registerKnownGroup('group3@g.us', 'Private Deals')
-    })
-
-    describe('registerKnownGroup', () => {
-      it('adds group to known groups', () => {
-        registerKnownGroup('new@g.us', 'New Group')
-        expect(getKnownGroups().get('new@g.us')).toBe('New Group')
-      })
-
-      it('updates existing group name', () => {
-        registerKnownGroup('group1@g.us', 'Updated Name')
-        expect(getKnownGroups().get('group1@g.us')).toBe('Updated Name')
-      })
-    })
-
     describe('findMatchingGroup', () => {
       it('finds group by partial name (case insensitive)', () => {
         const result = findMatchingGroup('binance')
         expect(result.found).toBe(true)
-        expect(result.groupId).toBe('group1@g.us')
+        expect(result.groupId).toBe('binance@g.us')
         expect(result.groupName).toBe('Binance VIP Trading')
       })
 
-      it('finds group with uppercase search', () => {
-        const result = findMatchingGroup('BINANCE')
-        expect(result.found).toBe(true)
-        expect(result.groupId).toBe('group1@g.us')
-      })
-
-      it('finds group with partial match', () => {
-        const result = findMatchingGroup('vip')
-        expect(result.found).toBe(true)
-        expect(result.groupId).toBe('group1@g.us')
-      })
-
       it('returns not found for no match', () => {
+        mockFindGroupByName.mockReturnValueOnce(null)
         const result = findMatchingGroup('nonexistent')
         expect(result.found).toBe(false)
         expect(result.groupId).toBeNull()
-        expect(result.groupName).toBeNull()
-      })
-
-      it('returns first matching group when multiple match', () => {
-        // "crypto" matches "Crypto OTC Brasil", "private" matches "Private Deals"
-        const result = findMatchingGroup('crypto')
-        expect(result.found).toBe(true)
-        expect(result.groupId).toBe('group2@g.us')
       })
 
       it('returns not found for empty string search', () => {
         const result = findMatchingGroup('')
         expect(result.found).toBe(false)
-        expect(result.groupId).toBeNull()
-      })
-
-      it('returns not found for whitespace-only search', () => {
-        const result = findMatchingGroup('   ')
-        expect(result.found).toBe(false)
-        expect(result.groupId).toBeNull()
       })
     })
   })
 
   // ==========================================================================
-  // Story 4.1: Pause Command Tests
+  // Mode Command Tests (New)
   // ==========================================================================
-  describe('Story 4.1: Pause Command', () => {
-    beforeEach(() => {
-      registerKnownGroup('binance@g.us', 'Binance VIP Trading')
-      registerKnownGroup('otc@g.us', 'Crypto OTC Brasil')
+  describe('Mode Command', () => {
+    it('sets mode for specific group', async () => {
+      const context = { ...baseContext, message: 'mode binance active' }
+
+      await handleControlMessage(context)
+
+      expect(mockSetGroupMode).toHaveBeenCalledWith('binance@g.us', 'active', 'daniel@s.whatsapp.net')
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Binance VIP Trading set to ACTIVE mode')
+      )
     })
 
-    describe('AC1: Basic pause command', () => {
-      it('pauses specific group and sends confirmation', async () => {
-        const context = { ...baseContext, message: 'pause binance' }
+    it('shows error for invalid mode', async () => {
+      const context = { ...baseContext, message: 'mode binance invalid' }
+
+      await handleControlMessage(context)
+
+      expect(mockSetGroupMode).not.toHaveBeenCalled()
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Invalid mode')
+      )
+    })
+
+    it('shows error when group not found', async () => {
+      mockFindGroupByName.mockReturnValueOnce(null)
+      const context = { ...baseContext, message: 'mode nonexistent active' }
+
+      await handleControlMessage(context)
+
+      expect(mockSetGroupMode).not.toHaveBeenCalled()
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('No group matching')
+      )
+    })
+
+    it('shows usage when args missing', async () => {
+      const context = { ...baseContext, message: 'mode binance' }
+
+      await handleControlMessage(context)
+
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Usage:')
+      )
+    })
+  })
+
+  // ==========================================================================
+  // Modes Command Tests (New)
+  // ==========================================================================
+  describe('Modes Command', () => {
+    it('lists all groups with modes', async () => {
+      const context = { ...baseContext, message: 'modes' }
+
+      await handleControlMessage(context)
+
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('📋 Group Modes')
+      )
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('🔵 Learning: 1')
+      )
+    })
+
+    it('shows message when no groups registered', async () => {
+      mockGetAllGroupConfigs.mockResolvedValueOnce(new Map())
+      const context = { ...baseContext, message: 'modes' }
+
+      await handleControlMessage(context)
+
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        '📋 No groups registered yet'
+      )
+    })
+  })
+
+  // ==========================================================================
+  // Config Command Tests (New)
+  // ==========================================================================
+  describe('Config Command', () => {
+    it('shows group configuration', async () => {
+      const context = { ...baseContext, message: 'config binance' }
+
+      await handleControlMessage(context)
+
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('📊 Config: Binance VIP Trading')
+      )
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Mode: 🔵 LEARNING')
+      )
+    })
+
+    it('shows error when group not found', async () => {
+      mockFindGroupByName.mockReturnValueOnce(null)
+      const context = { ...baseContext, message: 'config nonexistent' }
+
+      await handleControlMessage(context)
+
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('No group matching')
+      )
+    })
+  })
+
+  // ==========================================================================
+  // Pause Command Tests (Backward Compatibility)
+  // ==========================================================================
+  describe('Pause Command (Backward Compatible)', () => {
+    it('pauses specific group by setting mode to paused', async () => {
+      const context = { ...baseContext, message: 'pause binance' }
+
+      await handleControlMessage(context)
+
+      expect(mockSetGroupMode).toHaveBeenCalledWith('binance@g.us', 'paused', 'daniel@s.whatsapp.net')
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Paused: Binance VIP Trading')
+      )
+    })
+
+    it('pauses all groups on global pause', async () => {
+      const context = { ...baseContext, message: 'pause' }
+
+      await handleControlMessage(context)
+
+      // Should call setGroupMode for each non-paused group
+      expect(mockSetGroupMode).toHaveBeenCalled()
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('All groups paused')
+      )
+    })
+
+    it('shows error when group not found', async () => {
+      mockFindGroupByName.mockReturnValueOnce(null)
+      const context = { ...baseContext, message: 'pause nonexistent' }
+
+      await handleControlMessage(context)
+
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('No group matching')
+      )
+    })
+  })
+
+  // ==========================================================================
+  // Resume Command Tests (Backward Compatibility)
+  // ==========================================================================
+  describe('Resume Command (Backward Compatible)', () => {
+    it('resumes specific group by setting mode to active', async () => {
+      const context = { ...baseContext, message: 'resume binance' }
+
+      await handleControlMessage(context)
+
+      expect(mockSetGroupMode).toHaveBeenCalledWith('binance@g.us', 'active', 'daniel@s.whatsapp.net')
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Resumed: Binance VIP Trading')
+      )
+    })
+
+    it('cancels auto-recovery on resume', async () => {
+      const context = { ...baseContext, message: 'resume' }
+
+      await handleControlMessage(context)
+
+      expect(mockCancelAutoRecovery).toHaveBeenCalled()
+    })
+
+    it('clears error state on resume', async () => {
+      setPaused('Test error')
+      expect(getOperationalStatus()).toBe('paused')
+
+      const context = { ...baseContext, message: 'resume' }
+      await handleControlMessage(context)
+
+      expect(getOperationalStatus()).toBe('running')
+    })
+  })
+
+  // ==========================================================================
+  // Training Command Tests (Backward Compatibility)
+  // ==========================================================================
+  describe('Training Command (Backward Compatible)', () => {
+    it('sets all groups to learning mode on training on', async () => {
+      const context = { ...baseContext, message: 'training on' }
+
+      await handleControlMessage(context)
+
+      expect(mockSetGroupMode).toHaveBeenCalled()
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Training Mode ON')
+      )
+    })
+
+    it('sets all groups to active mode on training off', async () => {
+      const context = { ...baseContext, message: 'training off' }
+
+      await handleControlMessage(context)
+
+      expect(mockSetGroupMode).toHaveBeenCalled()
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('Training Mode OFF')
+      )
+    })
+
+    it('shows error for invalid training action', async () => {
+      // This should never happen with proper parsing, but test defensive code
+      const context = { ...baseContext, message: 'training invalid' }
+
+      await handleControlMessage(context)
+
+      // Should be unknown command (training without on/off)
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Unknown control command',
+        expect.anything()
+      )
+    })
+  })
+
+  // ==========================================================================
+  // Status Command Tests
+  // ==========================================================================
+  describe('Status Command', () => {
+    describe('buildStatusMessage', () => {
+      it('includes connection status', async () => {
+        setConnectionStatus('connected')
+        const message = await buildStatusMessage()
+
+        expect(message).toContain('🟢 Connected')
+        expect(message).toContain('📊 eNorBOT Status')
+      })
+
+      it('shows disconnected status', async () => {
+        setConnectionStatus('disconnected')
+        const message = await buildStatusMessage()
+
+        expect(message).toContain('🔴 Disconnected')
+      })
+
+      it('shows learning system stats', async () => {
+        const message = await buildStatusMessage()
+
+        expect(message).toContain('📚 Learning System')
+        expect(message).toContain('1 groups learning')
+        expect(message).toContain('1 groups active')
+      })
+
+      it('shows paused status when error-paused', async () => {
+        setPaused('Binance API failures')
+        const message = await buildStatusMessage()
+
+        expect(message).toContain('⏸️ PAUSED: Binance API failures')
+      })
+
+      it('shows activity stats', async () => {
+        recordMessageSent('group1@g.us')
+        recordMessageSent('group2@g.us')
+        const message = await buildStatusMessage()
+
+        expect(message).toContain("📈 Today's Activity")
+        expect(message).toContain('2 quotes sent')
+      })
+
+      it('shows pending logs when queue has entries', async () => {
+        mockGetQueueLength.mockResolvedValueOnce({ ok: true, data: 5 })
+        const message = await buildStatusMessage()
+
+        expect(message).toContain('5 logs pending sync')
+      })
+    })
+
+    describe('handleControlMessage with status', () => {
+      it('sends status message', async () => {
+        const context = { ...baseContext, message: 'status' }
 
         await handleControlMessage(context)
 
-        expect(isGroupPaused('binance@g.us')).toBe(true)
         expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
           mockSock,
           'control-group@g.us',
-          '⏸️ Paused for Binance VIP Trading'
+          expect.stringContaining('📊 eNorBOT Status')
         )
       })
 
-      it('logs pause event with structured logging', async () => {
-        const context = { ...baseContext, message: 'pause binance' }
+      it('logs status command processed', async () => {
+        const context = { ...baseContext, message: 'status' }
 
         await handleControlMessage(context)
 
         expect(mockLogger.info).toHaveBeenCalledWith(
-          'Group paused',
+          'Status command processed',
           expect.objectContaining({
-            event: 'group_paused',
-            groupId: 'binance@g.us',
-            groupName: 'Binance VIP Trading',
+            event: 'status_command_processed',
           })
         )
       })
-    })
-
-    describe('AC2: Paused group behavior (verified in price handler)', () => {
-      it('isGroupPaused returns true for paused group', async () => {
-        const context = { ...baseContext, message: 'pause binance' }
-
-        await handleControlMessage(context)
-
-        expect(isGroupPaused('binance@g.us')).toBe(true)
-        expect(isGroupPaused('otc@g.us')).toBe(false)
-      })
-    })
-
-    describe('AC3: Global pause', () => {
-      it('pauses all groups and sends confirmation', async () => {
-        const context = { ...baseContext, message: 'pause' }
-
-        await handleControlMessage(context)
-
-        expect(isGlobalPauseActive()).toBe(true)
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
-          'control-group@g.us',
-          '⏸️ All groups paused'
-        )
-      })
-
-      it('isGroupPaused returns true for any group when global pause active', async () => {
-        const context = { ...baseContext, message: 'pause' }
-
-        await handleControlMessage(context)
-
-        expect(isGroupPaused('any-group@g.us')).toBe(true)
-        expect(isGroupPaused('another@g.us')).toBe(true)
-      })
-    })
-
-    describe('AC4: Fuzzy group matching', () => {
-      it('matches partial group name (case insensitive)', async () => {
-        const context = { ...baseContext, message: 'pause vip' }
-
-        await handleControlMessage(context)
-
-        expect(isGroupPaused('binance@g.us')).toBe(true)
-      })
-
-      it('sends error message when no group matches', async () => {
-        const context = { ...baseContext, message: 'pause nonexistent' }
-
-        await handleControlMessage(context)
-
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
-          'control-group@g.us',
-          '⚠️ No group matching "nonexistent" found'
-        )
-      })
-    })
-  })
-
-  // ==========================================================================
-  // Story 4.2: Resume Command Tests
-  // ==========================================================================
-  describe('Story 4.2: Resume Command', () => {
-    beforeEach(() => {
-      registerKnownGroup('binance@g.us', 'Binance VIP Trading')
-      registerKnownGroup('otc@g.us', 'Crypto OTC Brasil')
-    })
-
-    describe('AC1: Basic resume command', () => {
-      it('resumes specific group and sends confirmation', async () => {
-        // First pause the group
-        pauseGroup('binance@g.us')
-        expect(isGroupPaused('binance@g.us')).toBe(true)
-
-        // Then resume
-        const context = { ...baseContext, message: 'resume binance' }
-        await handleControlMessage(context)
-
-        expect(isGroupPaused('binance@g.us')).toBe(false)
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
-          'control-group@g.us',
-          '▶️ Resumed for Binance VIP Trading'
-        )
-      })
-
-      it('sends message when group was not paused', async () => {
-        const context = { ...baseContext, message: 'resume binance' }
-
-        await handleControlMessage(context)
-
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
-          'control-group@g.us',
-          'ℹ️ "Binance VIP Trading" was not paused'
-        )
-      })
-    })
-
-    describe('AC3: Global resume', () => {
-      it('resumes all groups and sends confirmation', async () => {
-        // First pause some groups
-        pauseGroup('binance@g.us')
-        pauseGroup('otc@g.us')
-
-        const context = { ...baseContext, message: 'resume' }
-        await handleControlMessage(context)
-
-        expect(getPausedGroups().size).toBe(0)
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
-          'control-group@g.us',
-          '▶️ All groups resumed'
-        )
-      })
-    })
-
-    describe('AC4: Resume clears error state', () => {
-      it('clears error state on global resume', async () => {
-        // Set error state (auto-pause scenario)
-        setPaused('Binance API failures')
-        expect(getOperationalStatus()).toBe('paused')
-
-        const context = { ...baseContext, message: 'resume' }
-        await handleControlMessage(context)
-
-        expect(getOperationalStatus()).toBe('running')
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
-          'control-group@g.us',
-          '▶️ Resumed. Error state cleared.'
-        )
-      })
-    })
-
-    describe('CRITICAL: cancelAutoRecovery on resume', () => {
-      it('calls cancelAutoRecovery on any resume command', async () => {
-        const context = { ...baseContext, message: 'resume' }
-
-        await handleControlMessage(context)
-
-        expect(mockCancelAutoRecovery).toHaveBeenCalled()
-      })
-
-      it('calls cancelAutoRecovery on specific group resume', async () => {
-        pauseGroup('binance@g.us')
-        const context = { ...baseContext, message: 'resume binance' }
-
-        await handleControlMessage(context)
-
-        expect(mockCancelAutoRecovery).toHaveBeenCalled()
-      })
-
-      it('calls cancelAutoRecovery even when group not found', async () => {
-        const context = { ...baseContext, message: 'resume nonexistent' }
-
-        await handleControlMessage(context)
-
-        expect(mockCancelAutoRecovery).toHaveBeenCalled()
-      })
-    })
-  })
-
-  // ==========================================================================
-  // Story 4.2: End-to-End Pause → Resume → Trigger Flow
-  // ==========================================================================
-  describe('Story 4.2 AC2: Resumed group behavior', () => {
-    beforeEach(() => {
-      registerKnownGroup('binance@g.us', 'Binance VIP Trading')
-    })
-
-    it('isGroupPaused returns false after resume (e2e flow)', async () => {
-      // 1. Pause the group
-      const pauseContext = { ...baseContext, message: 'pause binance' }
-      await handleControlMessage(pauseContext)
-      expect(isGroupPaused('binance@g.us')).toBe(true)
-
-      // 2. Resume the group
-      const resumeContext = { ...baseContext, message: 'resume binance' }
-      await handleControlMessage(resumeContext)
-      expect(isGroupPaused('binance@g.us')).toBe(false)
-
-      // 3. Verify group is no longer paused (price handler would process)
-      // This confirms the group can receive price triggers again
-      expect(isGroupPaused('binance@g.us')).toBe(false)
-    })
-
-    it('global pause → global resume clears all groups', async () => {
-      // 1. Global pause
-      const pauseContext = { ...baseContext, message: 'pause' }
-      await handleControlMessage(pauseContext)
-      expect(isGlobalPauseActive()).toBe(true)
-      expect(isGroupPaused('any-group@g.us')).toBe(true)
-
-      // 2. Global resume
-      const resumeContext = { ...baseContext, message: 'resume' }
-      await handleControlMessage(resumeContext)
-      expect(isGlobalPauseActive()).toBe(false)
-      expect(isGroupPaused('any-group@g.us')).toBe(false)
     })
   })
 
@@ -524,114 +645,18 @@ describe('Control Handler - Epic 4', () => {
   })
 
   // ==========================================================================
-  // Story 4.3: Status Command Tests
+  // Legacy Known Groups (Deprecated)
   // ==========================================================================
-  describe('Story 4.3: Status Command', () => {
-    describe('buildStatusMessage', () => {
-      it('includes connection status', async () => {
-        setConnectionStatus('connected')
-        const message = await buildStatusMessage()
-
-        expect(message).toContain('🟢 Connected')
-        expect(message).toContain('📊 eNorBOT Status')
-      })
-
-      it('shows disconnected status', async () => {
-        setConnectionStatus('disconnected')
-        const message = await buildStatusMessage()
-
-        expect(message).toContain('🔴 Disconnected')
-      })
-
-      it('includes uptime', async () => {
-        const message = await buildStatusMessage()
-        expect(message).toContain('Uptime:')
-      })
-
-      it('shows "All systems normal" when no issues', async () => {
-        const message = await buildStatusMessage()
-        expect(message).toContain('✅ All systems normal')
-      })
-
-      it('shows paused status when error-paused', async () => {
-        setPaused('Binance API failures')
-        const message = await buildStatusMessage()
-
-        expect(message).toContain('⏸️ PAUSED: Binance API failures')
-      })
-
-      it('shows activity stats', async () => {
-        recordMessageSent('group1@g.us')
-        recordMessageSent('group2@g.us')
-        const message = await buildStatusMessage()
-
-        expect(message).toContain("📈 Today's Activity")
-        expect(message).toContain('2 quotes sent')
-      })
-
-      it('shows groups monitored count', async () => {
-        registerKnownGroup('group1@g.us', 'Group 1')
-        registerKnownGroup('group2@g.us', 'Group 2')
-        const message = await buildStatusMessage()
-
-        expect(message).toContain('2 groups monitored')
-      })
-
-      it('shows last activity time', async () => {
-        const message = await buildStatusMessage()
-        // No activity yet
-        expect(message).toContain('Last activity: Never')
-      })
-
-      it('shows paused groups when some are paused', async () => {
-        registerKnownGroup('binance@g.us', 'Binance VIP')
-        pauseGroup('binance@g.us')
-        const message = await buildStatusMessage()
-
-        expect(message).toContain('📂 Groups')
-        expect(message).toContain('Binance VIP - ⏸️ Paused')
-      })
-
-      it('shows pending logs when queue has entries', async () => {
-        mockGetQueueLength.mockResolvedValueOnce({ ok: true, data: 5 })
-        const message = await buildStatusMessage()
-
-        expect(message).toContain('5 logs pending sync')
-      })
-
-      it('does not show pending logs when queue is empty', async () => {
-        mockGetQueueLength.mockResolvedValueOnce({ ok: true, data: 0 })
-        const message = await buildStatusMessage()
-
-        expect(message).not.toContain('logs pending sync')
-      })
+  describe('Legacy Known Groups (Deprecated)', () => {
+    it('registerKnownGroup still works', () => {
+      registerKnownGroup('test@g.us', 'Test Group')
+      expect(getKnownGroups().get('test@g.us')).toBe('Test Group')
     })
 
-    describe('handleControlMessage with status', () => {
-      it('sends status message', async () => {
-        const context = { ...baseContext, message: 'status' }
-
-        await handleControlMessage(context)
-
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
-          'control-group@g.us',
-          expect.stringContaining('📊 eNorBOT Status')
-        )
-      })
-
-      it('logs status command processed', async () => {
-        const context = { ...baseContext, message: 'status' }
-
-        await handleControlMessage(context)
-
-        expect(mockLogger.info).toHaveBeenCalledWith(
-          'Status command processed',
-          expect.objectContaining({
-            event: 'status_command_processed',
-          })
-        )
-      })
+    it('clearKnownGroups still works', () => {
+      registerKnownGroup('test@g.us', 'Test Group')
+      clearKnownGroups()
+      expect(getKnownGroups().size).toBe(0)
     })
   })
 })

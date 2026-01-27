@@ -1,5 +1,15 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { WASocket } from '@whiskeysockets/baileys'
+
+// Mock groupConfig service before importing router
+const mockGetGroupModeSync = vi.hoisted(() => vi.fn())
+const mockGetGroupConfigSync = vi.hoisted(() => vi.fn())
+
+vi.mock('../services/groupConfig.js', () => ({
+  getGroupModeSync: mockGetGroupModeSync,
+  getGroupConfigSync: mockGetGroupConfigSync,
+}))
+
 import {
   routeMessage,
   isControlGroupMessage,
@@ -8,7 +18,6 @@ import {
   type BaileysMessage,
 } from './router.js'
 import { RECEIPT_MIME_TYPES } from '../types/handlers.js'
-import { setTrainingMode, resetTrainingMode } from './state.js'
 
 describe('routeMessage', () => {
   // Mock socket for tests
@@ -22,6 +31,25 @@ describe('routeMessage', () => {
     isControlGroup: false,
     sock: mockSock,
   }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // Default: groups are in 'active' mode
+    mockGetGroupModeSync.mockReturnValue('active')
+    mockGetGroupConfigSync.mockReturnValue({
+      groupJid: '123456789@g.us',
+      groupName: 'Test Group',
+      mode: 'active',
+      triggerPatterns: [],
+      responseTemplates: {},
+      playerRoles: {},
+      aiThreshold: 50,
+      learningStartedAt: new Date(),
+      activatedAt: new Date(),
+      updatedAt: new Date(),
+      updatedBy: null,
+    })
+  })
 
   // AC1, AC2: Trigger messages routed to PRICE_HANDLER
   describe('trigger detection routing', () => {
@@ -205,6 +233,24 @@ describe('routeMessage receipt routing', () => {
     sock: mockSock,
   }
 
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetGroupModeSync.mockReturnValue('active')
+    mockGetGroupConfigSync.mockReturnValue({
+      groupJid: '123456789@g.us',
+      groupName: 'Test Group',
+      mode: 'active',
+      triggerPatterns: [],
+      responseTemplates: {},
+      playerRoles: {},
+      aiThreshold: 50,
+      learningStartedAt: new Date(),
+      activatedAt: new Date(),
+      updatedAt: new Date(),
+      updatedBy: null,
+    })
+  })
+
   // AC1: PDF routing
   describe('PDF routing (AC1, AC3)', () => {
     it('routes PDF document to RECEIPT_HANDLER', () => {
@@ -327,8 +373,8 @@ describe('routeMessage receipt routing', () => {
   })
 })
 
-// Training Mode Routing Tests
-describe('routeMessage training mode', () => {
+// Per-Group Mode Routing Tests (replaces Training Mode)
+describe('routeMessage per-group modes', () => {
   const mockSock = {} as WASocket
 
   const baseContext: RouterContext = {
@@ -341,12 +387,45 @@ describe('routeMessage training mode', () => {
   }
 
   beforeEach(() => {
-    resetTrainingMode()
+    vi.clearAllMocks()
   })
 
-  describe('OBSERVE_ONLY routing when training mode enabled', () => {
-    it('routes price trigger to OBSERVE_ONLY when training mode is on', () => {
-      setTrainingMode(true)
+  describe('PAUSED mode - completely ignored', () => {
+    beforeEach(() => {
+      mockGetGroupModeSync.mockReturnValue('paused')
+    })
+
+    it('routes price trigger to IGNORE when group is paused', () => {
+      const context = { ...baseContext, message: 'preço' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('IGNORE')
+    })
+
+    it('routes non-trigger to IGNORE when group is paused', () => {
+      const context = { ...baseContext, message: 'hello' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('IGNORE')
+    })
+
+    it('routes receipt to IGNORE when group is paused', () => {
+      const context = { ...baseContext }
+      const baileysMessage: BaileysMessage = {
+        documentMessage: { mimetype: 'application/pdf' },
+      }
+      const result = routeMessage(context, baileysMessage)
+
+      expect(result.destination).toBe('IGNORE')
+    })
+  })
+
+  describe('LEARNING mode - observe only', () => {
+    beforeEach(() => {
+      mockGetGroupModeSync.mockReturnValue('learning')
+    })
+
+    it('routes price trigger to OBSERVE_ONLY when group is learning', () => {
       const context = { ...baseContext, message: 'preço' }
       const result = routeMessage(context)
 
@@ -354,8 +433,7 @@ describe('routeMessage training mode', () => {
       expect(result.context.hasTrigger).toBe(true)
     })
 
-    it('routes non-trigger message to OBSERVE_ONLY when training mode is on', () => {
-      setTrainingMode(true)
+    it('routes non-trigger message to OBSERVE_ONLY when group is learning', () => {
       const context = { ...baseContext, message: 'hello world' }
       const result = routeMessage(context)
 
@@ -363,8 +441,7 @@ describe('routeMessage training mode', () => {
       expect(result.context.hasTrigger).toBe(false)
     })
 
-    it('routes receipt to OBSERVE_ONLY when training mode is on', () => {
-      setTrainingMode(true)
+    it('routes receipt to OBSERVE_ONLY when group is learning', () => {
       const context = { ...baseContext }
       const baileysMessage: BaileysMessage = {
         documentMessage: { mimetype: 'application/pdf' },
@@ -376,56 +453,76 @@ describe('routeMessage training mode', () => {
     })
   })
 
-  describe('Control group works normally in training mode', () => {
-    it('routes control group price trigger to PRICE_HANDLER in training mode', () => {
-      setTrainingMode(true)
-      const context = { ...baseContext, message: 'preço', isControlGroup: true }
-      const result = routeMessage(context)
-
-      expect(result.destination).toBe('PRICE_HANDLER')
-      expect(result.context.hasTrigger).toBe(true)
+  describe('ASSISTED mode - observe only (future: suggestions)', () => {
+    beforeEach(() => {
+      mockGetGroupModeSync.mockReturnValue('assisted')
     })
 
-    it('routes control group non-trigger to CONTROL_HANDLER in training mode', () => {
-      setTrainingMode(true)
-      const context = { ...baseContext, message: 'status', isControlGroup: true }
+    it('routes price trigger to OBSERVE_ONLY when group is assisted', () => {
+      const context = { ...baseContext, message: 'preço' }
       const result = routeMessage(context)
 
-      expect(result.destination).toBe('CONTROL_HANDLER')
+      expect(result.destination).toBe('OBSERVE_ONLY')
     })
 
-    it('routes control group receipt to CONTROL_HANDLER in training mode (not RECEIPT_HANDLER)', () => {
-      setTrainingMode(true)
-      const context = { ...baseContext, isControlGroup: true }
+    it('routes receipt to OBSERVE_ONLY when group is assisted', () => {
+      const context = { ...baseContext }
       const baileysMessage: BaileysMessage = {
         documentMessage: { mimetype: 'application/pdf' },
       }
       const result = routeMessage(context, baileysMessage)
 
-      expect(result.destination).toBe('CONTROL_HANDLER')
-      expect(result.context.isReceipt).toBe(false) // Control group doesn't get receipt detection
+      expect(result.destination).toBe('OBSERVE_ONLY')
     })
   })
 
-  describe('Normal routing when training mode disabled', () => {
-    it('routes price trigger to PRICE_HANDLER when training mode is off', () => {
-      setTrainingMode(false)
+  describe('ACTIVE mode - normal routing with group-specific triggers', () => {
+    beforeEach(() => {
+      mockGetGroupModeSync.mockReturnValue('active')
+      mockGetGroupConfigSync.mockReturnValue({
+        groupJid: '123456789@g.us',
+        groupName: 'Test Group',
+        mode: 'active',
+        triggerPatterns: ['compro usdt', 'vendo btc'],
+        responseTemplates: {},
+        playerRoles: {},
+        aiThreshold: 50,
+        learningStartedAt: new Date(),
+        activatedAt: new Date(),
+        updatedAt: new Date(),
+        updatedBy: null,
+      })
+    })
+
+    it('routes global price trigger to PRICE_HANDLER', () => {
       const context = { ...baseContext, message: 'preço' }
       const result = routeMessage(context)
 
       expect(result.destination).toBe('PRICE_HANDLER')
     })
 
-    it('routes non-trigger to IGNORE when training mode is off', () => {
-      setTrainingMode(false)
+    it('routes group-specific trigger to PRICE_HANDLER', () => {
+      const context = { ...baseContext, message: 'quero compro usdt agora' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('PRICE_HANDLER')
+    })
+
+    it('routes message with group-specific trigger (case-insensitive) to PRICE_HANDLER', () => {
+      const context = { ...baseContext, message: 'COMPRO USDT' }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('PRICE_HANDLER')
+    })
+
+    it('routes non-trigger to IGNORE in active mode', () => {
       const context = { ...baseContext, message: 'hello' }
       const result = routeMessage(context)
 
       expect(result.destination).toBe('IGNORE')
     })
 
-    it('routes receipt to RECEIPT_HANDLER when training mode is off', () => {
-      setTrainingMode(false)
+    it('routes receipt to RECEIPT_HANDLER in active mode', () => {
       const context = { ...baseContext }
       const baileysMessage: BaileysMessage = {
         documentMessage: { mimetype: 'application/pdf' },
@@ -433,6 +530,60 @@ describe('routeMessage training mode', () => {
       const result = routeMessage(context, baileysMessage)
 
       expect(result.destination).toBe('RECEIPT_HANDLER')
+    })
+  })
+
+  describe('Control group works normally regardless of group mode', () => {
+    it('routes control group price trigger to PRICE_HANDLER even when groups are paused', () => {
+      mockGetGroupModeSync.mockReturnValue('paused')
+      const context = { ...baseContext, message: 'preço', isControlGroup: true }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('PRICE_HANDLER')
+      expect(result.context.hasTrigger).toBe(true)
+    })
+
+    it('routes control group non-trigger to CONTROL_HANDLER even when groups are learning', () => {
+      mockGetGroupModeSync.mockReturnValue('learning')
+      const context = { ...baseContext, message: 'status', isControlGroup: true }
+      const result = routeMessage(context)
+
+      expect(result.destination).toBe('CONTROL_HANDLER')
+    })
+
+    it('routes control group receipt to CONTROL_HANDLER, not RECEIPT_HANDLER', () => {
+      mockGetGroupModeSync.mockReturnValue('active')
+      const context = { ...baseContext, isControlGroup: true }
+      const baileysMessage: BaileysMessage = {
+        documentMessage: { mimetype: 'application/pdf' },
+      }
+      const result = routeMessage(context, baileysMessage)
+
+      expect(result.destination).toBe('CONTROL_HANDLER')
+      expect(result.context.isReceipt).toBe(false)
+    })
+  })
+
+  describe('Group config sync function called correctly', () => {
+    it('calls getGroupModeSync with groupId', () => {
+      mockGetGroupModeSync.mockReturnValue('active')
+      mockGetGroupConfigSync.mockReturnValue(null)
+
+      const context = { ...baseContext, groupId: 'specific-group@g.us', message: 'hello' }
+      routeMessage(context)
+
+      expect(mockGetGroupModeSync).toHaveBeenCalledWith('specific-group@g.us')
+    })
+
+    it('handles null groupConfig gracefully', () => {
+      mockGetGroupModeSync.mockReturnValue('active')
+      mockGetGroupConfigSync.mockReturnValue(null)
+
+      const context = { ...baseContext, message: 'compro usdt' }
+      const result = routeMessage(context)
+
+      // Without group config, only global triggers work
+      expect(result.destination).toBe('IGNORE')
     })
   })
 })

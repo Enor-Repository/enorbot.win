@@ -2,6 +2,7 @@ import { createServer, type Server } from 'http'
 import { validateConfig } from './config.js'
 import { logger } from './utils/logger.js'
 import { initSupabase } from './services/supabase.js'
+import { initGroupConfigs } from './services/groupConfig.js'
 import { checkBackupPermissions } from './services/authBackup.js'
 import { createConnection, getSocket } from './bot/connection.js'
 
@@ -26,6 +27,15 @@ async function main(): Promise<void> {
 
   // Initialize Supabase for session persistence
   initSupabase(config)
+
+  // Initialize group config service for per-group modes
+  const groupConfigResult = await initGroupConfigs(config)
+  if (!groupConfigResult.ok) {
+    logger.warn('Group config initialization failed, using defaults', {
+      event: 'group_config_init_warning',
+      error: groupConfigResult.error,
+    })
+  }
 
   // Story 5.4: Initialize auth state backup directory
   const backupCheck = await checkBackupPermissions()

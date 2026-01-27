@@ -25,17 +25,22 @@ export const PDF_EXTRACTION_TIMEOUT_MS = 5000
 export async function extractPdfText(buffer: Buffer): Promise<Result<string>> {
   const startTime = Date.now()
 
+  // Issue fix: Store timeout ID for cleanup to prevent memory leak
+  let timeoutId: ReturnType<typeof setTimeout> | null = null
+
   try {
-    // Create timeout promise
+    // Create timeout promise with cleanup capability
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('PDF extraction timeout')), PDF_EXTRACTION_TIMEOUT_MS)
+      timeoutId = setTimeout(() => reject(new Error('PDF extraction timeout')), PDF_EXTRACTION_TIMEOUT_MS)
     })
 
     // Race extraction against timeout
     const result = await Promise.race([extractText(buffer), timeoutPromise])
 
     const durationMs = Date.now() - startTime
-    const text = result.text ?? ''
+    // extractText returns string[] (array of text per page), join into single string
+    const textArray = result.text ?? []
+    const text = Array.isArray(textArray) ? textArray.join('\n') : String(textArray)
 
     logger.info('PDF text extracted', {
       event: 'pdf_text_extracted',
@@ -66,5 +71,10 @@ export async function extractPdfText(buffer: Buffer): Promise<Result<string>> {
     })
 
     return err(`PDF extraction failed: ${errorMessage}`)
+  } finally {
+    // Issue fix: Always clear timeout to prevent memory leak
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId)
+    }
   }
 }

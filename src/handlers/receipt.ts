@@ -38,6 +38,24 @@ const MIME_TYPES = {
 } as const
 
 /**
+ * Baileys download options type.
+ * Defined locally to avoid strict type incompatibilities with Baileys library.
+ * The library's types are overly strict for our use case where we have valid
+ * IWebMessageInfo objects from message events.
+ */
+interface BaileysDownloadOptions {
+  logger: unknown
+  reuploadRequest: typeof downloadMediaMessage extends (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...args: any[]
+  ) => Promise<unknown>
+    ? Parameters<typeof downloadMediaMessage>[3] extends { reuploadRequest: infer R }
+      ? R
+      : unknown
+    : unknown
+}
+
+/**
  * Download media from a Baileys message.
  *
  * @param context - Router context with rawMessage
@@ -49,11 +67,19 @@ async function downloadMedia(context: RouterContext): Promise<Result<Buffer>> {
   }
 
   try {
+    // Note: Type assertions needed due to Baileys library type strictness.
+    // The IWebMessageInfo from message events is compatible at runtime,
+    // but Baileys exports overly narrow types. This is a known limitation.
+    const downloadOptions: BaileysDownloadOptions = {
+      logger: undefined,
+      reuploadRequest: context.sock.updateMediaMessage,
+    }
+
     const buffer = await downloadMediaMessage(
-      context.rawMessage,
+      context.rawMessage as Parameters<typeof downloadMediaMessage>[0],
       'buffer',
       {},
-      { logger: undefined as unknown as typeof logger, reuploadRequest: context.sock.updateMediaMessage }
+      downloadOptions as Parameters<typeof downloadMediaMessage>[3]
     )
 
     if (!buffer || buffer.length === 0) {
@@ -277,9 +303,14 @@ export async function handleReceipt(
   }
 
   if (!receiptDataResult.ok) {
+    // Issue fix: Standardize error message format with prefix
+    const errorMessage = receiptDataResult.error.startsWith('OCR')
+      ? receiptDataResult.error
+      : `Extraction failed: ${receiptDataResult.error}`
+
     logger.error('Receipt extraction failed', {
       event: 'receipt_extraction_failed',
-      error: receiptDataResult.error,
+      error: errorMessage,
       groupId,
       sender,
       receiptType,
@@ -291,12 +322,12 @@ export async function handleReceipt(
       groupJid: groupId,
       senderName: sender,
       senderJid: sender,
-      reason: receiptDataResult.error,
+      reason: errorMessage,
       timestamp: new Date(),
       receiptType: receiptType === 'pdf' ? 'pdf' : 'image',
     })
 
-    return err(receiptDataResult.error)
+    return err(errorMessage)
   }
 
   const receiptData = receiptDataResult.data

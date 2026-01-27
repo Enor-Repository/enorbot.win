@@ -26,6 +26,9 @@ import {
   getActivityStats,
   resetDailyStats,
   resetActivityState,
+  isTrainingMode,
+  setTrainingMode,
+  resetTrainingMode,
   type OperationalStatus,
   type PauseInfo,
   type ActivityStats,
@@ -604,6 +607,140 @@ describe('Bot State - Story 4.3 Activity Tracking', () => {
       expect(state.messagesSentToday).toBe(1)
       expect(state.lastActivityAt).toBeInstanceOf(Date)
       expect(state.startedAt).toBeInstanceOf(Date)
+    })
+  })
+})
+
+// =============================================================================
+// Training Mode Tests
+// =============================================================================
+describe('Bot State - Training Mode', () => {
+  beforeEach(() => {
+    setRunning()
+    setConnectionStatus('disconnected')
+    resetPauseState()
+    resetActivityState()
+    resetTrainingMode()
+  })
+
+  // ==========================================================================
+  // isTrainingMode
+  // ==========================================================================
+  describe('isTrainingMode', () => {
+    it('returns false by default', () => {
+      expect(isTrainingMode()).toBe(false)
+    })
+
+    it('returns true after setTrainingMode(true)', () => {
+      setTrainingMode(true)
+      expect(isTrainingMode()).toBe(true)
+    })
+
+    it('returns false after setTrainingMode(false)', () => {
+      setTrainingMode(true)
+      setTrainingMode(false)
+      expect(isTrainingMode()).toBe(false)
+    })
+  })
+
+  // ==========================================================================
+  // setTrainingMode
+  // ==========================================================================
+  describe('setTrainingMode', () => {
+    it('enables training mode with true', () => {
+      setTrainingMode(true)
+      expect(isTrainingMode()).toBe(true)
+    })
+
+    it('disables training mode with false', () => {
+      setTrainingMode(true)
+      setTrainingMode(false)
+      expect(isTrainingMode()).toBe(false)
+    })
+
+    it('is idempotent - multiple true calls have same effect', () => {
+      setTrainingMode(true)
+      setTrainingMode(true)
+      expect(isTrainingMode()).toBe(true)
+    })
+
+    it('is idempotent - multiple false calls have same effect', () => {
+      setTrainingMode(false)
+      setTrainingMode(false)
+      expect(isTrainingMode()).toBe(false)
+    })
+  })
+
+  // ==========================================================================
+  // resetTrainingMode
+  // ==========================================================================
+  describe('resetTrainingMode', () => {
+    it('resets training mode to false', () => {
+      setTrainingMode(true)
+      expect(isTrainingMode()).toBe(true)
+
+      resetTrainingMode()
+      expect(isTrainingMode()).toBe(false)
+    })
+
+    it('is safe to call when already false', () => {
+      resetTrainingMode()
+      expect(isTrainingMode()).toBe(false)
+    })
+  })
+
+  // ==========================================================================
+  // Integration with getState
+  // ==========================================================================
+  describe('Integration with getState', () => {
+    it('getState includes trainingMode field', () => {
+      const state = getState()
+      expect(typeof state.trainingMode).toBe('boolean')
+    })
+
+    it('getState reflects training mode changes', () => {
+      expect(getState().trainingMode).toBe(false)
+
+      setTrainingMode(true)
+      expect(getState().trainingMode).toBe(true)
+
+      setTrainingMode(false)
+      expect(getState().trainingMode).toBe(false)
+    })
+  })
+
+  // ==========================================================================
+  // Independence from other state
+  // ==========================================================================
+  describe('Independence from other state', () => {
+    it('training mode is independent of operational status', () => {
+      setTrainingMode(true)
+      expect(getOperationalStatus()).toBe('running')
+      expect(isTrainingMode()).toBe(true)
+    })
+
+    it('training mode is independent of pause state', () => {
+      setTrainingMode(true)
+      pauseAllGroups()
+
+      expect(isTrainingMode()).toBe(true)
+      expect(isGlobalPauseActive()).toBe(true)
+    })
+
+    it('setRunning does not affect training mode', () => {
+      setTrainingMode(true)
+      setPaused('test')
+      setRunning()
+
+      expect(isTrainingMode()).toBe(true)
+    })
+
+    it('training mode persists across connection status changes', () => {
+      setTrainingMode(true)
+      setConnectionStatus('connected')
+      setConnectionStatus('disconnected')
+
+      expect(isTrainingMode()).toBe(true)
     })
   })
 })

@@ -14,7 +14,6 @@ import {
   setNotificationSent,
   getOperationalStatus,
   getPauseInfo,
-  isGroupPaused,
   wasAuthStateEverLoaded,
 } from './state.js'
 import {
@@ -28,7 +27,8 @@ import {
 import { useSupabaseAuthState } from './authState.js'
 import { clearAuthState, checkSupabaseHealth } from '../services/supabase.js'
 import { routeMessage, isControlGroupMessage, type RouterContext } from './router.js'
-import { handleControlMessage, registerKnownGroup } from '../handlers/control.js'
+import { handleControlMessage } from '../handlers/control.js'
+import { ensureGroupRegistered } from '../services/groupConfig.js'
 import { handlePriceMessage } from '../handlers/price.js'
 import { handleTronscanMessage } from '../handlers/tronscan.js'
 import type { EnvConfig } from '../types/config.js'
@@ -381,9 +381,17 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       // Determine if control group by pattern matching
       const isControlGroup = isControlGroupMessage(groupName, config.CONTROL_GROUP_PATTERN)
 
-      // Story 4.1: Register group for fuzzy matching in control commands
+      // Auto-register non-control groups with groupConfig service
+      // This enables per-group mode management and fuzzy matching
       if (!isControlGroup) {
-        registerKnownGroup(groupId, groupName)
+        // Fire-and-forget - don't block message processing
+        ensureGroupRegistered(groupId, groupName, sender).catch((e) => {
+          logger.warn('Group registration failed', {
+            event: 'group_registration_failed',
+            groupId,
+            error: e instanceof Error ? e.message : String(e),
+          })
+        })
       }
 
       const context: RouterContext = {
@@ -428,9 +436,9 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         hasTrigger: route.context.hasTrigger,
       })
 
-      // Story 3.2 + 4.1: Check pause state BEFORE dispatching to handlers
+      // Story 3.2: Check error auto-pause state BEFORE dispatching to handlers
       // Control group messages are STILL routed when paused (for Epic 4 resume commands)
-      // Check both: error-auto-pause (operationalStatus) AND per-group pause (isGroupPaused)
+      // Note: Per-group mode pausing is now handled by the router (getGroupModeSync)
       if (!isControlGroup) {
         // Check error-auto-pause (Story 3.2)
         if (getOperationalStatus() === 'paused') {
@@ -440,17 +448,6 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
             groupId,
             messagePreview: messageText.substring(0, 20),
             pauseReason: reason,
-          })
-          return // Silent - don't respond
-        }
-
-        // Check per-group pause (Story 4.1)
-        if (isGroupPaused(groupId)) {
-          logger.info('Message ignored - group paused', {
-            event: 'message_ignored_group_paused',
-            groupId,
-            groupName,
-            messagePreview: messageText.substring(0, 20),
           })
           return // Silent - don't respond
         }

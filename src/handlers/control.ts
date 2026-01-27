@@ -1,10 +1,11 @@
 /**
- * Control Handler - Epic 4: CIO Control Interface
+ * Control Handler - Epic 4: CIO Control Interface + Group Modes
  *
  * Handles control group messages including:
  * - Story 4.1: Pause command (pause [group name])
  * - Story 4.2: Resume command (resume [group name])
  * - Story 4.3: Status command
+ * - Group Modes: mode, modes, config commands
  *
  * Control group is identified by CONTROL_GROUP_PATTERN in config.
  */
@@ -13,14 +14,9 @@ import { logger } from '../utils/logger.js'
 import { ok, type Result } from '../utils/result.js'
 import type { RouterContext } from '../bot/router.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
+// Story 7.4: Bot message logging to Supabase
+import { logBotMessage } from '../services/messageHistory.js'
 import {
-  pauseGroup,
-  pauseAllGroups,
-  isGroupPaused,
-  getPausedGroups,
-  isGlobalPauseActive,
-  resumeGroup,
-  resumeAllGroups,
   getOperationalStatus,
   setRunning,
   getConnectionStatus,
@@ -35,24 +31,33 @@ import {
 } from '../services/autoRecovery.js'
 import { getQueueLength } from '../services/logQueue.js'
 import { formatDuration, formatRelativeTime } from '../utils/format.js'
+import {
+  type GroupMode,
+  type PlayerRole,
+  setGroupMode,
+  getAllGroupConfigs,
+  getGroupModeStats,
+  findGroupByName,
+  getGroupsByMode,
+  addTriggerPattern,
+  removeTriggerPattern,
+  setPlayerRole,
+  type GroupConfig,
+} from '../services/groupConfig.js'
 
 // =============================================================================
-// Known Groups Cache
+// Known Groups Cache (deprecated - use groupConfig service)
 // =============================================================================
 
 /**
  * Cache of known groups: groupId -> groupName.
- * Populated when messages are seen from groups.
- * Used for fuzzy matching in pause/resume commands.
+ * @deprecated Use groupConfig service instead.
  */
 const knownGroups: Map<string, string> = new Map()
 
 /**
  * Register a known group for fuzzy matching.
- * Called when messages are received from groups.
- *
- * @param groupId - The JID of the group
- * @param groupName - The human-readable name of the group
+ * @deprecated Groups are now auto-registered in groupConfig service.
  */
 export function registerKnownGroup(groupId: string, groupName: string): void {
   knownGroups.set(groupId, groupName)
@@ -60,9 +65,7 @@ export function registerKnownGroup(groupId: string, groupName: string): void {
 
 /**
  * Get all known groups.
- * Returns a copy to prevent external mutation.
- *
- * @returns Copy of the known groups map (groupId -> groupName)
+ * @deprecated Use getAllGroupConfigs() instead.
  */
 export function getKnownGroups(): Map<string, string> {
   return new Map(knownGroups)
@@ -70,7 +73,7 @@ export function getKnownGroups(): Map<string, string> {
 
 /**
  * Clear known groups cache.
- * Primarily used for testing to reset state between tests.
+ * Primarily used for testing.
  */
 export function clearKnownGroups(): void {
   knownGroups.clear()
@@ -82,8 +85,19 @@ export function clearKnownGroups(): void {
 
 /**
  * Control command types.
+ * Extended with new mode management commands.
  */
-export type ControlCommandType = 'pause' | 'resume' | 'status' | 'unknown'
+export type ControlCommandType =
+  | 'pause'
+  | 'resume'
+  | 'status'
+  | 'training'
+  | 'mode'      // mode <group> learning|assisted|active|paused
+  | 'modes'     // List all groups with modes
+  | 'config'    // config <group> - show group config
+  | 'trigger'   // trigger add|remove <group> <pattern>
+  | 'role'      // role <group> <player> operator|client|cio
+  | 'unknown'
 
 /**
  * Parsed control command.
@@ -102,6 +116,38 @@ export interface ControlCommand {
 export function parseControlCommand(message: string): ControlCommand {
   const lower = message.toLowerCase().trim()
 
+  // Mode command: "mode <group> <mode>"
+  if (lower.startsWith('mode ')) {
+    const rest = message.replace(/^mode\s+/i, '').trim()
+    const parts = parseQuotedArgs(rest)
+    return { type: 'mode', args: parts }
+  }
+
+  // Modes command: list all groups with modes
+  if (lower === 'modes') {
+    return { type: 'modes', args: [] }
+  }
+
+  // Config command: "config <group>"
+  if (lower.startsWith('config ')) {
+    const groupSearch = message.replace(/^config\s+/i, '').trim()
+    return { type: 'config', args: [groupSearch] }
+  }
+
+  // Trigger command: "trigger add|remove <group> <pattern>"
+  if (lower.startsWith('trigger ')) {
+    const rest = message.replace(/^trigger\s+/i, '').trim()
+    const parts = parseQuotedArgs(rest)
+    return { type: 'trigger', args: parts }
+  }
+
+  // Role command: "role <group> <player> operator|client|cio"
+  if (lower.startsWith('role ')) {
+    const rest = message.replace(/^role\s+/i, '').trim()
+    const parts = parseQuotedArgs(rest)
+    return { type: 'role', args: parts }
+  }
+
   // Pause command: "pause" or "pause [group name]"
   if (lower === 'pause' || lower.startsWith('pause ')) {
     const args = lower.replace(/^pause\s*/, '').trim()
@@ -119,11 +165,58 @@ export function parseControlCommand(message: string): ControlCommand {
     return { type: 'status', args: [] }
   }
 
+  // Training command: "training on" or "training off"
+  if (lower === 'training on') {
+    return { type: 'training', args: ['on'] }
+  }
+  if (lower === 'training off') {
+    return { type: 'training', args: ['off'] }
+  }
+
   return { type: 'unknown', args: [] }
 }
 
+/**
+ * Parse arguments that may contain quoted strings.
+ * Example: 'OTC Brasil active' -> ['OTC Brasil', 'active']
+ * Example: '"OTC Brasil" active' -> ['OTC Brasil', 'active']
+ */
+function parseQuotedArgs(input: string): string[] {
+  const args: string[] = []
+  let current = ''
+  let inQuote = false
+  let quoteChar = ''
+
+  for (const char of input) {
+    if ((char === '"' || char === "'") && !inQuote) {
+      inQuote = true
+      quoteChar = char
+    } else if (char === quoteChar && inQuote) {
+      inQuote = false
+      quoteChar = ''
+      if (current) {
+        args.push(current)
+        current = ''
+      }
+    } else if (char === ' ' && !inQuote) {
+      if (current) {
+        args.push(current)
+        current = ''
+      }
+    } else {
+      current += char
+    }
+  }
+
+  if (current) {
+    args.push(current)
+  }
+
+  return args
+}
+
 // =============================================================================
-// Fuzzy Group Matching
+// Fuzzy Group Matching (uses groupConfig service)
 // =============================================================================
 
 /**
@@ -137,26 +230,70 @@ export interface GroupMatchResult {
 
 /**
  * Find a group by fuzzy matching on its name.
- * Case-insensitive contains match.
+ * Now uses the groupConfig service.
  *
  * @param searchTerm - The search term to match (must be non-empty)
  * @returns Match result with groupId and groupName if found
  */
 export function findMatchingGroup(searchTerm: string): GroupMatchResult {
-  // Guard against empty search term - would match all groups
   if (!searchTerm || !searchTerm.trim()) {
     return { found: false, groupId: null, groupName: null }
   }
 
-  const lower = searchTerm.toLowerCase().trim()
-
-  for (const [groupId, groupName] of knownGroups) {
-    if (groupName.toLowerCase().includes(lower)) {
-      return { found: true, groupId, groupName }
-    }
+  const config = findGroupByName(searchTerm)
+  if (config) {
+    return { found: true, groupId: config.groupJid, groupName: config.groupName }
   }
 
   return { found: false, groupId: null, groupName: null }
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/**
+ * Send a control response message and log it to history.
+ */
+async function sendControlResponse(
+  context: RouterContext,
+  message: string
+): Promise<void> {
+  const result = await sendWithAntiDetection(context.sock, context.groupId, message)
+
+  if (result.ok) {
+    logBotMessage({
+      groupJid: context.groupId,
+      content: message,
+      messageType: 'status',
+      isControlGroup: true,
+    })
+  }
+}
+
+/**
+ * Get emoji for group mode.
+ */
+function getModeEmoji(mode: GroupMode): string {
+  switch (mode) {
+    case 'learning':
+      return '🔵'
+    case 'assisted':
+      return '🟡'
+    case 'active':
+      return '🟢'
+    case 'paused':
+      return '⏸️'
+  }
+}
+
+/**
+ * Calculate learning duration in days.
+ */
+function getLearningDays(config: GroupConfig): number {
+  const now = Date.now()
+  const started = config.learningStartedAt.getTime()
+  return Math.floor((now - started) / (1000 * 60 * 60 * 24))
 }
 
 // =============================================================================
@@ -164,7 +301,320 @@ export function findMatchingGroup(searchTerm: string): GroupMatchResult {
 // =============================================================================
 
 /**
+ * Handle mode command.
+ * Sets mode for a specific group.
+ *
+ * @param context - Router context
+ * @param args - [group search term, mode]
+ */
+async function handleModeCommand(context: RouterContext, args: string[]): Promise<void> {
+  if (args.length < 2) {
+    await sendControlResponse(
+      context,
+      '⚠️ Usage: mode <group> <learning|assisted|active|paused>'
+    )
+    return
+  }
+
+  // Last arg is the mode, everything else is the group search
+  const modeArg = args[args.length - 1].toLowerCase()
+  const groupSearch = args.slice(0, -1).join(' ')
+
+  // Validate mode
+  const validModes: GroupMode[] = ['learning', 'assisted', 'active', 'paused']
+  if (!validModes.includes(modeArg as GroupMode)) {
+    await sendControlResponse(
+      context,
+      `⚠️ Invalid mode "${modeArg}". Valid modes: learning, assisted, active, paused`
+    )
+    return
+  }
+
+  // Find group
+  const match = findMatchingGroup(groupSearch)
+  if (!match.found || !match.groupId) {
+    await sendControlResponse(context, `⚠️ No group matching "${groupSearch}" found`)
+    return
+  }
+
+  // Set the mode
+  const result = await setGroupMode(match.groupId, modeArg as GroupMode, context.sender)
+
+  if (!result.ok) {
+    await sendControlResponse(context, `❌ Failed to set mode: ${result.error}`)
+    return
+  }
+
+  const emoji = getModeEmoji(modeArg as GroupMode)
+  await sendControlResponse(
+    context,
+    `${emoji} ${match.groupName} set to ${modeArg.toUpperCase()} mode`
+  )
+
+  logger.info('Group mode changed via command', {
+    event: 'group_mode_command',
+    groupId: match.groupId,
+    groupName: match.groupName,
+    mode: modeArg,
+    triggeredBy: context.sender,
+  })
+}
+
+/**
+ * Handle modes command.
+ * Lists all groups with their current modes.
+ */
+async function handleModesCommand(context: RouterContext): Promise<void> {
+  const configs = await getAllGroupConfigs()
+  const stats = getGroupModeStats()
+
+  if (configs.size === 0) {
+    await sendControlResponse(context, '📋 No groups registered yet')
+    return
+  }
+
+  const lines: string[] = [
+    '📋 Group Modes',
+    '',
+    `Total: ${configs.size} groups`,
+    `• 🔵 Learning: ${stats.learning}`,
+    `• 🟡 Assisted: ${stats.assisted}`,
+    `• 🟢 Active: ${stats.active}`,
+    `• ⏸️ Paused: ${stats.paused}`,
+    '',
+  ]
+
+  // List groups by mode
+  for (const mode of ['learning', 'assisted', 'active', 'paused'] as GroupMode[]) {
+    const groups = getGroupsByMode(mode)
+    if (groups.length > 0) {
+      const emoji = getModeEmoji(mode)
+      lines.push(`${emoji} ${mode.toUpperCase()}:`)
+      for (const config of groups) {
+        const days = getLearningDays(config)
+        const daysStr = mode === 'learning' ? ` (${days}d)` : ''
+        lines.push(`  • ${config.groupName}${daysStr}`)
+      }
+      lines.push('')
+    }
+  }
+
+  await sendControlResponse(context, lines.join('\n').trim())
+
+  logger.info('Modes command processed', {
+    event: 'modes_command_processed',
+    groupCount: configs.size,
+    triggeredBy: context.sender,
+  })
+}
+
+/**
+ * Handle config command.
+ * Shows detailed configuration for a specific group.
+ */
+async function handleConfigCommand(context: RouterContext, args: string[]): Promise<void> {
+  if (args.length === 0) {
+    await sendControlResponse(context, '⚠️ Usage: config <group>')
+    return
+  }
+
+  const groupSearch = args.join(' ')
+  const config = findGroupByName(groupSearch)
+
+  if (!config) {
+    await sendControlResponse(context, `⚠️ No group matching "${groupSearch}" found`)
+    return
+  }
+
+  const emoji = getModeEmoji(config.mode)
+  const days = getLearningDays(config)
+  const triggers = config.triggerPatterns.length > 0
+    ? config.triggerPatterns.map(t => `"${t}"`).join(', ')
+    : 'None'
+  const roles = Object.entries(config.playerRoles)
+    .map(([jid, role]) => `${jid.split('@')[0]}: ${role}`)
+    .join('\n    ')
+
+  const lines = [
+    `📊 Config: ${config.groupName}`,
+    '',
+    `Mode: ${emoji} ${config.mode.toUpperCase()}`,
+    `Learning: ${days} days`,
+    `AI Threshold: ${config.aiThreshold}%`,
+    '',
+    `Triggers: ${triggers}`,
+  ]
+
+  if (Object.keys(config.playerRoles).length > 0) {
+    lines.push('')
+    lines.push('Player Roles:')
+    lines.push(`    ${roles}`)
+  }
+
+  if (config.updatedBy) {
+    lines.push('')
+    lines.push(`Last updated by: ${config.updatedBy.split('@')[0]}`)
+    lines.push(`Updated: ${formatRelativeTime(config.updatedAt)}`)
+  }
+
+  await sendControlResponse(context, lines.join('\n'))
+
+  logger.info('Config command processed', {
+    event: 'config_command_processed',
+    groupJid: config.groupJid,
+    groupName: config.groupName,
+    triggeredBy: context.sender,
+  })
+}
+
+/**
+ * Handle trigger command.
+ * Adds or removes custom trigger patterns for a group.
+ *
+ * @param context - Router context
+ * @param args - [add|remove, group, pattern]
+ */
+async function handleTriggerCommand(context: RouterContext, args: string[]): Promise<void> {
+  if (args.length < 3) {
+    await sendControlResponse(
+      context,
+      '⚠️ Usage: trigger add|remove <group> <pattern>\nExample: trigger add OTC "compro usdt"'
+    )
+    return
+  }
+
+  const action = args[0].toLowerCase()
+  if (action !== 'add' && action !== 'remove') {
+    await sendControlResponse(
+      context,
+      '⚠️ Invalid action. Use "trigger add" or "trigger remove"'
+    )
+    return
+  }
+
+  // Pattern is the last argument, group search is everything in between
+  const pattern = args[args.length - 1]
+  const groupSearch = args.slice(1, -1).join(' ')
+
+  // Find group
+  const match = findMatchingGroup(groupSearch)
+  if (!match.found || !match.groupId) {
+    await sendControlResponse(context, `⚠️ No group matching "${groupSearch}" found`)
+    return
+  }
+
+  if (action === 'add') {
+    const result = await addTriggerPattern(match.groupId, pattern, context.sender)
+
+    if (!result.ok) {
+      await sendControlResponse(context, `❌ Failed to add trigger: ${result.error}`)
+      return
+    }
+
+    await sendControlResponse(
+      context,
+      `✅ Added trigger "${pattern}" to ${match.groupName}`
+    )
+
+    logger.info('Trigger pattern added via command', {
+      event: 'trigger_added_command',
+      groupId: match.groupId,
+      groupName: match.groupName,
+      pattern,
+      triggeredBy: context.sender,
+    })
+  } else {
+    const result = await removeTriggerPattern(match.groupId, pattern, context.sender)
+
+    if (!result.ok) {
+      await sendControlResponse(context, `❌ Failed to remove trigger: ${result.error}`)
+      return
+    }
+
+    await sendControlResponse(
+      context,
+      `✅ Removed trigger "${pattern}" from ${match.groupName}`
+    )
+
+    logger.info('Trigger pattern removed via command', {
+      event: 'trigger_removed_command',
+      groupId: match.groupId,
+      groupName: match.groupName,
+      pattern,
+      triggeredBy: context.sender,
+    })
+  }
+}
+
+/**
+ * Handle role command.
+ * Assigns player roles within a group.
+ *
+ * @param context - Router context
+ * @param args - [group, player, role]
+ */
+async function handleRoleCommand(context: RouterContext, args: string[]): Promise<void> {
+  if (args.length < 3) {
+    await sendControlResponse(
+      context,
+      '⚠️ Usage: role <group> <player_phone> <operator|client|cio>\nExample: role OTC 5511999999999 operator'
+    )
+    return
+  }
+
+  // Role is the last argument, player is second to last
+  const role = args[args.length - 1].toLowerCase()
+  const playerPhone = args[args.length - 2]
+  const groupSearch = args.slice(0, -2).join(' ')
+
+  // Validate role
+  const validRoles: PlayerRole[] = ['operator', 'client', 'cio']
+  if (!validRoles.includes(role as PlayerRole)) {
+    await sendControlResponse(
+      context,
+      `⚠️ Invalid role "${role}". Valid roles: operator, client, cio`
+    )
+    return
+  }
+
+  // Find group
+  const match = findMatchingGroup(groupSearch)
+  if (!match.found || !match.groupId) {
+    await sendControlResponse(context, `⚠️ No group matching "${groupSearch}" found`)
+    return
+  }
+
+  // Normalize player JID
+  const playerJid = playerPhone.includes('@')
+    ? playerPhone
+    : `${playerPhone.replace(/\D/g, '')}@s.whatsapp.net`
+
+  const result = await setPlayerRole(match.groupId, playerJid, role as PlayerRole, context.sender)
+
+  if (!result.ok) {
+    await sendControlResponse(context, `❌ Failed to set role: ${result.error}`)
+    return
+  }
+
+  const displayPhone = playerJid.split('@')[0]
+  await sendControlResponse(
+    context,
+    `✅ Set ${displayPhone} as ${role.toUpperCase()} in ${match.groupName}`
+  )
+
+  logger.info('Player role set via command', {
+    event: 'role_set_command',
+    groupId: match.groupId,
+    groupName: match.groupName,
+    playerJid,
+    role,
+    triggeredBy: context.sender,
+  })
+}
+
+/**
  * Handle pause command.
+ * Maps to mode <group> paused for backward compatibility.
  *
  * @param context - Router context
  * @param args - Command arguments (optional group name)
@@ -172,38 +622,48 @@ export function findMatchingGroup(searchTerm: string): GroupMatchResult {
 async function handlePauseCommand(context: RouterContext, args: string[]): Promise<void> {
   const groupName = args[0]
 
+  // Log deprecation notice
+  logger.info('Legacy pause command used', {
+    event: 'legacy_pause_command',
+    triggeredBy: context.sender,
+  })
+
   if (!groupName) {
-    // Global pause
-    pauseAllGroups()
+    // Global pause - set all groups to paused
+    const configs = await getAllGroupConfigs()
+    let count = 0
+
+    for (const config of configs.values()) {
+      if (config.mode !== 'paused') {
+        await setGroupMode(config.groupJid, 'paused', context.sender)
+        count++
+      }
+    }
 
     logger.info('All groups paused', {
       event: 'global_pause',
+      groupCount: count,
       triggeredBy: context.sender,
     })
 
-    await sendWithAntiDetection(context.sock, context.groupId, '⏸️ All groups paused')
+    await sendControlResponse(context, `⏸️ All groups paused (${count} groups)`)
     return
   }
 
-  // Specific group pause with fuzzy matching
+  // Specific group pause
   const match = findMatchingGroup(groupName)
 
   if (!match.found || !match.groupId) {
-    logger.warn('Pause command - no matching group', {
-      event: 'pause_no_match',
-      searchTerm: groupName,
-      triggeredBy: context.sender,
-    })
-
-    await sendWithAntiDetection(
-      context.sock,
-      context.groupId,
-      `⚠️ No group matching "${groupName}" found`
-    )
+    await sendControlResponse(context, `⚠️ No group matching "${groupName}" found`)
     return
   }
 
-  pauseGroup(match.groupId)
+  const result = await setGroupMode(match.groupId, 'paused', context.sender)
+
+  if (!result.ok) {
+    await sendControlResponse(context, `❌ Failed to pause: ${result.error}`)
+    return
+  }
 
   logger.info('Group paused', {
     event: 'group_paused',
@@ -212,15 +672,12 @@ async function handlePauseCommand(context: RouterContext, args: string[]): Promi
     triggeredBy: context.sender,
   })
 
-  await sendWithAntiDetection(
-    context.sock,
-    context.groupId,
-    `⏸️ Paused for ${match.groupName}`
-  )
+  await sendControlResponse(context, `⏸️ Paused: ${match.groupName}`)
 }
 
 /**
  * Handle resume command.
+ * Maps to mode <group> active for backward compatibility.
  *
  * @param context - Router context
  * @param args - Command arguments (optional group name)
@@ -231,72 +688,57 @@ async function handleResumeCommand(context: RouterContext, args: string[]): Prom
   // CRITICAL: Cancel any pending auto-recovery on resume
   cancelAutoRecovery()
 
-  // Check if error state was active (for response message)
+  // Log deprecation notice
+  logger.info('Legacy resume command used', {
+    event: 'legacy_resume_command',
+    triggeredBy: context.sender,
+  })
+
+  // Check if error state was active
   const hadErrorState = getOperationalStatus() === 'paused'
+  if (hadErrorState) {
+    setRunning()
+  }
 
   if (!groupName) {
-    // Global resume
-    resumeAllGroups()
+    // Global resume - set all groups to active
+    const configs = await getAllGroupConfigs()
+    let count = 0
 
-    // Also clear error state on global resume
-    if (hadErrorState) {
-      setRunning()
-
-      logger.info('All groups resumed with error state cleared', {
-        event: 'global_resume_error_cleared',
-        triggeredBy: context.sender,
-      })
-
-      await sendWithAntiDetection(
-        context.sock,
-        context.groupId,
-        '▶️ Resumed. Error state cleared.'
-      )
-      return
+    for (const config of configs.values()) {
+      if (config.mode === 'paused') {
+        await setGroupMode(config.groupJid, 'active', context.sender)
+        count++
+      }
     }
 
     logger.info('All groups resumed', {
       event: 'global_resume',
+      groupCount: count,
+      errorStateCleared: hadErrorState,
       triggeredBy: context.sender,
     })
 
-    await sendWithAntiDetection(context.sock, context.groupId, '▶️ All groups resumed')
+    const msg = hadErrorState
+      ? `▶️ Resumed (${count} groups). Error state cleared.`
+      : `▶️ All groups resumed (${count} groups)`
+
+    await sendControlResponse(context, msg)
     return
   }
 
-  // Specific group resume with fuzzy matching
+  // Specific group resume
   const match = findMatchingGroup(groupName)
 
   if (!match.found || !match.groupId) {
-    logger.warn('Resume command - no matching group', {
-      event: 'resume_no_match',
-      searchTerm: groupName,
-      triggeredBy: context.sender,
-    })
-
-    await sendWithAntiDetection(
-      context.sock,
-      context.groupId,
-      `⚠️ No group matching "${groupName}" found`
-    )
+    await sendControlResponse(context, `⚠️ No group matching "${groupName}" found`)
     return
   }
 
-  const wasResumed = resumeGroup(match.groupId)
+  const result = await setGroupMode(match.groupId, 'active', context.sender)
 
-  if (!wasResumed) {
-    logger.info('Resume command - group was not paused', {
-      event: 'resume_not_paused',
-      groupId: match.groupId,
-      groupName: match.groupName,
-      triggeredBy: context.sender,
-    })
-
-    await sendWithAntiDetection(
-      context.sock,
-      context.groupId,
-      `ℹ️ "${match.groupName}" was not paused`
-    )
+  if (!result.ok) {
+    await sendControlResponse(context, `❌ Failed to resume: ${result.error}`)
     return
   }
 
@@ -307,37 +749,58 @@ async function handleResumeCommand(context: RouterContext, args: string[]): Prom
     triggeredBy: context.sender,
   })
 
-  await sendWithAntiDetection(
-    context.sock,
-    context.groupId,
-    `▶️ Resumed for ${match.groupName}`
-  )
+  await sendControlResponse(context, `▶️ Resumed: ${match.groupName}`)
 }
 
 /**
- * Get group names for paused groups.
- * Maps group IDs to their names using the known groups cache.
+ * Handle training command.
+ * Maps to setting all groups to learning/active for backward compatibility.
+ *
+ * @param context - Router context
+ * @param args - Command arguments ('on' or 'off')
  */
-function getPausedGroupNames(): string[] {
-  const pausedIds = getPausedGroups()
-  const names: string[] = []
+async function handleTrainingCommand(context: RouterContext, args: string[]): Promise<void> {
+  const action = args[0]
 
-  for (const groupId of pausedIds) {
-    const name = knownGroups.get(groupId)
-    if (name) {
-      names.push(name)
-    } else {
-      // Fallback to ID if name not in cache
-      names.push(groupId)
+  if (action !== 'on' && action !== 'off') {
+    await sendControlResponse(context, '⚠️ Invalid training command. Use "training on" or "training off"')
+    return
+  }
+
+  // Log deprecation notice
+  logger.info('Legacy training command used', {
+    event: 'legacy_training_command',
+    action,
+    triggeredBy: context.sender,
+  })
+
+  const configs = await getAllGroupConfigs()
+  const targetMode: GroupMode = action === 'on' ? 'learning' : 'active'
+  let count = 0
+
+  for (const config of configs.values()) {
+    if (config.mode !== targetMode && config.mode !== 'paused') {
+      await setGroupMode(config.groupJid, targetMode, context.sender)
+      count++
     }
   }
 
-  return names
+  const message = action === 'on'
+    ? `🎓 Training Mode ON - ${count} groups set to learning (observe-only)`
+    : `🎓 Training Mode OFF - ${count} groups set to active`
+
+  logger.info(`Training mode ${action === 'on' ? 'enabled' : 'disabled'}`, {
+    event: action === 'on' ? 'training_mode_on' : 'training_mode_off',
+    groupCount: count,
+    triggeredBy: context.sender,
+  })
+
+  await sendControlResponse(context, message)
 }
 
 /**
  * Build status message for the CIO.
- * Gathers all state information and formats it for display.
+ * Updated to show per-group mode information.
  */
 export async function buildStatusMessage(): Promise<string> {
   const connectionStatus = getConnectionStatus()
@@ -347,8 +810,8 @@ export async function buildStatusMessage(): Promise<string> {
   const recoveryPending = isRecoveryPending()
   const recoveryTimeRemaining = getRecoveryTimeRemaining()
   const recoveryReason = getPendingRecoveryReason()
-  const pausedGroupNames = getPausedGroupNames()
-  const globalPause = isGlobalPauseActive()
+  const modeStats = getGroupModeStats()
+  const configs = await getAllGroupConfigs()
 
   // Get queue length for pending logs
   const queueLengthResult = await getQueueLength()
@@ -358,14 +821,10 @@ export async function buildStatusMessage(): Promise<string> {
   const connectionEmoji = connectionStatus === 'connected' ? '🟢' : '🔴'
   const connectionLabel = connectionStatus === 'connected' ? 'Connected' : 'Disconnected'
 
-  // Status determination
+  // Operational status
   let statusLine: string
   if (operationalStatus === 'paused') {
     statusLine = `⏸️ PAUSED: ${pauseInfo.reason || 'Unknown reason'}`
-  } else if (globalPause) {
-    statusLine = '⏸️ All groups paused (manual)'
-  } else if (pausedGroupNames.length > 0) {
-    statusLine = `⚠️ ${pausedGroupNames.length} group(s) paused`
   } else {
     statusLine = '✅ All systems normal'
   }
@@ -388,27 +847,40 @@ export async function buildStatusMessage(): Promise<string> {
     }
   }
 
+  // Learning system section
+  lines.push('')
+  lines.push('📚 Learning System')
+  lines.push(`• ${modeStats.learning} groups learning (observing)`)
+  lines.push(`• ${modeStats.active} groups active (responding)`)
+  lines.push(`• ${modeStats.assisted} groups assisted`)
+  lines.push(`• ${modeStats.paused} groups paused`)
+
   // Activity section
   lines.push('')
   lines.push("📈 Today's Activity")
   lines.push(`• ${activityStats.messagesSentToday} quotes sent`)
-  lines.push(`• ${knownGroups.size} groups monitored`)
+  lines.push(`• ${configs.size} groups monitored`)
   lines.push(`• Last activity: ${formatRelativeTime(activityStats.lastActivityAt)}`)
 
-  // Add pending logs if any (Epic 5 action item)
+  // Add pending logs if any
   if (pendingLogs > 0) {
     lines.push(`• ${pendingLogs} logs pending sync`)
   }
 
-  // Groups section (if any paused)
-  if (pausedGroupNames.length > 0 || globalPause) {
+  // Groups by mode section (if any groups)
+  if (configs.size > 0) {
     lines.push('')
-    lines.push('📂 Groups')
-    if (globalPause) {
-      lines.push('• All groups - ⏸️ Paused (global)')
-    } else {
-      for (const name of pausedGroupNames) {
-        lines.push(`• ${name} - ⏸️ Paused`)
+    lines.push('📂 Groups by Mode')
+
+    // Show first 5 groups per mode
+    for (const mode of ['learning', 'active', 'paused'] as GroupMode[]) {
+      const groups = getGroupsByMode(mode)
+      if (groups.length > 0) {
+        const emoji = getModeEmoji(mode)
+        const shown = groups.slice(0, 3)
+        const extra = groups.length > 3 ? ` (+${groups.length - 3} more)` : ''
+        const groupNames = shown.map(g => g.groupName).join(', ')
+        lines.push(`• ${emoji} ${mode}: ${groupNames}${extra}`)
       }
     }
   }
@@ -429,7 +901,7 @@ async function handleStatusCommand(context: RouterContext): Promise<void> {
     triggeredBy: context.sender,
   })
 
-  await sendWithAntiDetection(context.sock, context.groupId, statusMessage)
+  await sendControlResponse(context, statusMessage)
 }
 
 // =============================================================================
@@ -455,6 +927,26 @@ export async function handleControlMessage(context: RouterContext): Promise<Resu
   })
 
   switch (command.type) {
+    case 'mode':
+      await handleModeCommand(context, command.args)
+      break
+
+    case 'modes':
+      await handleModesCommand(context)
+      break
+
+    case 'config':
+      await handleConfigCommand(context, command.args)
+      break
+
+    case 'trigger':
+      await handleTriggerCommand(context, command.args)
+      break
+
+    case 'role':
+      await handleRoleCommand(context, command.args)
+      break
+
     case 'pause':
       await handlePauseCommand(context, command.args)
       break
@@ -465,6 +957,10 @@ export async function handleControlMessage(context: RouterContext): Promise<Resu
 
     case 'status':
       await handleStatusCommand(context)
+      break
+
+    case 'training':
+      await handleTrainingCommand(context, command.args)
       break
 
     case 'unknown':

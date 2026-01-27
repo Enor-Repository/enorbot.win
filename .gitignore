@@ -25,3 +25,4 @@ npm-debug.log*
 # PM2
 .pm2/
 logs/
+.vps-credentials

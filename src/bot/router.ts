@@ -5,7 +5,7 @@ import {
   RECEIPT_MIME_TYPES,
   SUPPORTED_IMAGE_MIME_TYPES,
 } from '../types/handlers.js'
-import { isTrainingMode } from './state.js'
+import { getGroupModeSync, getGroupConfigSync } from '../services/groupConfig.js'
 
 /**
  * Route destinations for message handling.
@@ -107,16 +107,19 @@ export function detectReceiptType(baileysMessage: BaileysMessage | undefined): R
  * Pure function - no side effects, easy to test.
  *
  * Routing priority:
- * 1. Control group → Process normally (even in training mode)
- * 2. Training mode + non-control → OBSERVE_ONLY (log but don't respond)
- * 3. Price triggers → PRICE_HANDLER
- * 4. Receipt messages → RECEIPT_HANDLER
- * 5. Otherwise → IGNORE
- *
- * Training Mode: When enabled, non-control groups only log messages
- * without sending any responses. Control group works 100% normally.
+ * 1. Control group → Process normally (always, regardless of mode)
+ * 2. Per-group mode check:
+ *    - paused → IGNORE (no logging, no response)
+ *    - learning → OBSERVE_ONLY (log but don't respond)
+ *    - assisted → OBSERVE_ONLY (future: suggestion system)
+ *    - active → Normal routing with group-specific triggers
+ * 3. Price triggers (global or group-specific) → PRICE_HANDLER
+ * 4. Tronscan links → TRONSCAN_HANDLER
+ * 5. Receipt messages → RECEIPT_HANDLER
+ * 6. Otherwise → IGNORE
  *
  * Story 6.1 - Added receipt detection and routing
+ * Group Modes - Added per-group mode routing
  *
  * @param context - The router context with message metadata
  * @param baileysMessage - Optional raw Baileys message for receipt detection
@@ -126,7 +129,7 @@ export function routeMessage(
   context: RouterContext,
   baileysMessage?: BaileysMessage
 ): RouteResult {
-  // Check for price trigger - used for context enrichment
+  // Check for global price trigger - used for context enrichment
   const hasTrigger = isPriceTrigger(context.message)
 
   // Check for Tronscan transaction link
@@ -144,24 +147,47 @@ export function routeMessage(
     receiptType,
   }
 
-  // Priority 1: Control group works normally (even in training mode)
+  // Priority 1: Control group ALWAYS works (regardless of any mode)
   if (context.isControlGroup) {
     // Price triggers in control group go to price handler
     if (hasTrigger) {
       return { destination: 'PRICE_HANDLER', context: enrichedContext }
     }
-    // Non-trigger messages (pause, resume, status, training) go to control handler
+    // Tronscan links in control group update Excel row
+    if (hasTronscan) {
+      return { destination: 'TRONSCAN_HANDLER', context: enrichedContext }
+    }
+    // Non-trigger messages (pause, resume, status, mode, etc.) go to control handler
     return { destination: 'CONTROL_HANDLER', context: enrichedContext }
   }
 
-  // Priority 2: Training mode - observe only (log but don't respond)
-  // Messages are logged in connection.ts before dispatch, so logging still works
-  if (isTrainingMode()) {
+  // Priority 2: Check per-group mode
+  const groupMode = getGroupModeSync(context.groupId)
+
+  // PAUSED: Completely ignore (no logging, no response)
+  if (groupMode === 'paused') {
+    return { destination: 'IGNORE', context: enrichedContext }
+  }
+
+  // LEARNING: Log everything, respond to nothing
+  if (groupMode === 'learning') {
     return { destination: 'OBSERVE_ONLY', context: enrichedContext }
   }
 
-  // Priority 3: Price triggers go to price handler
-  if (hasTrigger) {
+  // ASSISTED: Route to observe-only for now (future: suggestion system)
+  if (groupMode === 'assisted') {
+    return { destination: 'OBSERVE_ONLY', context: enrichedContext }
+  }
+
+  // ACTIVE mode: Normal routing with group-specific trigger check
+  // Check group-specific triggers in addition to global triggers
+  const groupConfig = getGroupConfigSync(context.groupId)
+  const hasGroupTrigger = groupConfig?.triggerPatterns.some(
+    pattern => context.message.toLowerCase().includes(pattern.toLowerCase())
+  ) ?? false
+
+  // Priority 3: Price triggers (global OR group-specific) go to price handler
+  if (hasTrigger || hasGroupTrigger) {
     return { destination: 'PRICE_HANDLER', context: enrichedContext }
   }
 

@@ -43,6 +43,9 @@ interface BotState {
   startedAt: Date
   // Story 5.4: Auth state tracking for session protection
   authStateEverLoaded: boolean
+  // Training Mode: Observe-only mode for OTC groups
+  // Intentionally in-memory only - resets to false (production mode) on restart
+  trainingMode: boolean
 }
 
 // In-memory state (not persisted to Supabase - that's Story 1.2)
@@ -64,6 +67,7 @@ const state: BotState = {
   lastActivityAt: null,
   startedAt: new Date(),
   authStateEverLoaded: false,
+  trainingMode: false,
 }
 
 export function getConnectionStatus(): ConnectionStatus {
@@ -339,4 +343,63 @@ export function wasAuthStateEverLoaded(): boolean {
  */
 export function resetAuthStateTracking(): void {
   state.authStateEverLoaded = false
+}
+
+// =============================================================================
+// Training Mode: Observe-Only Mode for OTC Groups
+// =============================================================================
+//
+// Training mode allows the bot to observe messages in OTC groups without
+// responding. This is useful for:
+// - Initial data collection before going live
+// - Debugging message patterns without affecting users
+// - Testing trigger detection in production environment
+//
+// IMPORTANT: Training mode is intentionally in-memory only. On process
+// restart (PM2 restart), the bot returns to production mode (trainingMode=false).
+// This is a safety feature - if the bot crashes while in training mode,
+// it will resume normal operations automatically.
+// =============================================================================
+
+/**
+ * Check if training mode is active.
+ *
+ * In training mode:
+ * - Control group: Commands work normally (pause, resume, status, training on/off)
+ * - OTC groups: Messages are logged to history but NO responses are sent
+ *
+ * Use case: Collecting message data before going live, or debugging.
+ *
+ * @returns true if training mode is active, false for normal production mode
+ */
+export function isTrainingMode(): boolean {
+  return state.trainingMode
+}
+
+/**
+ * Enable or disable training mode.
+ *
+ * When enabled (on=true):
+ * - Bot stops responding in OTC groups
+ * - Messages are still logged to Supabase history
+ * - Control group continues to work normally
+ *
+ * When disabled (on=false):
+ * - Bot resumes normal production operations
+ * - Responds to price triggers in OTC groups
+ *
+ * Note: State is in-memory only and resets to false on restart.
+ *
+ * @param on - true to enable training/observe-only mode, false for production mode
+ */
+export function setTrainingMode(on: boolean): void {
+  state.trainingMode = on
+}
+
+/**
+ * Reset training mode to disabled state.
+ * Used for testing to ensure clean state between tests.
+ */
+export function resetTrainingMode(): void {
+  state.trainingMode = false
 }

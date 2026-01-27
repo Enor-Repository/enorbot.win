@@ -14,6 +14,8 @@
 import type { WASocket } from '@whiskeysockets/baileys'
 import { logger } from '../utils/logger.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
+// Story 7.4: Bot message logging to Supabase
+import { logBotMessage } from '../services/messageHistory.js'
 
 // =============================================================================
 // Module State
@@ -141,6 +143,14 @@ async function sendNotification(message: string): Promise<void> {
   const result = await sendWithAntiDetection(socket, controlGroupId, message)
 
   if (result.ok) {
+    // Story 7.4 AC3: Log notification to history
+    logBotMessage({
+      groupJid: controlGroupId,
+      content: message,
+      messageType: 'notification',
+      isControlGroup: true,
+    })
+
     logger.info('Control notification sent', {
       event: 'notification_sent',
       message,
