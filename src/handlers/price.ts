@@ -37,6 +37,12 @@ import { isExcelLoggingConfigured } from '../types/config.js'
 import { getConfig } from '../config.js'
 // Story 7.4: Bot message logging to Supabase
 import { logBotMessage } from '../services/messageHistory.js'
+// Story 8.7: Observation logging for bot responses
+import { logObservation, createObservationEntry } from '../services/excelObservation.js'
+import { addToThread } from '../services/conversationTracker.js'
+import { queueObservationEntry } from '../services/logQueue.js'
+import { isObservationLoggingConfigured } from '../types/config.js'
+import type { OTCMessageType } from '../services/messageClassifier.js'
 
 // Story 2.4: Retry Constants (Task 1)
 /** Maximum number of retry attempts after initial failure */
@@ -71,12 +77,18 @@ export const sleep = (ms: number): Promise<void> =>
  * - AC3: Returns {recovered: true, retryCount} on recovery
  * - AC4: Never sends wrong data - returns error after exhausted retries
  *
+ * Story 8.7:
+ * - Logs bot responses to observations with response time tracking
+ *
  * @param context - Router context with message metadata and socket
  * @returns Result with price data on success, error message on failure
  */
 export async function handlePriceMessage(
   context: RouterContext
 ): Promise<Result<PriceHandlerResult>> {
+  // Story 8.7: Capture start time for response time tracking
+  const responseStartTime = Date.now()
+
   // Log trigger detection
   logger.info('Price trigger detected', {
     event: 'price_trigger_detected',
@@ -117,7 +129,7 @@ export async function handlePriceMessage(
   if (firstResult.ok) {
     // Story 3.3: Record successful operation to reset transient error counter
     recordSuccessfulOperation('binance')
-    return await sendPriceResponse(context, firstResult.data)
+    return await sendPriceResponse(context, firstResult.data, undefined, responseStartTime)
   }
 
   // Story 3.1: Track first failure (AC2 - consecutive failure escalation)
@@ -158,7 +170,7 @@ export async function handlePriceMessage(
       return await sendPriceResponse(context, retryResult.data, {
         recovered: true,
         retryCount: attempt,
-      })
+      }, responseStartTime)
     }
 
     // Log retry failure and track for escalation (Story 3.1 AC2)
@@ -226,14 +238,18 @@ export async function handlePriceMessage(
  * Helper to send formatted price response and return result.
  * Shared between happy path and recovery path.
  *
+ * Story 8.7: Also logs bot response to observations with response time.
+ *
  * @param context - Router context
  * @param price - Raw price from Binance
  * @param recoveryMeta - Optional recovery metadata (for retry success)
+ * @param responseStartTime - Start time for response time calculation
  */
 async function sendPriceResponse(
   context: RouterContext,
   price: number,
-  recoveryMeta?: { recovered: true; retryCount: number }
+  recoveryMeta?: { recovered: true; retryCount: number },
+  responseStartTime?: number
 ): Promise<Result<PriceHandlerResult>> {
   const formattedPrice = formatBrazilianPrice(price)
 
@@ -268,6 +284,15 @@ async function sendPriceResponse(
     messageType: 'price_response',
     isControlGroup: false,
     metadata: { price, recovered: !!recoveryMeta },
+  })
+
+  // Story 8.7: Log bot response to observations (fire-and-forget)
+  logBotResponseObservation({
+    context,
+    responseContent: formattedPrice,
+    responseStartTime,
+    messageType: 'price_response',
+    aiUsed: false, // Price responses don't use AI
   })
 
   if (recoveryMeta) {
@@ -388,4 +413,86 @@ function logToExcel(context: RouterContext, price: number): void {
         groupName: context.groupName,
       })
     })
+}
+
+/**
+ * Story 8.7: Log bot response to observations (fire-and-forget).
+ * Links to the same conversation thread as the triggering message.
+ *
+ * AC1: Bot responses logged with response time
+ * AC2: Response content preview captured (100 chars)
+ * AC3: Linked to same thread as triggering message
+ * AC4: ai_used accurately reflects OpenRouter usage
+ * AC5: Fire-and-forget pattern maintained
+ */
+function logBotResponseObservation(params: {
+  context: RouterContext
+  responseContent: string
+  responseStartTime?: number
+  messageType: OTCMessageType
+  aiUsed: boolean
+}): void {
+  // Skip if observation logging is not configured
+  try {
+    const config = getConfig()
+    if (!isObservationLoggingConfigured(config)) {
+      return
+    }
+  } catch {
+    return
+  }
+
+  const { context, responseContent, responseStartTime, messageType, aiUsed } = params
+
+  // Calculate response time (AC1)
+  const responseTimeMs = responseStartTime ? Date.now() - responseStartTime : null
+
+  // Link to existing conversation thread (AC3)
+  // Issue fix: Use actual bot JID from config for accurate participant tracking
+  let botJid = 'bot@s.whatsapp.net'
+  try {
+    const config = getConfig()
+    botJid = `${config.PHONE_NUMBER}@s.whatsapp.net`
+  } catch {
+    // Config not available, use fallback
+  }
+  const threadId = addToThread(context.groupId, botJid)
+
+  // Create observation entry
+  const observation = createObservationEntry({
+    groupId: context.groupId,
+    groupName: context.groupName,
+    playerJid: botJid,
+    playerName: 'Bot',
+    playerRole: 'operator', // Bot acts as operator
+    messageType,
+    triggerPattern: null, // Bot responses don't have triggers
+    conversationThread: threadId,
+    volumeBrl: null, // Bot responses don't include volume
+    volumeUsdt: null,
+    content: responseContent, // Will be truncated to 100 chars (AC2)
+    responseRequired: false, // Bot message, no response needed from others
+    responseGiven: responseContent, // This IS the response
+    responseTimeMs,
+    aiUsed, // AC4
+  })
+
+  // Fire-and-forget: don't await, don't block (AC5)
+  logObservation(observation)
+    .then(result => {
+      if (!result.ok) {
+        queueObservationEntry(observation)
+      }
+    })
+    .catch(() => {
+      queueObservationEntry(observation)
+    })
+
+  logger.debug('Bot response observation logged', {
+    event: 'bot_response_observation_logged',
+    groupId: context.groupId,
+    messageType,
+    responseTimeMs,
+    aiUsed,
+  })
 }

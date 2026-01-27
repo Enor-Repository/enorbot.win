@@ -59,6 +59,17 @@ export const envSchema = z.object({
     .min(1, 'EXCEL_TABLE_NAME must be a valid Excel table name')
     .default('Table1'),
 
+  // Story 8.5: Observations worksheet configuration
+  // Separate worksheet for observation/learning data
+  EXCEL_OBSERVATIONS_WORKSHEET_NAME: z
+    .string()
+    .min(1, 'EXCEL_OBSERVATIONS_WORKSHEET_NAME must be a valid worksheet name')
+    .default('Observations'),
+  EXCEL_OBSERVATIONS_TABLE_NAME: z
+    .string()
+    .min(1, 'EXCEL_OBSERVATIONS_TABLE_NAME must be a valid Excel table name')
+    .default('ObservationsTable'),
+
   // Bot configuration
   PHONE_NUMBER: z.string().regex(
     /^\d{12,15}$/,
@@ -106,4 +117,13 @@ export function isExcelLoggingConfigured(config: EnvConfig): boolean {
  */
 export function isOpenRouterConfigured(config: EnvConfig): boolean {
   return !!config.OPENROUTER_API_KEY
+}
+
+/**
+ * Check if observation logging is configured.
+ * Story 8.5 - Requires Excel logging + observations worksheet config.
+ * The observations worksheet/table use defaults, so this just checks Excel base config.
+ */
+export function isObservationLoggingConfigured(config: EnvConfig): boolean {
+  return isExcelLoggingConfigured(config)
 }

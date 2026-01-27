@@ -14,8 +14,16 @@ import {
   BACKLOG_THRESHOLD,
   BACKLOG_WARN_COOLDOWN_MS,
   SYNC_INTERVAL_MS,
+  // Story 8.4: Observation queue exports
+  queueObservationEntry,
+  getQueuedObservationEntries,
+  removeObservationFromQueue,
+  getObservationQueueLength,
+  flushObservationEntries,
+  setAppendObservationRowFn,
 } from './logQueue.js'
 import type { LogEntry } from './excel.js'
+import type { ObservationLogEntry } from './excelObservation.js'
 
 // =============================================================================
 // Mocks
@@ -37,6 +45,13 @@ const mockLogger = vi.hoisted(() => ({
 
 const mockQueueControlNotification = vi.hoisted(() => vi.fn())
 
+// Story 8.4: Observation queue mocks
+const mockObservationInsert = vi.hoisted(() => vi.fn())
+const mockObservationSelect = vi.hoisted(() => vi.fn())
+const mockObservationDelete = vi.hoisted(() => vi.fn())
+const mockObservationUpdate = vi.hoisted(() => vi.fn())
+const mockObservationEq = vi.hoisted(() => vi.fn())
+
 // Mock Supabase with chained methods
 vi.mock('@supabase/supabase-js', () => ({
   createClient: vi.fn(() => ({
@@ -49,6 +64,17 @@ vi.mock('@supabase/supabase-js', () => ({
           update: (data: unknown) => {
             mockSupabaseUpdate(data)
             return { eq: mockSupabaseEq }
+          },
+        }
+      }
+      if (table === 'observation_queue') {
+        return {
+          insert: mockObservationInsert,
+          select: mockObservationSelect,
+          delete: () => ({ eq: mockObservationEq }),
+          update: (data: unknown) => {
+            mockObservationUpdate(data)
+            return { eq: mockObservationEq }
           },
         }
       }
@@ -102,6 +128,54 @@ const testQueueRow = {
   status: 'pending' as const,
 }
 
+// Story 8.4: Observation test data
+const testObservationEntry: ObservationLogEntry = {
+  timestamp: new Date('2026-01-16T14:30:00Z'),
+  groupId: '551199999999-1234567890@g.us',
+  groupName: 'Crypto OTC Brasil',
+  playerJid: 'user@s.whatsapp.net',
+  playerName: 'Test User',
+  playerRole: 'client',
+  messageType: 'price_request',
+  triggerPattern: 'preço',
+  conversationThread: 'thread-uuid-123',
+  volumeBrl: 5000,
+  volumeUsdt: null,
+  contentPreview: 'qual o preço do usdt?',
+  responseRequired: true,
+  responseGiven: null,
+  responseTimeMs: null,
+  hourOfDay: 14,
+  dayOfWeek: 4,
+  aiUsed: false,
+}
+
+const testObservationQueueRow = {
+  id: 'obs-uuid-1',
+  timestamp: '2026-01-16T14:30:00Z',
+  group_id: '551199999999-1234567890@g.us',
+  group_name: 'Crypto OTC Brasil',
+  player_jid: 'user@s.whatsapp.net',
+  player_name: 'Test User',
+  player_role: 'client',
+  message_type: 'price_request',
+  trigger_pattern: 'preço',
+  conversation_thread: 'thread-uuid-123',
+  volume_brl: 5000,
+  volume_usdt: null,
+  content_preview: 'qual o preço do usdt?',
+  response_required: true,
+  response_given: null,
+  response_time_ms: null,
+  hour_of_day: 14,
+  day_of_week: 4,
+  ai_used: false,
+  created_at: '2026-01-16T14:30:00Z',
+  attempts: 0,
+  last_attempt_at: null,
+  status: 'pending' as const,
+}
+
 // =============================================================================
 // Story 5.3: Offline Queue & Sync Tests
 // =============================================================================
@@ -120,6 +194,17 @@ describe('logQueue.ts - Story 5.3: Offline Queue & Sync', () => {
       }),
     })
     mockSupabaseEq.mockResolvedValue({ error: null })
+
+    // Story 8.4: Default observation queue mocks
+    mockObservationInsert.mockResolvedValue({ error: null })
+    mockObservationSelect.mockReturnValue({
+      eq: vi.fn().mockReturnValue({
+        order: vi.fn().mockReturnValue({
+          limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      }),
+    })
+    mockObservationEq.mockResolvedValue({ error: null })
   })
 
   afterEach(() => {
@@ -458,6 +543,279 @@ describe('logQueue.ts - Story 5.3: Offline Queue & Sync', () => {
       resetQueueState()
 
       const result = await getQueueLength()
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data).toBe(0)
+      }
+    })
+  })
+})
+
+// =============================================================================
+// Story 8.4: Observation Queue Tests
+// =============================================================================
+describe('logQueue.ts - Story 8.4: Observation Queue', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    resetQueueState()
+
+    // Default mock implementations
+    mockSupabaseInsert.mockResolvedValue({ error: null })
+    mockObservationInsert.mockResolvedValue({ error: null })
+    mockObservationSelect.mockReturnValue({
+      eq: vi.fn().mockReturnValue({
+        order: vi.fn().mockReturnValue({
+          limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+        }),
+      }),
+    })
+    mockObservationEq.mockResolvedValue({ error: null })
+  })
+
+  afterEach(() => {
+    resetQueueState()
+  })
+
+  // ===========================================================================
+  // AC1: observation_queue table created (verified by migration)
+  // ===========================================================================
+  describe('AC1: observation_queue table structure', () => {
+    it('has all required fields in insert', async () => {
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      await queueObservationEntry(testObservationEntry)
+
+      expect(mockObservationInsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timestamp: '2026-01-16T14:30:00.000Z',
+          group_id: '551199999999-1234567890@g.us',
+          group_name: 'Crypto OTC Brasil',
+          player_jid: 'user@s.whatsapp.net',
+          player_name: 'Test User',
+          player_role: 'client',
+          message_type: 'price_request',
+          trigger_pattern: 'preço',
+          conversation_thread: 'thread-uuid-123',
+          volume_brl: 5000,
+          volume_usdt: null,
+          content_preview: 'qual o preço do usdt?',
+          response_required: true,
+          response_given: null,
+          response_time_ms: null,
+          hour_of_day: 14,
+          day_of_week: 4,
+          ai_used: false,
+        })
+      )
+    })
+  })
+
+  // ===========================================================================
+  // AC2: queueObservationEntry() inserts to correct table
+  // ===========================================================================
+  describe('AC2: queueObservationEntry()', () => {
+    it('inserts entry to observation_queue table', async () => {
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      await queueObservationEntry(testObservationEntry)
+
+      expect(mockObservationInsert).toHaveBeenCalled()
+      expect(mockSupabaseInsert).not.toHaveBeenCalled() // Should not touch log_queue
+    })
+
+    it('logs successful queue operation', async () => {
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      await queueObservationEntry(testObservationEntry)
+
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          event: 'observation_entry_queued',
+          groupId: '551199999999-1234567890@g.us',
+          messageType: 'price_request',
+        })
+      )
+    })
+
+    it('logs error when insert fails', async () => {
+      mockObservationInsert.mockResolvedValueOnce({ error: { message: 'DB error' } })
+
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      await queueObservationEntry(testObservationEntry)
+
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          event: 'observation_queue_error',
+        })
+      )
+    })
+  })
+
+  // ===========================================================================
+  // AC3: Periodic sync flushes observation queue
+  // ===========================================================================
+  describe('AC3: Observation queue flush', () => {
+    it('flushObservationEntries processes queued entries', async () => {
+      const mockAppendObservation = vi.fn().mockResolvedValue({ ok: true, data: { rowNumber: 1 } })
+      setAppendObservationRowFn(mockAppendObservation)
+
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      mockObservationSelect.mockReturnValue({
+        eq: vi.fn().mockReturnValue({
+          order: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue({
+              data: [testObservationQueueRow],
+              error: null,
+            }),
+          }),
+        }),
+      })
+
+      await flushObservationEntries()
+
+      expect(mockAppendObservation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          groupId: '551199999999-1234567890@g.us',
+          messageType: 'price_request',
+        })
+      )
+    })
+
+    it('removes entry from queue after successful sync', async () => {
+      const mockAppendObservation = vi.fn().mockResolvedValue({ ok: true, data: { rowNumber: 1 } })
+      setAppendObservationRowFn(mockAppendObservation)
+
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      mockObservationSelect.mockReturnValue({
+        eq: vi.fn().mockReturnValue({
+          order: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue({
+              data: [testObservationQueueRow],
+              error: null,
+            }),
+          }),
+        }),
+      })
+
+      await flushObservationEntries()
+
+      expect(mockObservationEq).toHaveBeenCalledWith('id', 'obs-uuid-1')
+    })
+
+    it('stops processing on first failure', async () => {
+      const mockAppendObservation = vi.fn().mockResolvedValue({ ok: false, error: 'API error' })
+      setAppendObservationRowFn(mockAppendObservation)
+
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      mockObservationSelect.mockReturnValue({
+        eq: vi.fn().mockReturnValue({
+          order: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue({
+              data: [testObservationQueueRow, { ...testObservationQueueRow, id: 'obs-uuid-2' }],
+              error: null,
+            }),
+          }),
+        }),
+      })
+
+      await flushObservationEntries()
+
+      expect(mockAppendObservation).toHaveBeenCalledTimes(1)
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          event: 'observation_queue_flush_stopped',
+        })
+      )
+    })
+  })
+
+  // ===========================================================================
+  // AC5: Existing price quote queue unchanged
+  // ===========================================================================
+  describe('AC5: Price queue unchanged', () => {
+    it('observation operations do not affect log_queue', async () => {
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      await queueObservationEntry(testObservationEntry)
+
+      // Should only insert to observation_queue
+      expect(mockObservationInsert).toHaveBeenCalled()
+      expect(mockSupabaseInsert).not.toHaveBeenCalled()
+    })
+
+    it('getQueuedObservationEntries orders by created_at ascending', async () => {
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      const mockOrder = vi.fn().mockReturnValue({
+        limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+      })
+      const mockEqFn = vi.fn().mockReturnValue({ order: mockOrder })
+      mockObservationSelect.mockReturnValue({ eq: mockEqFn })
+
+      await getQueuedObservationEntries()
+
+      expect(mockOrder).toHaveBeenCalledWith('created_at', { ascending: true })
+    })
+  })
+
+  // ===========================================================================
+  // Edge Cases
+  // ===========================================================================
+  describe('Observation queue edge cases', () => {
+    it('handles empty observation queue gracefully', async () => {
+      const mockAppendObservation = vi.fn()
+      setAppendObservationRowFn(mockAppendObservation)
+
+      const { initLogQueue } = await import('./logQueue.js')
+      initLogQueue()
+
+      mockObservationSelect.mockReturnValue({
+        eq: vi.fn().mockReturnValue({
+          order: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+          }),
+        }),
+      })
+
+      await flushObservationEntries()
+
+      expect(mockAppendObservation).not.toHaveBeenCalled()
+    })
+
+    it('skips observation flush when no append function is set', async () => {
+      resetQueueState()
+
+      await flushObservationEntries()
+
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          event: 'observation_queue_flush_skipped',
+        })
+      )
+    })
+
+    it('getObservationQueueLength returns 0 when supabase not initialized', async () => {
+      resetQueueState()
+
+      const result = await getObservationQueueLength()
 
       expect(result.ok).toBe(true)
       if (result.ok) {

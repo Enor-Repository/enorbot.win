@@ -42,10 +42,14 @@ import { triggerAutoPause } from '../services/autoPause.js'
 import { recordTransientError, recordSuccessfulOperation } from '../services/transientErrors.js'
 // Story 5.2/5.3: Excel logging and queue services
 import { initExcelService } from '../services/excel.js'
-import { initLogQueue, startPeriodicSync } from '../services/logQueue.js'
-import { isExcelLoggingConfigured } from '../types/config.js'
+import { initLogQueue, startPeriodicSync, queueObservationEntry, setAppendObservationRowFn } from '../services/logQueue.js'
+import { isExcelLoggingConfigured, isObservationLoggingConfigured } from '../types/config.js'
 // Message history logging to Supabase
 import { initMessageHistory, logMessageToHistory } from '../services/messageHistory.js'
+// Story 8.6: Observation logging services
+import { classifyMessage, inferPlayerRole } from '../services/messageClassifier.js'
+import { resolveThreadId } from '../services/conversationTracker.js'
+import { logObservation, createObservationEntry, appendObservationRowDirect } from '../services/excelObservation.js'
 
 let sock: WASocket | null = null
 
@@ -297,6 +301,12 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         logger.info('Excel logging services initialized', { event: 'excel_services_init' })
       }
 
+      // Story 8.6: Initialize observation logging service
+      if (isObservationLoggingConfigured(config)) {
+        setAppendObservationRowFn(appendObservationRowDirect)
+        logger.info('Observation logging service initialized', { event: 'observation_services_init' })
+      }
+
       // Initialize message history logging to Supabase
       initMessageHistory(config)
       logger.info('Message history service initialized', { event: 'message_history_init' })
@@ -471,6 +481,89 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         })
       }
       // IGNORE and RECEIPT_HANDLER destinations: no action in text message handler
+
+      // Story 8.6: Log observation for pattern analysis (fire-and-forget)
+      // Skip control group messages and ignored messages
+      if (!isControlGroup && route.destination !== 'IGNORE') {
+        try {
+          const messageTimestamp = new Date()
+
+          // Classify message type
+          const classification = classifyMessage(messageText, {
+            isFromBot: false,
+            hasReceipt: route.context.isReceipt ?? false,
+            hasTronscan: route.context.hasTronscan ?? false,
+            hasPriceTrigger: route.context.hasTrigger ?? false,
+          })
+
+          // Resolve conversation thread (may create new or link to existing)
+          const threadId = resolveThreadId({
+            groupId,
+            senderJid: sender,
+            messageType: classification.messageType,
+            timestamp: messageTimestamp,
+          })
+
+          // Infer player role (basic heuristics for now)
+          const playerRole = inferPlayerRole({
+            playerJid: sender,
+            groupId,
+            recentMessages: [], // Empty for now - Story 8.8 will add history
+          })
+
+          // Determine if response is required based on route
+          const responseRequired = route.destination === 'PRICE_HANDLER' ||
+            route.destination === 'RECEIPT_HANDLER' ||
+            route.destination === 'TRONSCAN_HANDLER'
+
+          // Create observation entry
+          const observation = createObservationEntry({
+            groupId,
+            groupName,
+            playerJid: sender,
+            playerName: senderName ?? sender,
+            playerRole,
+            messageType: classification.messageType,
+            triggerPattern: classification.triggerPattern,
+            conversationThread: threadId,
+            volumeBrl: classification.volumeBrl,
+            volumeUsdt: classification.volumeUsdt,
+            content: messageText,
+            responseRequired,
+            // Response fields set by Story 8.7
+            responseGiven: null,
+            responseTimeMs: null,
+            aiUsed: false,
+          })
+
+          // Fire-and-forget: don't await, don't block message processing (AC4)
+          logObservation(observation)
+            .then(result => {
+              if (!result.ok) {
+                // Queue for retry
+                queueObservationEntry(observation)
+              }
+            })
+            .catch(() => {
+              // Queue for retry on exception
+              queueObservationEntry(observation)
+            })
+
+          logger.debug('Observation logged', {
+            event: 'observation_logged',
+            groupId,
+            messageType: classification.messageType,
+            threadId,
+            playerRole,
+          })
+        } catch (obsError) {
+          // Never let observation logging break message processing
+          logger.warn('Observation logging failed', {
+            event: 'observation_logging_error',
+            error: obsError instanceof Error ? obsError.message : String(obsError),
+          })
+        }
+      }
     } catch (error) {
       // Top-level error handler to prevent message processing crashes
       logger.error('Error processing message', {

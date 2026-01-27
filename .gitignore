@@ -26,3 +26,4 @@ npm-debug.log*
 .pm2/
 logs/
 .vps-credentials
+docs/credentials.md
