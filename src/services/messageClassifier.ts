@@ -38,13 +38,21 @@ export const MIN_MESSAGES_FOR_ROLE_INFERENCE = 5
 /**
  * Message types for OTC pattern classification.
  * Used to categorize messages for behavioral analysis.
+ *
+ * Updated 2026-01-29: Added new types based on behavioral analysis
+ * See docs/behavioral-analysis.md for full pattern documentation
  */
 export type OTCMessageType =
-  | 'price_request'      // "preço?", "cotação", "quanto tá?"
+  | 'price_request'      // "preço?", "cotação", "quanto tá?", "price?", "tx pls"
   | 'price_response'     // Bot's price quote response
+  | 'price_lock'         // "trava 5000" - lock amount at current rate (NEW)
   | 'volume_inquiry'     // "compro 10k", "tenho 5000 pra vender"
+  | 'quote_calculation'  // "5000 * 5.23 = 26150" - operator calculation (NEW)
   | 'negotiation'        // Counter-offers, price discussion
-  | 'confirmation'       // "fechado", "ok", "vamos"
+  | 'confirmation'       // "fechado", "ok", "vamos", "fecha"
+  | 'bot_command'        // "/compra", "/saldo" - commands to other bots (NEW)
+  | 'bot_confirmation'   // "Compra Registrada" - other bot responses (NEW)
+  | 'balance_report'     // "Saldo Atual" - balance information (NEW)
   | 'receipt'            // PDF/image receipt posted
   | 'tronscan'           // Transaction link shared
   | 'general'            // Chit-chat, greetings, unclassified
@@ -91,6 +99,7 @@ export interface ClassificationContext {
  * Exported for per-group customization.
  *
  * Story 8.1 AC6: All classification is rules-based (no AI calls)
+ * Updated 2026-01-29: Enhanced based on behavioral analysis
  */
 export const MESSAGE_PATTERNS: Record<OTCMessageType, RegExp[]> = {
   price_request: [
@@ -102,6 +111,12 @@ export const MESSAGE_PATTERNS: Record<OTCMessageType, RegExp[]> = {
     /\bquanto\s+custa\b/i,
     /\bvalor\s+(do|da|de)?\s*(usdt|d[oó]lar)?(?:\s|$|[?!,.])/i,
     /\bqual\s+(o\s+)?pre[çc]o\b/i,
+    // English patterns (behavioral analysis: OTC enor <> Lumina group uses English)
+    /\bprice\s*[?？]\s*$/i,       // "price?" or "price？" (fullwidth question mark)
+    /^price\s*$/i,               // Just "price" alone
+    /\btx\s+pls\b/i,             // "tx pls" - rate please
+    /\btx\s+please\b/i,          // "tx please"
+    /\b(what|whats)\s+(the\s+)?rate\b/i, // "what's the rate"
   ],
   price_response: [
     // Bot responses typically contain price format
@@ -109,13 +124,26 @@ export const MESSAGE_PATTERNS: Record<OTCMessageType, RegExp[]> = {
     /\bUSDT\/BRL[:\s]+\d+[.,]\d+/i,
     /\bcota[çc][aã]o[:\s]+\d+[.,]\d+/i,
   ],
+  price_lock: [
+    // "trava" is the primary OTC term for locking a price (behavioral analysis)
+    /\btrava\s+(\d+[.,]?\d*)/i,           // "trava 5000", "trava 11400.34"
+    /\btrava\s+(\d+[.,]?\d*)\s*por\s+favor/i, // "trava 5000 por favor"
+    /^trava$/i,                            // Just "trava" alone (price lock request)
+    /\block\s+(\d+[.,]?\d*)/i,             // English: "lock 5000"
+  ],
   volume_inquiry: [
-    // Buy patterns with volume
-    /\b(compro|quero\s+comprar|preciso\s+de?)\s+\d+/i,
-    // Sell patterns with volume
-    /\b(vendo|tenho|quero\s+vender)\s+\d+/i,
+    // Buy patterns with volume (party-mode fix: handle 'mil' suffix)
+    /\b(compro|quero\s+comprar|preciso\s+de?)\s+\d+(?:[.,]?\d+)?\s*(k|mil)?\s*(usdt?|brl|reais)?/i,
+    // Sell patterns with volume (party-mode fix: handle 'mil' suffix)
+    /\b(vendo|tenho|quero\s+vender)\s+\d+(?:[.,]?\d+)?\s*(k|mil)?\s*(usdt?|brl|reais)?/i,
     // Generic volume mention with currency
     /\d+\s*(k|mil|usdt|usd|brl|reais)\b/i,
+  ],
+  quote_calculation: [
+    // Operator calculation: "5000 * 5.230 = 26,150.00 BRL"
+    /\d+[.,]?\d*\s*[*×x]\s*\d+[.,]\d+\s*=\s*[\d.,]+/i,
+    // Simpler format: "5000 * 5.23 = 26150"
+    /\d+\s*\*\s*\d+[.,]\d+\s*=/i,
   ],
   negotiation: [
     // Counter-offer patterns
@@ -129,6 +157,29 @@ export const MESSAGE_PATTERNS: Record<OTCMessageType, RegExp[]> = {
     /\b(confirmado|confirma|certo|beleza|blz)\b/i,
     /\b(pode\s+mandar|manda\s+a[ií]|envia)\b/i,
     /\b(aceito|aceitei|topado|topo)\b/i,
+    // Additional patterns from behavioral analysis
+    /^fecha[?]?$/i,              // "Fecha" or "Fecha?" alone
+    /\bfechar\s+agora\b/i,       // "fechar agora"
+    /^ok\s*obg?$/i,              // "Ok obg" pattern
+  ],
+  bot_command: [
+    // Commands to other bots (Assistente Liqd, etc.)
+    /^\/compra\b/i,              // "/compra" - register purchase
+    /^\/saldo\b/i,               // "/saldo" - check balance
+    /^\/saldof\b/i,              // "/saldof" - formatted balance
+    /^\/[a-z]+\b/i,              // Any bot command starting with /
+  ],
+  bot_confirmation: [
+    // Responses from other bots
+    /\bcompra\s+registrada\b/i,  // "Compra Registrada"
+    /\bvenda\s+registrada\b/i,   // "Venda Registrada"
+    /\bopera[çc][aã]o\s+(registrada|confirmada)\b/i,
+  ],
+  balance_report: [
+    // Balance reports
+    /\bsaldo\s+atual\b/i,        // "Saldo Atual"
+    /\bsaldo[:\s]+\d+/i,         // "Saldo: 60917"
+    /\bbalance[:\s]+\d+/i,       // English: "Balance: 60917"
   ],
   receipt: [
     // Usually detected by attachment, but some text patterns
@@ -244,15 +295,20 @@ function matchesType(message: string, type: OTCMessageType): boolean {
  * Classify a message without using AI.
  * Uses keyword matching and regex patterns.
  *
- * Classification Priority (Story 8.1):
- * 1. isFromBot → price_response (if follows request) | notification | status
+ * Classification Priority (Updated 2026-01-29 based on behavioral analysis):
+ * 1. isFromBot → price_response
  * 2. hasReceipt → receipt
  * 3. hasTronscan → tronscan
- * 4. hasPriceTrigger → price_request
- * 5. hasVolumePattern + buyKeyword → volume_inquiry
- * 6. inActiveThread + hasNumber → negotiation
- * 7. inActiveThread + confirmKeyword → confirmation
- * 8. else → general
+ * 4. Bot commands (/compra, /saldo) → bot_command
+ * 5. Bot confirmations (Compra Registrada) → bot_confirmation
+ * 6. Balance reports (Saldo Atual) → balance_report
+ * 7. Price lock (trava 5000) → price_lock
+ * 8. Quote calculation (5000 * 5.23 = 26150) → quote_calculation
+ * 9. hasPriceTrigger → price_request (includes English patterns)
+ * 10. hasVolumePattern + buyKeyword → volume_inquiry
+ * 11. inActiveThread + hasNumber → negotiation
+ * 12. confirmKeyword → confirmation
+ * 13. else → general
  *
  * Story 8.1 AC1: classifyMessage() returns correct type for price requests
  * Story 8.1 AC2: Volume extraction works for BRL patterns
@@ -267,7 +323,7 @@ export function classifyMessage(
   const volumeBrl = extractVolumeBrl(message)
   const volumeUsdt = extractVolumeUsdt(message)
 
-  // Priority 1: Bot messages
+  // Priority 1: Bot messages (our bot's responses)
   if (context.isFromBot) {
     return {
       messageType: 'price_response',
@@ -300,7 +356,62 @@ export function classifyMessage(
     }
   }
 
-  // Priority 4: Price trigger keywords (check both isPriceTrigger and extended patterns)
+  // Priority 4: Bot commands (/compra, /saldo, etc.)
+  if (matchesType(message, 'bot_command')) {
+    return {
+      messageType: 'bot_command',
+      triggerPattern: findTriggerPattern(message, 'bot_command'),
+      volumeBrl,
+      volumeUsdt,
+      confidence: 'high',
+    }
+  }
+
+  // Priority 5: Bot confirmations (Compra Registrada, etc.)
+  if (matchesType(message, 'bot_confirmation')) {
+    return {
+      messageType: 'bot_confirmation',
+      triggerPattern: findTriggerPattern(message, 'bot_confirmation'),
+      volumeBrl,
+      volumeUsdt,
+      confidence: 'high',
+    }
+  }
+
+  // Priority 6: Balance reports (Saldo Atual)
+  if (matchesType(message, 'balance_report')) {
+    return {
+      messageType: 'balance_report',
+      triggerPattern: findTriggerPattern(message, 'balance_report'),
+      volumeBrl,
+      volumeUsdt,
+      confidence: 'high',
+    }
+  }
+
+  // Priority 7: Price lock (trava 5000) - critical OTC operation
+  if (matchesType(message, 'price_lock')) {
+    return {
+      messageType: 'price_lock',
+      triggerPattern: findTriggerPattern(message, 'price_lock'),
+      volumeBrl,
+      volumeUsdt,
+      confidence: 'high',
+    }
+  }
+
+  // Priority 8: Quote calculation (5000 * 5.23 = 26150) - operator response
+  if (matchesType(message, 'quote_calculation')) {
+    return {
+      messageType: 'quote_calculation',
+      triggerPattern: findTriggerPattern(message, 'quote_calculation'),
+      volumeBrl,
+      volumeUsdt,
+      confidence: 'high',
+    }
+  }
+
+  // Priority 9: Price trigger keywords (includes new English patterns)
   if (context.hasPriceTrigger || isPriceTrigger(message) || matchesType(message, 'price_request')) {
     return {
       messageType: 'price_request',
@@ -311,7 +422,7 @@ export function classifyMessage(
     }
   }
 
-  // Priority 5: Volume with buy/sell intent
+  // Priority 10: Volume with buy/sell intent
   if (hasVolumeIntent(message)) {
     return {
       messageType: 'volume_inquiry',
@@ -322,7 +433,7 @@ export function classifyMessage(
     }
   }
 
-  // Priority 6: Negotiation (in active thread with numbers)
+  // Priority 11: Negotiation (in active thread with numbers)
   if (context.inActiveThread) {
     // Check for confirmation first (higher priority within thread)
     if (matchesType(message, 'confirmation')) {
@@ -347,7 +458,7 @@ export function classifyMessage(
     }
   }
 
-  // Priority 7: Standalone confirmation (outside thread)
+  // Priority 12: Standalone confirmation (outside thread)
   if (matchesType(message, 'confirmation')) {
     return {
       messageType: 'confirmation',
@@ -358,7 +469,7 @@ export function classifyMessage(
     }
   }
 
-  // Priority 8: General (fallback)
+  // Priority 13: General (fallback)
   return {
     messageType: 'general',
     triggerPattern: null,
@@ -380,9 +491,10 @@ export interface MessageHistoryEntry {
  * Attempt to infer player role from message history.
  * Returns 'unknown' if insufficient data.
  *
- * Heuristics (Story 8.1 AC5):
- * - operator: > 50% of group's price_response messages
- * - client: > 70% of messages are price_request or volume_inquiry
+ * Heuristics (Updated 2026-01-29 based on behavioral analysis):
+ * - operator: Sends quote_calculations, price_response, tronscan links
+ * - client: Sends price_lock, price_request, volume_inquiry, bot_command
+ * - bot: Sends bot_confirmation, balance_report
  * - cio: Mentioned in high-value (> 50k BRL) confirmations (future)
  * - unknown: Default until pattern emerges
  *
@@ -404,9 +516,14 @@ export function inferPlayerRole(params: {
   const messageTypeCounts: Record<OTCMessageType, number> = {
     price_request: 0,
     price_response: 0,
+    price_lock: 0,
     volume_inquiry: 0,
+    quote_calculation: 0,
     negotiation: 0,
     confirmation: 0,
+    bot_command: 0,
+    bot_confirmation: 0,
+    balance_report: 0,
     receipt: 0,
     tronscan: 0,
     general: 0,
@@ -416,16 +533,22 @@ export function inferPlayerRole(params: {
     messageTypeCounts[msg.messageType]++
   }
 
-  // Check for operator pattern: frequent price responses (Issue fix: use constant)
-  const priceResponseRatio = messageTypeCounts.price_response / totalMessages
-  if (priceResponseRatio > OPERATOR_RESPONSE_RATIO_THRESHOLD) {
+  // Check for operator pattern: sends calculations, prices, and tronscan links
+  const operatorMessageCount =
+    messageTypeCounts.price_response +
+    messageTypeCounts.quote_calculation +
+    messageTypeCounts.tronscan
+  const operatorRatio = operatorMessageCount / totalMessages
+  if (operatorRatio > OPERATOR_RESPONSE_RATIO_THRESHOLD) {
     return 'operator'
   }
 
-  // Check for client pattern: mostly requests and inquiries (Issue fix: use constant)
+  // Check for client pattern: sends locks, requests, inquiries, and bot commands
   const clientMessageCount =
     messageTypeCounts.price_request +
+    messageTypeCounts.price_lock +
     messageTypeCounts.volume_inquiry +
+    messageTypeCounts.bot_command +
     messageTypeCounts.confirmation
   const clientRatio = clientMessageCount / totalMessages
   if (clientRatio > CLIENT_MESSAGE_RATIO_THRESHOLD) {

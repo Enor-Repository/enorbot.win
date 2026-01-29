@@ -44,6 +44,7 @@ import {
   setPlayerRole,
   type GroupConfig,
 } from '../services/groupConfig.js'
+import { getClassificationMetrics } from '../services/classificationEngine.js'
 
 // =============================================================================
 // Known Groups Cache (deprecated - use groupConfig service)
@@ -882,6 +883,43 @@ export async function buildStatusMessage(): Promise<string> {
         const groupNames = shown.map(g => g.groupName).join(', ')
         lines.push(`• ${emoji} ${mode}: ${groupNames}${extra}`)
       }
+    }
+  }
+
+  // Classification metrics section
+  const classMetrics = getClassificationMetrics()
+  lines.push('')
+  lines.push('🔬 Classification')
+
+  if (classMetrics.totalClassifications === 0) {
+    lines.push('• No messages classified yet (since restart)')
+  } else {
+    lines.push(`• ${classMetrics.totalClassifications} messages classified`)
+
+    // Show top 3 message types
+    const topTypes = Object.entries(classMetrics.classificationDistribution)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 3)
+      .map(([type, count]) => `${type}: ${count}`)
+      .join(', ')
+    if (topTypes) {
+      lines.push(`• Top types: ${topTypes}`)
+    }
+
+    // AI usage summary
+    const aiMetrics = classMetrics.aiMetrics
+    if (aiMetrics.totalCalls > 0) {
+      lines.push(`• AI: ${aiMetrics.totalCalls} calls, $${aiMetrics.totalCostUsd.toFixed(3)} cost`)
+    }
+
+    // Circuit breaker status (only show if tripped)
+    if (aiMetrics.circuitBreaker.isOpen) {
+      lines.push(`• ⚠️ AI circuit breaker OPEN`)
+    }
+
+    // Latency (only show if meaningful)
+    if (classMetrics.latencyPercentiles.p50 > 0) {
+      lines.push(`• Latency p50: ${classMetrics.latencyPercentiles.p50.toFixed(0)}ms`)
     }
   }
 

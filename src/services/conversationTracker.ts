@@ -268,13 +268,18 @@ export function closeThread(
  * Get thread ID for a message based on context and timing.
  * Handles thread creation and linking based on message type.
  *
- * Thread Rules:
+ * Thread Rules (Updated 2026-01-29):
  * - price_request → creates new thread (or returns existing if < 5 min old)
+ * - price_lock → creates new thread (critical transaction initiation)
  * - price_response → links to most recent thread in group
+ * - quote_calculation → links to active thread (operator calculation)
  * - volume_inquiry → may create new thread if no active one
  * - negotiation → links to active thread only
+ * - bot_command → links to active thread (client command to other bot)
+ * - bot_confirmation → links to active thread (other bot response)
  * - confirmation → links to active thread, then closes it
  * - receipt/tronscan → links to active thread, then closes it
+ * - balance_report → no thread linking (standalone info)
  * - general → no thread linking
  */
 export function resolveThreadId(params: {
@@ -290,8 +295,19 @@ export function resolveThreadId(params: {
       // Creates new thread or returns existing
       return getOrCreateThread(groupId, senderJid)
 
+    case 'price_lock': {
+      // Creates new thread (critical transaction initiation) or links to existing
+      const existing = addToThread(groupId, senderJid)
+      if (existing) return existing
+      return getOrCreateThread(groupId, senderJid)
+    }
+
     case 'price_response':
       // Links to active thread (bot responding)
+      return addToThread(groupId, senderJid)
+
+    case 'quote_calculation':
+      // Links to active thread (operator response with calculation)
       return addToThread(groupId, senderJid)
 
     case 'volume_inquiry': {
@@ -303,6 +319,14 @@ export function resolveThreadId(params: {
 
     case 'negotiation':
       // Only links to active thread
+      return addToThread(groupId, senderJid)
+
+    case 'bot_command':
+      // Links to active thread (client command to other bot like /compra)
+      return addToThread(groupId, senderJid)
+
+    case 'bot_confirmation':
+      // Links to active thread (other bot's response like "Compra Registrada")
       return addToThread(groupId, senderJid)
 
     case 'confirmation': {
@@ -331,6 +355,10 @@ export function resolveThreadId(params: {
       }
       return threadId
     }
+
+    case 'balance_report':
+      // No thread linking (standalone balance info)
+      return null
 
     case 'general':
     default:

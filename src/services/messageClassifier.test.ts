@@ -176,6 +176,31 @@ describe('messageClassifier', () => {
         const result = classifyMessage('tenho 2k pra vender', defaultContext)
         expect(result.messageType).toBe('volume_inquiry')
       })
+
+      // Party-mode fix: 'mil' (Portuguese thousand) support
+      it('classifies "compro 5 mil" as volume_inquiry', () => {
+        const result = classifyMessage('compro 5 mil', defaultContext)
+        expect(result.messageType).toBe('volume_inquiry')
+        expect(result.volumeBrl).toBe(5000)
+      })
+
+      it('classifies "vendo 10 mil usdt" as volume_inquiry', () => {
+        const result = classifyMessage('vendo 10 mil usdt', defaultContext)
+        expect(result.messageType).toBe('volume_inquiry')
+        expect(result.volumeUsdt).toBe(10000)
+      })
+
+      it('classifies "preciso de 2,5 mil" as volume_inquiry', () => {
+        const result = classifyMessage('preciso de 2,5 mil', defaultContext)
+        expect(result.messageType).toBe('volume_inquiry')
+        expect(result.volumeBrl).toBe(2500)
+      })
+
+      it('classifies "tenho 7.5 mil pra vender" as volume_inquiry', () => {
+        const result = classifyMessage('tenho 7.5 mil pra vender', defaultContext)
+        expect(result.messageType).toBe('volume_inquiry')
+        expect(result.volumeBrl).toBe(7500)
+      })
     })
 
     describe('Confirmation classification', () => {
@@ -240,6 +265,131 @@ describe('messageClassifier', () => {
       it('classifies greeting as general', () => {
         const result = classifyMessage('boa tarde', defaultContext)
         expect(result.messageType).toBe('general')
+      })
+    })
+
+    // New tests for behavioral analysis patterns (2026-01-29)
+    describe('Price lock classification (trava)', () => {
+      it('classifies "trava 5000" as price_lock', () => {
+        const result = classifyMessage('trava 5000', defaultContext)
+        expect(result.messageType).toBe('price_lock')
+        expect(result.confidence).toBe('high')
+      })
+
+      it('classifies "Trava 7831" as price_lock', () => {
+        const result = classifyMessage('Trava 7831', defaultContext)
+        expect(result.messageType).toBe('price_lock')
+      })
+
+      it('classifies "trava 5000 por favor" as price_lock', () => {
+        const result = classifyMessage('trava 5000 por favor', defaultContext)
+        expect(result.messageType).toBe('price_lock')
+      })
+
+      it('classifies "trava 11400.34 por favor" as price_lock', () => {
+        const result = classifyMessage('trava 11400.34 por favor', defaultContext)
+        expect(result.messageType).toBe('price_lock')
+      })
+
+      it('extracts volume from price lock', () => {
+        const result = classifyMessage('trava 5000', defaultContext)
+        expect(result.volumeBrl).toBe(5000)
+      })
+    })
+
+    describe('Quote calculation classification', () => {
+      it('classifies "5000 * 5.230 = 26,150.00 BRL" as quote_calculation', () => {
+        const result = classifyMessage('5000 * 5.230 = 26,150.00 BRL', defaultContext)
+        expect(result.messageType).toBe('quote_calculation')
+        expect(result.confidence).toBe('high')
+      })
+
+      it('classifies "7831 * 5.232 = 40,971.79 BRL" as quote_calculation', () => {
+        const result = classifyMessage('7831 * 5.232 = 40,971.79 BRL', defaultContext)
+        expect(result.messageType).toBe('quote_calculation')
+      })
+
+      it('classifies simple calculation as quote_calculation', () => {
+        const result = classifyMessage('5000 * 5.23 = 26150', defaultContext)
+        expect(result.messageType).toBe('quote_calculation')
+      })
+    })
+
+    describe('Bot command classification', () => {
+      it('classifies "/compra" as bot_command', () => {
+        const result = classifyMessage('/compra', defaultContext)
+        expect(result.messageType).toBe('bot_command')
+        expect(result.confidence).toBe('high')
+      })
+
+      it('classifies "/saldo" as bot_command', () => {
+        const result = classifyMessage('/saldo', defaultContext)
+        expect(result.messageType).toBe('bot_command')
+      })
+
+      it('classifies "/saldof" as bot_command', () => {
+        const result = classifyMessage('/saldof', defaultContext)
+        expect(result.messageType).toBe('bot_command')
+      })
+    })
+
+    describe('Bot confirmation classification', () => {
+      it('classifies "Compra Registrada..." as bot_confirmation', () => {
+        const result = classifyMessage('Compra Registrada 5000 USDT> 5.2300 > R$26150.00 BRL', defaultContext)
+        expect(result.messageType).toBe('bot_confirmation')
+        expect(result.confidence).toBe('high')
+      })
+    })
+
+    describe('Balance report classification', () => {
+      it('classifies "Saldo Atual 60917.25 BRL" as balance_report', () => {
+        const result = classifyMessage('Saldo Atual 60917.25 BRL', defaultContext)
+        expect(result.messageType).toBe('balance_report')
+        expect(result.confidence).toBe('high')
+      })
+    })
+
+    describe('English price requests', () => {
+      it('classifies "price?" as price_request', () => {
+        const result = classifyMessage('price?', defaultContext)
+        expect(result.messageType).toBe('price_request')
+      })
+
+      it('classifies "price？" (fullwidth) as price_request', () => {
+        const result = classifyMessage('price？', defaultContext)
+        expect(result.messageType).toBe('price_request')
+      })
+
+      it('classifies "tx pls" as price_request', () => {
+        const result = classifyMessage('tx pls', defaultContext)
+        expect(result.messageType).toBe('price_request')
+      })
+
+      it('classifies "Tx please" as price_request', () => {
+        const result = classifyMessage('Tx please', defaultContext)
+        expect(result.messageType).toBe('price_request')
+      })
+    })
+
+    describe('Enhanced confirmation patterns', () => {
+      it('classifies "Fecha" as confirmation', () => {
+        const result = classifyMessage('Fecha', defaultContext)
+        expect(result.messageType).toBe('confirmation')
+      })
+
+      it('classifies "Fecha?" as confirmation', () => {
+        const result = classifyMessage('Fecha?', defaultContext)
+        expect(result.messageType).toBe('confirmation')
+      })
+
+      it('classifies "fechar agora" as confirmation', () => {
+        const result = classifyMessage('fechar agora', defaultContext)
+        expect(result.messageType).toBe('confirmation')
+      })
+
+      it('classifies "Ok obg" as confirmation', () => {
+        const result = classifyMessage('Ok obg', defaultContext)
+        expect(result.messageType).toBe('confirmation')
       })
     })
 
@@ -316,6 +466,15 @@ describe('messageClassifier', () => {
     it('returns null for BRL only', () => {
       expect(extractVolumeUsdt('5000 reais')).toBeNull()
     })
+
+    // Party-mode fix: 'mil' (Portuguese thousand) support
+    it('extracts from "5 mil usdt"', () => {
+      expect(extractVolumeUsdt('5 mil usdt')).toBe(5000)
+    })
+
+    it('extracts from "2,5 mil usd"', () => {
+      expect(extractVolumeUsdt('2,5 mil usd')).toBe(2500)
+    })
   })
 
   describe('inferPlayerRole', () => {
@@ -356,6 +515,22 @@ describe('messageClassifier', () => {
         })
         expect(result).toBe('operator')
       })
+
+      it('returns operator for quote_calculation senders', () => {
+        const messages = createMessages([
+          'quote_calculation',
+          'quote_calculation',
+          'tronscan',
+          'general',
+          'general',
+        ])
+        const result = inferPlayerRole({
+          playerJid: 'test@s.whatsapp.net',
+          groupId: 'group@g.us',
+          recentMessages: messages,
+        })
+        expect(result).toBe('operator')
+      })
     })
 
     describe('Client detection', () => {
@@ -380,6 +555,22 @@ describe('messageClassifier', () => {
           'price_request',
           'volume_inquiry',
           'volume_inquiry',
+          'confirmation',
+          'general',
+        ])
+        const result = inferPlayerRole({
+          playerJid: 'test@s.whatsapp.net',
+          groupId: 'group@g.us',
+          recentMessages: messages,
+        })
+        expect(result).toBe('client')
+      })
+
+      it('returns client for price_lock and bot_command senders', () => {
+        const messages = createMessages([
+          'price_lock',
+          'price_lock',
+          'bot_command',
           'confirmation',
           'general',
         ])

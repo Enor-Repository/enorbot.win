@@ -260,13 +260,15 @@ npm run build
 **Quick deploy with rsync (recommended):**
 
 ```bash
-# Sync, build, and restart in one command
+# Sync to staging, build, copy to production, restart
 sshpass -p 'OugwCu(RVUex-xbR5(@9' rsync -avz \
   --exclude 'node_modules' --exclude '.git' --exclude '.env' \
   --exclude 'auth_info_baileys' --exclude '*.log' --exclude '.claude' \
+  --exclude '_bmad' --exclude 'supabase/.temp' \
   -e ssh ./ root@181.215.135.75:/root/eNorBOT/ && \
 sshpass -p 'OugwCu(RVUex-xbR5(@9' ssh root@181.215.135.75 \
-  "cd /root/eNorBOT && npm install && npm run build && pm2 restart enorbot"
+  "cd /root/eNorBOT && npm install && npm run build && \
+   cp -r dist/* /opt/enorbot/dist/ && pm2 restart enorbot"
 ```
 
 **Manual deploy:**
@@ -275,14 +277,14 @@ sshpass -p 'OugwCu(RVUex-xbR5(@9' ssh root@181.215.135.75 \
 # Build locally
 npm run build
 
-# Copy to VPS
+# Copy to VPS staging
 scp -r dist package.json package-lock.json ecosystem.config.cjs root@181.215.135.75:/root/eNorBOT/
 
-# On VPS
-cd /root/eNorBOT
-npm ci --omit=dev
-pm2 restart enorbot
+# On VPS: copy to production and restart
+ssh root@181.215.135.75 "cp -r /root/eNorBOT/dist/* /opt/enorbot/dist/ && pm2 restart enorbot"
 ```
+
+**Important:** PM2 runs from `/opt/enorbot/` (production). The staging build happens in `/root/eNorBOT/`.
 
 **VPS Details:** See `docs/credentials.md` for host, user, and password.
 
