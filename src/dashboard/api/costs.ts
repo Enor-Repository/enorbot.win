@@ -13,6 +13,33 @@ const VALID_PERIODS = ['day', 'week', 'month'] as const
 type Period = (typeof VALID_PERIODS)[number]
 
 /**
+ * Helper to stringify errors (handles Supabase error objects)
+ */
+function stringifyError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
+  }
+  if (typeof error === 'object' && error !== null) {
+    // Supabase errors have a message property
+    if ('message' in error && typeof (error as any).message === 'string') {
+      return (error as any).message
+    }
+    return JSON.stringify(error)
+  }
+  return String(error)
+}
+
+/**
+ * Check if error is a "table not found" error
+ */
+function isTableNotFoundError(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    return (error as any).code === 'PGRST205' || (error as any).code === '42P01'
+  }
+  return false
+}
+
+/**
  * Get date filter based on period
  */
 function getDateFilter(period: Period): Date {
@@ -50,6 +77,22 @@ costsRouter.get('/summary', async (req: Request, res: Response) => {
       .from('ai_usage')
       .select('service, cost_usd, input_tokens, output_tokens, duration_ms, is_success')
       .gte('created_at', startDate.toISOString())
+
+    // If table doesn't exist, return empty stats (feature not yet active)
+    if (error && isTableNotFoundError(error)) {
+      return res.json({
+        period,
+        totalCost: 0,
+        totalCalls: 0,
+        successfulCalls: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        avgDurationMs: 0,
+        byService: {},
+        avgCostPerCall: 0,
+        notice: 'AI usage tracking not yet configured',
+      })
+    }
 
     if (error) throw error
 
@@ -92,11 +135,11 @@ costsRouter.get('/summary', async (req: Request, res: Response) => {
   } catch (error) {
     logger.error('Failed to get cost summary', {
       event: 'cost_summary_error',
-      error: error instanceof Error ? error.message : String(error),
+      error: stringifyError(error),
     })
     res.status(500).json({
       error: 'Failed to get cost summary',
-      message: error instanceof Error ? error.message : String(error),
+      message: stringifyError(error),
     })
   }
 })

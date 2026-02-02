@@ -15,23 +15,62 @@ function isValidGroupJid(jid: string): boolean {
 
 export const groupsRouter = Router()
 
+// Constants for query bounds
+const MAX_PLAYERS_LIMIT = 100
+const MAX_DAYS_LOOKBACK = 90
+const MAX_GROUPS_LIMIT = 500
+
 /**
  * GET /api/groups
- * Returns all known groups with configuration
+ * Returns all known groups with configuration and message stats
  */
 groupsRouter.get('/', async (_req: Request, res: Response) => {
   try {
     const configs = await getAllGroupConfigs()
-    const groups = Array.from(configs.values()).map((config) => ({
-      id: config.groupJid,
-      name: config.groupName,
-      mode: config.mode,
-      isControlGroup: config.groupName.includes('CONTROLE'), // TODO: Better control group detection
-      learningDays: Math.floor((Date.now() - config.learningStartedAt.getTime()) / (1000 * 60 * 60 * 24)),
-      messagesCollected: 0, // TODO: Get from observation_queue or messages table
-      rulesActive: 0, // TODO: Get from rules table when implemented
-      lastActivity: null, // TODO: Get from messages table
-    }))
+    const supabase = getSupabase()
+
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' })
+    }
+
+    // Fetch message stats from the groups table (with limit for safety)
+    let groupStats: Map<string, { messageCount: number; lastActivity: string | null }> = new Map()
+
+    const { data: statsData, error: statsError } = await supabase
+      .from('groups')
+      .select('jid, message_count, last_activity_at')
+      .limit(MAX_GROUPS_LIMIT)
+
+    if (statsError) {
+      logger.warn('Failed to fetch group stats', {
+        event: 'group_stats_error',
+        error: statsError.message,
+      })
+    }
+
+    if (statsData) {
+      for (const row of statsData) {
+        groupStats.set(row.jid, {
+          messageCount: row.message_count || 0,
+          lastActivity: row.last_activity_at,
+        })
+      }
+    }
+
+    const groups = Array.from(configs.values()).map((config) => {
+      const stats = groupStats.get(config.groupJid)
+      return {
+        id: config.groupJid,
+        jid: config.groupJid, // Frontend needs both id and jid
+        name: config.groupName,
+        mode: config.mode,
+        isControlGroup: config.groupName.includes('CONTROLE'),
+        learningDays: Math.floor((Date.now() - config.learningStartedAt.getTime()) / (1000 * 60 * 60 * 24)),
+        messagesCollected: stats?.messageCount ?? 0,
+        rulesActive: config.triggerPatterns.length, // Count custom trigger patterns as "rules"
+        lastActivity: stats?.lastActivity ?? null,
+      }
+    })
 
     res.json({ groups })
   } catch (error) {
@@ -226,6 +265,113 @@ groupsRouter.put('/:groupJid/threshold', async (req: Request, res: Response) => 
     })
     res.status(500).json({
       error: 'Failed to update threshold',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+})
+
+/**
+ * GET /api/groups/:groupJid/players
+ * Returns players/contacts for a group with message counts
+ * Used by GroupsAndRulesPage for player role management
+ */
+groupsRouter.get('/:groupJid/players', async (req: Request, res: Response) => {
+  try {
+    const groupJid = req.params.groupJid as string
+
+    // Validate and bound query parameters to prevent abuse
+    const requestedLimit = parseInt(req.query.limit as string) || 50
+    const requestedDays = parseInt(req.query.days as string) || 30
+    const limit = Math.min(Math.max(1, requestedLimit), MAX_PLAYERS_LIMIT)
+    const days = Math.min(Math.max(1, requestedDays), MAX_DAYS_LOOKBACK)
+
+    if (!isValidGroupJid(groupJid)) {
+      return res.status(400).json({ error: 'Invalid group JID format' })
+    }
+
+    const supabase = getSupabase()
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' })
+    }
+
+    const startDate = new Date()
+    startDate.setDate(startDate.getDate() - days)
+
+    // Get message counts per sender in this group (with safety limit)
+    // Limit to 10k messages to prevent memory issues on very active groups
+    const { data: messages, error } = await supabase
+      .from('messages')
+      .select('sender_jid, created_at')
+      .eq('group_jid', groupJid)
+      .eq('is_from_bot', false)
+      .gte('created_at', startDate.toISOString())
+      .limit(10000)
+
+    if (error) throw error
+
+    // Aggregate by sender
+    const playerMap = new Map<string, { messageCount: number; lastActive: Date }>()
+
+    messages?.forEach((msg: any) => {
+      const msgDate = new Date(msg.created_at)
+      const existing = playerMap.get(msg.sender_jid) || {
+        messageCount: 0,
+        lastActive: msgDate,
+      }
+      existing.messageCount++
+      // Use proper Date comparison instead of string comparison
+      if (msgDate > existing.lastActive) existing.lastActive = msgDate
+      playerMap.set(msg.sender_jid, existing)
+    })
+
+    // Get top players sorted by message count
+    const topPlayerJids = Array.from(playerMap.entries())
+      .sort((a, b) => b[1].messageCount - a[1].messageCount)
+      .slice(0, limit)
+      .map(([jid]) => jid)
+
+    if (topPlayerJids.length === 0) {
+      return res.json({ players: [] })
+    }
+
+    // Get contact info for top players
+    const { data: contacts, error: contactsError } = await supabase
+      .from('contacts')
+      .select('jid, push_name')
+      .in('jid', topPlayerJids)
+
+    if (contactsError) {
+      logger.warn('Failed to fetch contact names for players', {
+        event: 'player_contacts_error',
+        groupJid,
+        error: contactsError.message,
+      })
+    }
+
+    const contactMap = new Map<string, string>()
+    contacts?.forEach((c: any) => {
+      contactMap.set(c.jid, c.push_name || 'Unknown')
+    })
+
+    // Build response matching frontend's expected format
+    const players = topPlayerJids.map((jid) => {
+      const stats = playerMap.get(jid)!
+      return {
+        jid,
+        name: contactMap.get(jid) || 'Unknown',
+        messageCount: stats.messageCount,
+        role: null,
+      }
+    })
+
+    res.json({ players })
+  } catch (error) {
+    logger.error('Failed to get group players', {
+      event: 'group_players_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({
+      error: 'Failed to get players',
       message: error instanceof Error ? error.message : String(error),
     })
   }

@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS ai_usage (
   duration_ms INTEGER,
 
   -- Success or error
-  success BOOLEAN NOT NULL DEFAULT true,
+  is_success BOOLEAN NOT NULL DEFAULT true,
   error_message TEXT,
 
   -- Additional metadata (e.g., message type, confidence)

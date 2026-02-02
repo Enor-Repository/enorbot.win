@@ -10,33 +10,27 @@ const BUDGET_ALERT_THRESHOLD = 50
 
 interface CostSummary {
   period: string
-  totalAICalls: number
-  totalTokensUsed: number
-  estimatedCost: number
-  ruleMatchCount: number
-  rulesVsAIRatio: number
-  costPerMessage: number
-  projectedMonthlyCost: number
-  byService: {
-    classification: number
-    ocr: number
-  }
+  totalCost: number
+  totalCalls: number
+  successfulCalls: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  avgDurationMs: number
+  avgCostPerCall: number
+  byService: Record<string, { calls: number; cost: number }>
 }
 
 interface GroupCost {
-  groupId: string
+  groupJid: string
   groupName: string
-  aiCalls: number
-  estimatedCost: number
-  ruleMatches: number
-  rulesRatio: number
+  calls: number
+  cost: number
 }
 
 interface TrendPoint {
   date: string
-  aiCalls: number
-  estimatedCost: number
-  ruleMatches: number
+  calls: number
+  cost: number
 }
 
 export function CostsPage() {
@@ -105,10 +99,13 @@ export function CostsPage() {
   }, [fetchCostData])
 
   // Calculate week and month comparison (simplified)
-  const weekCost = trend.slice(-7).reduce((sum, t) => sum + t.estimatedCost, 0)
-  const monthCost = trend.reduce((sum, t) => sum + t.estimatedCost, 0)
-  const lastWeekCost = trend.slice(-14, -7).reduce((sum, t) => sum + t.estimatedCost, 0)
+  const weekCost = trend.slice(-7).reduce((sum, t) => sum + (t.cost || 0), 0)
+  const monthCost = trend.reduce((sum, t) => sum + (t.cost || 0), 0)
+  const lastWeekCost = trend.slice(-14, -7).reduce((sum, t) => sum + (t.cost || 0), 0)
   const weekChange = lastWeekCost > 0 ? ((weekCost - lastWeekCost) / lastWeekCost) * 100 : 0
+
+  // Calculate totals from trend for display
+  const totalCalls = trend.reduce((sum, t) => sum + (t.calls || 0), 0)
 
   return (
     <div className="space-y-8">
@@ -163,10 +160,10 @@ export function CostsPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-green-400">
-              ${summary?.estimatedCost?.toFixed(4) || '0.0000'}
+              ${summary?.totalCost?.toFixed(4) || '0.0000'}
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              {summary?.totalAICalls || 0} AI calls
+              {summary?.totalCalls || 0} AI calls
             </p>
           </CardContent>
         </Card>
@@ -205,7 +202,7 @@ export function CostsPage() {
               ${monthCost.toFixed(4)}
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              Projected: ${summary?.projectedMonthlyCost?.toFixed(2) || '0.00'}/mo
+              {totalCalls} total calls
             </p>
           </CardContent>
         </Card>
@@ -217,7 +214,7 @@ export function CostsPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-amber-400">
-              ${summary?.costPerMessage?.toFixed(6) || '0.000000'}
+              ${summary?.avgCostPerCall?.toFixed(6) || '0.000000'}
             </div>
             <p className="text-xs text-muted-foreground mt-2">
               OpenRouter pricing
@@ -240,10 +237,10 @@ export function CostsPage() {
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-cyan-400">
-              {summary?.byService?.classification || 0}
+              {summary?.byService?.classification?.calls || 0}
             </div>
             <p className="text-sm text-muted-foreground mt-2">
-              calls this {period}
+              calls this {period} (${(summary?.byService?.classification?.cost || 0).toFixed(4)})
             </p>
             <div className="mt-4 flex items-center gap-2">
               <Badge variant="outline" className="border-cyan-500/50 text-cyan-400">
@@ -268,10 +265,10 @@ export function CostsPage() {
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-violet-400">
-              {summary?.byService?.ocr || 0}
+              {summary?.byService?.ocr?.calls || 0}
             </div>
             <p className="text-sm text-muted-foreground mt-2">
-              calls this {period}
+              calls this {period} (${(summary?.byService?.ocr?.cost || 0).toFixed(4)})
             </p>
             <div className="mt-4 flex items-center gap-2">
               <Badge variant="outline" className="border-violet-500/50 text-violet-400">
@@ -285,39 +282,31 @@ export function CostsPage() {
         </Card>
       </div>
 
-      {/* Rules vs AI Ratio */}
+      {/* Token Usage */}
       <Card>
         <CardHeader>
-          <CardTitle>Rules vs AI Classification</CardTitle>
+          <CardTitle>Token Usage</CardTitle>
           <CardDescription>
-            Higher ratio = more rule matches = lower AI costs
+            Input and output tokens consumed
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center gap-4">
-            <div className="flex-1">
-              <div className="h-4 rounded-full bg-muted overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-green-500 to-emerald-500 transition-all"
-                  style={{ width: `${summary?.rulesVsAIRatio || 0}%` }}
-                />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <div className="text-2xl font-bold text-cyan-400">
+                {(summary?.totalInputTokens || 0).toLocaleString()}
               </div>
+              <p className="text-sm text-muted-foreground">Input tokens</p>
             </div>
-            <div className="text-2xl font-bold text-green-400">
-              {summary?.rulesVsAIRatio || 0}%
+            <div>
+              <div className="text-2xl font-bold text-violet-400">
+                {(summary?.totalOutputTokens || 0).toLocaleString()}
+              </div>
+              <p className="text-sm text-muted-foreground">Output tokens</p>
             </div>
           </div>
-          <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
-            <div className="flex items-center gap-2">
-              <div className="size-3 rounded-full bg-green-500" />
-              <span className="text-muted-foreground">Rule matches:</span>
-              <span className="font-medium">{summary?.ruleMatchCount || 0}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="size-3 rounded-full bg-amber-500" />
-              <span className="text-muted-foreground">AI calls:</span>
-              <span className="font-medium">{summary?.totalAICalls || 0}</span>
-            </div>
+          <div className="mt-4 text-sm text-muted-foreground">
+            Avg duration: {(summary?.avgDurationMs || 0).toFixed(0)}ms per call
           </div>
         </CardContent>
       </Card>
@@ -335,39 +324,22 @@ export function CostsPage() {
             <div className="space-y-3">
               {groupCosts.slice(0, 10).map((group) => (
                 <div
-                  key={group.groupId}
+                  key={group.groupJid}
                   className="flex items-center justify-between p-3 rounded-lg bg-muted/50"
                 >
                   <div>
                     <div className="font-medium">{group.groupName}</div>
                     <div className="text-xs text-muted-foreground">
-                      {group.aiCalls} AI calls | {group.ruleMatches} rule matches
+                      {group.calls} AI calls
                     </div>
                   </div>
                   <div className="text-right">
                     <div className="font-bold text-green-400">
-                      ${group.estimatedCost.toFixed(4)}
+                      ${(group.cost || 0).toFixed(4)}
                     </div>
-                    <Badge
-                      variant="outline"
-                      className={
-                        group.rulesRatio >= 80
-                          ? 'border-green-500/50 text-green-400'
-                          : group.rulesRatio >= 50
-                            ? 'border-amber-500/50 text-amber-400'
-                            : 'border-red-500/50 text-red-400'
-                      }
-                    >
-                      {group.rulesRatio}% rules
-                    </Badge>
                   </div>
                 </div>
               ))}
-              {groupCosts.length === 0 && (
-                <div className="text-center text-muted-foreground py-8">
-                  No group cost data yet
-                </div>
-              )}
             </div>
           </CardContent>
         </Card>
@@ -385,14 +357,14 @@ export function CostsPage() {
           {trend.length > 0 ? (
             <div className="h-[200px] flex items-end gap-1">
               {trend.slice(-30).map((day, i, arr) => {
-                const maxCost = Math.max(...trend.map((t) => t.estimatedCost), 0.001)
-                const height = (day.estimatedCost / maxCost) * 100
+                const maxCost = Math.max(...trend.map((t) => t.cost || 0), 0.001)
+                const height = ((day.cost || 0) / maxCost) * 100
                 const isLastBar = i === arr.length - 1
                 return (
                   <div
                     key={day.date}
                     className="flex-1 group relative"
-                    title={`${day.date}: $${day.estimatedCost.toFixed(4)}`}
+                    title={`${day.date}: $${(day.cost || 0).toFixed(4)}`}
                   >
                     <div
                       className="bg-gradient-to-t from-cyan-500 to-blue-500 rounded-t transition-all hover:from-cyan-400 hover:to-blue-400"
@@ -400,7 +372,7 @@ export function CostsPage() {
                     />
                     {isLastBar && (
                       <span className="absolute -top-6 left-1/2 -translate-x-1/2 text-xs text-muted-foreground whitespace-nowrap">
-                        ${day.estimatedCost.toFixed(4)}
+                        ${(day.cost || 0).toFixed(4)}
                       </span>
                     )}
                   </div>
@@ -424,19 +396,19 @@ export function CostsPage() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <AlertCircle className="size-5 text-amber-500" />
-            <CardTitle>Budget Alerts</CardTitle>
+            <CardTitle>Budget Status</CardTitle>
           </div>
         </CardHeader>
         <CardContent>
           <div className="space-y-2">
-            {(summary?.projectedMonthlyCost || 0) > BUDGET_ALERT_THRESHOLD ? (
+            {monthCost > BUDGET_ALERT_THRESHOLD ? (
               <div className="flex items-center justify-between p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
                 <div className="flex items-center gap-2">
                   <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/50">
                     Warning
                   </Badge>
                   <span className="text-sm">
-                    Projected monthly cost (${summary?.projectedMonthlyCost?.toFixed(2)}) exceeds ${BUDGET_ALERT_THRESHOLD}
+                    Monthly cost (${monthCost.toFixed(2)}) exceeds ${BUDGET_ALERT_THRESHOLD}
                   </span>
                 </div>
               </div>
@@ -446,7 +418,7 @@ export function CostsPage() {
                   <Badge className="bg-green-500/20 text-green-400 border-green-500/50">
                     OK
                   </Badge>
-                  <span className="text-sm">Costs are within expected range</span>
+                  <span className="text-sm">Costs are within expected range (${monthCost.toFixed(4)} this month)</span>
                 </div>
               </div>
             )}

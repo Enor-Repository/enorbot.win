@@ -15,7 +15,7 @@ let commercialDollarCache: {
   timestamp: string
   cachedAt: number
 } | null = null
-const CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
+const CACHE_TTL_MS = 15 * 60 * 1000 // 15 minutes - AwesomeAPI has strict rate limits
 
 /**
  * GET /api/prices/usdt-brl
@@ -130,9 +130,17 @@ pricesRouter.get('/commercial-dollar', async (_req: Request, res: Response) => {
       })
     }
 
-    res.status(500).json({
-      error: 'Failed to fetch commercial dollar',
-      message: error instanceof Error ? error.message : String(error),
+    // Return a reasonable fallback value when rate-limited and no cache
+    // This prevents the UI from showing blank
+    res.json({
+      bid: 5.26,
+      ask: 5.27,
+      spread: 0.01,
+      timestamp: new Date().toISOString(),
+      cached: false,
+      cacheAge: 0,
+      fallback: true,
+      error: error instanceof Error ? error.message : String(error),
     })
   }
 })
