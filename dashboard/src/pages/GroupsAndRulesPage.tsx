@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { ChevronDown, ChevronRight, Plus, Trash2, Edit } from 'lucide-react'
+import { ChevronDown, ChevronRight, Plus, Trash2, Edit, X } from 'lucide-react'
 import { API_ENDPOINTS } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 
 const FETCH_TIMEOUT_MS = 10000
+const MAX_TRIGGER_LENGTH = 100
+const MAX_RESPONSE_LENGTH = 2000
 
 interface Group {
   id: string
@@ -29,6 +31,13 @@ interface Rule {
   created_at: string
 }
 
+interface NewRuleForm {
+  trigger_phrase: string
+  response_template: string
+  priority: number
+  is_active: boolean
+}
+
 interface Player {
   jid: string
   name: string
@@ -45,6 +54,28 @@ export function GroupsAndRulesPage() {
   const [loadingRules, setLoadingRules] = useState<Record<string, boolean>>({})
   const [loadingPlayers, setLoadingPlayers] = useState<Record<string, boolean>>({})
   const [updatingRole, setUpdatingRole] = useState<string | null>(null)
+  const [addingRuleForGroup, setAddingRuleForGroup] = useState<string | null>(null)
+  const [newRuleForm, setNewRuleForm] = useState<NewRuleForm>({
+    trigger_phrase: '',
+    response_template: '',
+    priority: 1,
+    is_active: true
+  })
+  const [savingRule, setSavingRule] = useState(false)
+  const [deletingRule, setDeletingRule] = useState<string | null>(null)
+  const [editingRule, setEditingRule] = useState<Rule | null>(null)
+
+  // M1 Fix: Extracted form reset helper to avoid duplication
+  const resetForm = useCallback(() => {
+    setAddingRuleForGroup(null)
+    setEditingRule(null)
+    setNewRuleForm({
+      trigger_phrase: '',
+      response_template: '',
+      priority: 1,
+      is_active: true
+    })
+  }, [])
 
   const fetchGroups = useCallback(async () => {
     const controller = new AbortController()
@@ -158,9 +189,220 @@ export function GroupsAndRulesPage() {
     }
   }
 
+  const createRule = async (groupJid: string) => {
+    const trigger = newRuleForm.trigger_phrase.trim()
+    const response_template = newRuleForm.response_template.trim()
+
+    // M3 Fix: Add length validation
+    if (!trigger || !response_template) {
+      showToast({
+        type: 'error',
+        message: 'Trigger phrase and response are required'
+      })
+      return
+    }
+
+    if (trigger.length > MAX_TRIGGER_LENGTH) {
+      showToast({
+        type: 'error',
+        message: `Trigger phrase must be ${MAX_TRIGGER_LENGTH} characters or less`
+      })
+      return
+    }
+
+    if (response_template.length > MAX_RESPONSE_LENGTH) {
+      showToast({
+        type: 'error',
+        message: `Response must be ${MAX_RESPONSE_LENGTH} characters or less`
+      })
+      return
+    }
+
+    setSavingRule(true)
+
+    try {
+      const response = await fetch(API_ENDPOINTS.rules, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          groupJid: groupJid,
+          triggerPhrase: trigger,
+          responseTemplate: response_template,
+          priority: newRuleForm.priority,
+          isActive: newRuleForm.is_active
+        })
+      })
+
+      // H2 Fix: Parse actual error message from response
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || errorData.error || 'Failed to create rule')
+      }
+
+      showToast({
+        type: 'success',
+        message: 'Rule created successfully'
+      })
+
+      // M1 Fix: Use extracted resetForm helper
+      resetForm()
+
+      // Refresh rules for this group
+      fetchGroupRules(groupJid)
+      // Refresh groups to update rule count
+      fetchGroups()
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.error('Failed to create rule:', error)
+      }
+      showToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to create rule'
+      })
+    } finally {
+      setSavingRule(false)
+    }
+  }
+
+  const updateRule = async (groupJid: string, ruleId: string) => {
+    const trigger = newRuleForm.trigger_phrase.trim()
+    const response_template = newRuleForm.response_template.trim()
+
+    // M3 Fix: Add length validation
+    if (!trigger || !response_template) {
+      showToast({
+        type: 'error',
+        message: 'Trigger phrase and response are required'
+      })
+      return
+    }
+
+    if (trigger.length > MAX_TRIGGER_LENGTH) {
+      showToast({
+        type: 'error',
+        message: `Trigger phrase must be ${MAX_TRIGGER_LENGTH} characters or less`
+      })
+      return
+    }
+
+    if (response_template.length > MAX_RESPONSE_LENGTH) {
+      showToast({
+        type: 'error',
+        message: `Response must be ${MAX_RESPONSE_LENGTH} characters or less`
+      })
+      return
+    }
+
+    setSavingRule(true)
+
+    try {
+      const response = await fetch(API_ENDPOINTS.rule(ruleId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          triggerPhrase: trigger,
+          responseTemplate: response_template,
+          priority: newRuleForm.priority,
+          isActive: newRuleForm.is_active
+        })
+      })
+
+      // H2 Fix: Parse actual error message from response
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || errorData.error || 'Failed to update rule')
+      }
+
+      showToast({
+        type: 'success',
+        message: 'Rule updated successfully'
+      })
+
+      // M1 Fix: Use extracted resetForm helper
+      resetForm()
+
+      // Refresh rules for this group
+      fetchGroupRules(groupJid)
+      // M2 Fix: Also refresh groups to update rule count (active/inactive change)
+      fetchGroups()
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.error('Failed to update rule:', error)
+      }
+      showToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to update rule'
+      })
+    } finally {
+      setSavingRule(false)
+    }
+  }
+
+  const deleteRule = async (groupJid: string, ruleId: string) => {
+    if (!confirm('Are you sure you want to delete this rule?')) {
+      return
+    }
+
+    // H1 Fix: Add loading state for delete operation
+    setDeletingRule(ruleId)
+
+    try {
+      const response = await fetch(API_ENDPOINTS.rule(ruleId), {
+        method: 'DELETE'
+      })
+
+      // H2 Fix: Parse actual error message from response
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || errorData.error || 'Failed to delete rule')
+      }
+
+      showToast({
+        type: 'success',
+        message: 'Rule deleted'
+      })
+
+      // Refresh rules for this group
+      fetchGroupRules(groupJid)
+      // Refresh groups to update rule count
+      fetchGroups()
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        console.error('Failed to delete rule:', error)
+      }
+      showToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Failed to delete rule'
+      })
+    } finally {
+      setDeletingRule(null)
+    }
+  }
+
+  const openEditRule = (rule: Rule) => {
+    setEditingRule(rule)
+    setNewRuleForm({
+      trigger_phrase: rule.trigger_phrase,
+      response_template: rule.response_template,
+      priority: rule.priority,
+      is_active: rule.is_active
+    })
+  }
+
   useEffect(() => {
     fetchGroups()
   }, [fetchGroups])
+
+  // H3 Fix: Close modal on Escape key press
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && (addingRuleForGroup || editingRule)) {
+        resetForm()
+      }
+    }
+    document.addEventListener('keydown', handleEscape)
+    return () => document.removeEventListener('keydown', handleEscape)
+  }, [addingRuleForGroup, editingRule, resetForm])
 
   const toggleGroup = (groupId: string, groupJid: string) => {
     if (expandedGroupId === groupId) {
@@ -295,6 +537,16 @@ export function GroupsAndRulesPage() {
                             Response Rules
                           </h4>
                           <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setAddingRuleForGroup(group.jid)
+                              setNewRuleForm({
+                                trigger_phrase: '',
+                                response_template: '',
+                                priority: 1,
+                                is_active: true
+                              })
+                            }}
                             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 text-purple-300 text-xs font-mono transition-all hover:shadow-[0_0_10px_rgba(168,85,247,0.3)]"
                           >
                             <Plus className="h-3.5 w-3.5" />
@@ -338,11 +590,26 @@ export function GroupsAndRulesPage() {
                                   </p>
                                 </div>
                                 <div className="flex items-center gap-1">
-                                  <button className="p-1.5 rounded hover:bg-purple-500/20 text-purple-400 transition-colors">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      openEditRule(rule)
+                                    }}
+                                    className="p-1.5 rounded hover:bg-purple-500/20 text-purple-400 transition-colors"
+                                  >
                                     <Edit className="h-3.5 w-3.5" />
                                   </button>
-                                  <button className="p-1.5 rounded hover:bg-red-500/20 text-red-400 transition-colors">
-                                    <Trash2 className="h-3.5 w-3.5" />
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      deleteRule(group.jid, rule.id)
+                                    }}
+                                    disabled={deletingRule === rule.id} // H1 Fix: Disable during delete
+                                    className={`p-1.5 rounded hover:bg-red-500/20 text-red-400 transition-colors ${
+                                      deletingRule === rule.id ? 'opacity-50 cursor-not-allowed' : ''
+                                    }`}
+                                  >
+                                    <Trash2 className={`h-3.5 w-3.5 ${deletingRule === rule.id ? 'animate-pulse' : ''}`} />
                                   </button>
                                 </div>
                               </div>
@@ -450,6 +717,110 @@ export function GroupsAndRulesPage() {
           })
         )}
       </div>
+
+      {/* Add/Edit Rule Modal */}
+      {(addingRuleForGroup || editingRule) && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50"
+          onClick={resetForm} // H4 Fix: Click backdrop to close
+        >
+          <div
+            className="bg-card border border-purple-500/30 rounded-lg shadow-lg shadow-purple-500/20 w-full max-w-md mx-4"
+            onClick={(e) => e.stopPropagation()} // Prevent backdrop click when clicking modal
+          >
+            <div className="flex items-center justify-between p-4 border-b border-purple-500/20">
+              <h3 className="text-lg font-mono font-semibold text-foreground">
+                {editingRule ? 'Edit Rule' : 'Add Response Rule'}
+              </h3>
+              <button
+                onClick={resetForm} // M1 Fix: Use resetForm helper
+                className="p-1 rounded hover:bg-purple-500/20 text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-xs font-mono text-muted-foreground mb-1.5">
+                  Trigger Phrase
+                </label>
+                <input
+                  type="text"
+                  value={newRuleForm.trigger_phrase}
+                  onChange={(e) => setNewRuleForm(prev => ({ ...prev, trigger_phrase: e.target.value }))}
+                  placeholder="e.g., compro, vendo, cotação"
+                  className="w-full px-3 py-2 bg-background border border-purple-500/30 rounded-md font-mono text-sm focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-mono text-muted-foreground mb-1.5">
+                  Response Template
+                </label>
+                <textarea
+                  value={newRuleForm.response_template}
+                  onChange={(e) => setNewRuleForm(prev => ({ ...prev, response_template: e.target.value }))}
+                  placeholder="e.g., Olá! Nossa cotação atual é..."
+                  rows={3}
+                  className="w-full px-3 py-2 bg-background border border-purple-500/30 rounded-md font-mono text-sm focus:outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/30 resize-none"
+                />
+              </div>
+
+              <div className="flex gap-4">
+                <div className="flex-1">
+                  <label className="block text-xs font-mono text-muted-foreground mb-1.5">
+                    Priority
+                  </label>
+                  <select
+                    value={newRuleForm.priority}
+                    onChange={(e) => setNewRuleForm(prev => ({ ...prev, priority: parseInt(e.target.value) }))}
+                    className="w-full px-3 py-2 bg-background border border-purple-500/30 rounded-md font-mono text-sm focus:outline-none focus:border-purple-500/50"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(p => (
+                      <option key={p} value={p}>P{p} {p === 1 ? '(Highest)' : p === 10 ? '(Lowest)' : ''}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-end">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={newRuleForm.is_active}
+                      onChange={(e) => setNewRuleForm(prev => ({ ...prev, is_active: e.target.checked }))}
+                      className="w-4 h-4 rounded border-purple-500/30 text-purple-500 focus:ring-purple-500/30"
+                    />
+                    <span className="text-sm font-mono text-muted-foreground">Active</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 p-4 border-t border-purple-500/20">
+              <button
+                onClick={resetForm} // M1 Fix: Use resetForm helper
+                className="px-4 py-2 rounded-md text-sm font-mono text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (editingRule) {
+                    updateRule(editingRule.group_jid, editingRule.id)
+                  } else if (addingRuleForGroup) {
+                    createRule(addingRuleForGroup)
+                  }
+                }}
+                disabled={savingRule || !newRuleForm.trigger_phrase.trim() || !newRuleForm.response_template.trim()}
+                className="px-4 py-2 rounded-md bg-purple-500/20 border border-purple-500/30 text-purple-300 text-sm font-mono hover:bg-purple-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingRule ? 'Saving...' : editingRule ? 'Update Rule' : 'Create Rule'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

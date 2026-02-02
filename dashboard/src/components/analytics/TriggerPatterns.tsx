@@ -205,6 +205,18 @@ export function TriggerPatterns({ groupId, onCreateRule }: TriggerPatternsProps)
               </CardTitle>
 
               <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setSelectedTrigger('')
+                    setIsModalOpen(true)
+                  }}
+                  className="gap-2 font-mono text-xs border-purple-500/30 bg-purple-500/5 hover:bg-purple-500/10 text-purple-400"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add Pattern
+                </Button>
                 <ImportExport groupJid={groupId} onImportComplete={handleRefresh} />
                 <Button
                   variant="outline"
