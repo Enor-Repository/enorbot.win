@@ -30,7 +30,7 @@ export function SystemStatus() {
 
   const checkStatus = async () => {
     try {
-      const response = await fetch('http://localhost:3003/api/status', {
+      const response = await fetch('/api/status', {
         signal: AbortSignal.timeout(5000), // 5 second timeout
       })
 

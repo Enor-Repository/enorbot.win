@@ -55,7 +55,7 @@ export function TriggerPatternCreationModal({
     setSaving(true)
 
     try {
-      const response = await fetch('http://localhost:3003/api/rules', {
+      const response = await fetch('/api/rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

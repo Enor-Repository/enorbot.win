@@ -50,7 +50,7 @@ export function PlayerLeaderboard({ groupId, limit = 20, onRoleChange }: PlayerL
       try {
         setLoading(true)
         const response = await fetch(
-          `http://localhost:3003/api/groups/${groupId}/analytics/players?limit=${limit}`
+          `/api/groups/${groupId}/analytics/players?limit=${limit}`
         )
 
         if (!response.ok) {

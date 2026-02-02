@@ -68,7 +68,7 @@ export function TriggerPatterns({ groupId, onCreateRule }: TriggerPatternsProps)
     try {
       setRefreshing(true)
       const response = await fetch(
-        `http://localhost:3003/api/groups/${groupId}/analytics/patterns`
+        `/api/groups/${groupId}/analytics/patterns`
       )
 
       if (!response.ok) {

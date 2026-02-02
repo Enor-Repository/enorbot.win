@@ -168,7 +168,7 @@ export function ActivityHeatmap({ groupId, days = 30, onCellClick }: ActivityHea
       try {
         setLoading(true)
         const response = await fetch(
-          `http://localhost:3003/api/groups/${groupId}/analytics/heatmap?days=${days}`
+          `/api/groups/${groupId}/analytics/heatmap?days=${days}`
         )
 
         if (!response.ok) {
