@@ -26,6 +26,7 @@
 import { ok, err, type Result } from '../utils/result.js'
 import { logger } from '../utils/logger.js'
 import { getConfig } from '../config.js'
+import { logAIUsage } from './aiUsage.js'
 import type { OTCMessageType, ConfidenceLevel, ClassificationResult } from './messageClassifier.js'
 
 // =============================================================================
@@ -536,7 +537,8 @@ interface OpenRouterResponse {
 async function callOpenRouter(
   systemPrompt: string,
   userPrompt: string,
-  apiKey: string
+  apiKey: string,
+  groupId?: string
 ): Promise<Result<AIClassificationResponse>> {
   const startTime = Date.now()
 
@@ -597,6 +599,18 @@ async function callOpenRouter(
         totalCalls: totalAICalls,
         totalCostUsd: totalAICostUsd.toFixed(4),
       })
+
+      // Story D.9: Log to Supabase for cost monitoring (H5 Fix: include groupJid)
+      logAIUsage({
+        service: 'classification',
+        model: CLASSIFICATION_MODEL,
+        inputTokens,
+        outputTokens,
+        costUsd,
+        groupJid: groupId,
+        durationMs,
+        success: true,
+      }).catch(() => {}) // Fire-and-forget
     }
 
     if (data.error) {
@@ -642,6 +656,18 @@ async function callOpenRouter(
         durationMs,
         timeoutMs: CLASSIFICATION_TIMEOUT_MS,
       })
+      // Story D.9: Log timeout to Supabase (H5 Fix: include groupJid)
+      logAIUsage({
+        service: 'classification',
+        model: CLASSIFICATION_MODEL,
+        inputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        groupJid: groupId,
+        durationMs,
+        success: false,
+        errorMessage: 'timeout',
+      }).catch(() => {})
       return err('Classification timeout')
     }
 
@@ -650,6 +676,19 @@ async function callOpenRouter(
       error: errorMessage,
       durationMs,
     })
+
+    // Story D.9: Log error to Supabase (H5 Fix: include groupJid)
+    logAIUsage({
+      service: 'classification',
+      model: CLASSIFICATION_MODEL,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      groupJid: groupId,
+      durationMs,
+      success: false,
+      errorMessage,
+    }).catch(() => {})
 
     return err(`Classification failed: ${errorMessage}`)
   }
@@ -721,8 +760,8 @@ export async function classifyWithAI(
     message: truncatedMessage,
   })
 
-  // Call API
-  const result = await callOpenRouter(systemPrompt, userPrompt, config.OPENROUTER_API_KEY)
+  // Call API (H5 Fix: pass groupId for cost tracking)
+  const result = await callOpenRouter(systemPrompt, userPrompt, config.OPENROUTER_API_KEY, context.groupId)
 
   // Record result for circuit breaker (party-mode review: Murat)
   recordAICallResult(result.ok)

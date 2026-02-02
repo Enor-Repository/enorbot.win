@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { RefreshCw, Plus, CheckCircle2 } from 'lucide-react'
 import { TriggerPatternCreationModal } from '../rules/TriggerPatternCreationModal'
 import { TriggerPatternViewEditModal } from '../rules/TriggerPatternViewEditModal'
+import { ImportExport } from '../rules/ImportExport'
 
 interface TriggerPattern {
   trigger: string
@@ -203,16 +204,19 @@ export function TriggerPatterns({ groupId, onCreateRule }: TriggerPatternsProps)
                 </span>
               </CardTitle>
 
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRefresh}
-                disabled={refreshing}
-                className="gap-2 font-mono text-xs border-green-500/30 bg-green-500/5 hover:bg-green-500/10 text-green-400"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-                Refresh
-              </Button>
+              <div className="flex items-center gap-2">
+                <ImportExport groupJid={groupId} onImportComplete={handleRefresh} />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRefresh}
+                  disabled={refreshing}
+                  className="gap-2 font-mono text-xs border-green-500/30 bg-green-500/5 hover:bg-green-500/10 text-green-400"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+                  Refresh
+                </Button>
+              </div>
             </div>
           </CardHeader>
 

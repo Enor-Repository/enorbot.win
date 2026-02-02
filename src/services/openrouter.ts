@@ -8,6 +8,7 @@
 import { ok, err, type Result } from '../utils/result.js'
 import { logger } from '../utils/logger.js'
 import { getConfig } from '../config.js'
+import { logAIUsage } from './aiUsage.js'
 import type { RawReceiptData } from '../types/receipt.js'
 
 /**
@@ -168,6 +169,17 @@ export async function extractImageReceipt(
         costUsd: costUsd.toFixed(6),
         durationMs,
       })
+
+      // Story D.9: Log to Supabase for cost monitoring
+      logAIUsage({
+        service: 'ocr',
+        model: OPENROUTER_MODEL,
+        inputTokens,
+        outputTokens,
+        costUsd,
+        durationMs,
+        success: true,
+      }).catch(() => {}) // Fire-and-forget
     }
 
     // Check for API error response
@@ -226,6 +238,17 @@ export async function extractImageReceipt(
         durationMs,
         timeoutMs: OCR_TIMEOUT_MS,
       })
+      // Story D.9: Log timeout to Supabase
+      logAIUsage({
+        service: 'ocr',
+        model: OPENROUTER_MODEL,
+        inputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        durationMs,
+        success: false,
+        errorMessage: 'timeout',
+      }).catch(() => {})
       return err('OCR timeout')
     }
 
@@ -235,6 +258,18 @@ export async function extractImageReceipt(
       error: errorMessage,
       durationMs,
     })
+
+    // Story D.9: Log error to Supabase
+    logAIUsage({
+      service: 'ocr',
+      model: OPENROUTER_MODEL,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      durationMs,
+      success: false,
+      errorMessage,
+    }).catch(() => {})
 
     return err(`OCR failed: ${errorMessage}`)
   }

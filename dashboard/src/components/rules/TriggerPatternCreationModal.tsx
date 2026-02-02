@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { X, Plus, AlertCircle, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ActionSelector } from '@/components/actions/ActionSelector'
+import { RuleTester } from '@/components/rules/RuleTester'
 import { type ActionType, validateActionParams } from '@/types/actions'
 
 interface TriggerPatternCreationModalProps {
@@ -240,6 +241,13 @@ export function TriggerPatternCreationModal({
             </div>
           </div>
 
+          {/* Rule Tester - Story D.6 */}
+          {triggerPhrase && (
+            <RuleTester
+              triggerPhrase={triggerPhrase}
+              groupJid={groupId}
+            />
+          )}
 
           {/* Error Message */}
           {error && (

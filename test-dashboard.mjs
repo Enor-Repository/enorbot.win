@@ -184,27 +184,154 @@ app.put('/api/groups/:groupJid/mode', modeLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Invalid group JID format' })
     }
 
-    // Validate mode value
-    if (!['learning', 'active', 'paused'].includes(mode)) {
-      return res.status(400).json({ error: 'Invalid mode. Must be: learning, active, or paused' })
+    // Validate mode value (D.11: Added 'assisted' mode)
+    if (!['learning', 'assisted', 'active', 'paused'].includes(mode)) {
+      return res.status(400).json({ error: 'Invalid mode. Must be: learning, assisted, active, or paused' })
     }
 
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('group_config')
       .update({
         mode,
         updated_at: new Date().toISOString(),
       })
       .eq('group_jid', groupJid)
+      .select()
 
     if (error) {
       console.error('Mode update error:', error)
       return res.status(500).json({ error: error.message })
     }
 
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Group configuration not found' })
+    }
+
     res.json({ success: true, mode })
   } catch (err) {
     console.error('Mode update error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Get group config (D.11/D.12: for Mode Selector and AI Threshold)
+app.get('/api/groups/:groupJid/config', async (req, res) => {
+  try {
+    const { groupJid } = req.params
+
+    if (!isValidGroupJid(groupJid)) {
+      return res.status(400).json({ error: 'Invalid group JID format' })
+    }
+
+    const { data: config, error } = await supabase
+      .from('group_config')
+      .select('*')
+      .eq('group_jid', groupJid)
+      .single()
+
+    if (error) {
+      // PGRST116 = no rows returned for .single()
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Group configuration not found' })
+      }
+      console.error('Config fetch error:', error)
+      return res.status(500).json({ error: error.message })
+    }
+
+    // Calculate pattern coverage (rules covering unique triggers)
+    // Limit queries to prevent performance issues with large datasets
+    const { data: rules } = await supabase
+      .from('rules')
+      .select('trigger_phrase')
+      .or(`group_jid.eq.${groupJid},group_jid.is.null`)
+      .eq('is_active', true)
+      .limit(500)
+
+    const { data: triggers } = await supabase
+      .from('messages')
+      .select('content')
+      .eq('group_jid', groupJid)
+      .eq('is_trigger', true)
+      .limit(1000)
+
+    const uniqueTriggers = new Set(triggers?.map(t => t.content.toLowerCase().trim()) || [])
+    const rulePatterns = new Set(rules?.map(r => r.trigger_phrase.toLowerCase().trim()) || [])
+
+    // Calculate coverage (how many unique triggers are covered by rules)
+    // Early exit if either set is empty to avoid unnecessary iteration
+    let coveredCount = 0
+    if (uniqueTriggers.size > 0 && rulePatterns.size > 0) {
+      const patternArray = [...rulePatterns]
+      for (const trigger of uniqueTriggers) {
+        // Use some() for early exit on first match
+        if (patternArray.some(pattern => trigger.includes(pattern) || pattern.includes(trigger))) {
+          coveredCount++
+        }
+      }
+    }
+
+    const patternCoverage = uniqueTriggers.size > 0
+      ? Math.round((coveredCount / uniqueTriggers.size) * 100)
+      : 0
+
+    // Database stores threshold as integer (0-100), API uses decimal (0.0-1.0)
+    const dbThreshold = config.ai_threshold ?? 70
+    const apiThreshold = dbThreshold / 100
+
+    res.json({
+      groupJid: config.group_jid,
+      mode: config.mode || 'learning',
+      aiThreshold: apiThreshold,
+      learningStartedAt: config.learning_started_at,
+      patternCoverage,
+      rulesActive: rules?.length || 0,
+    })
+  } catch (err) {
+    console.error('Config fetch error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Update AI threshold (D.12: AI Threshold Slider)
+app.put('/api/groups/:groupJid/threshold', modeLimiter, async (req, res) => {
+  try {
+    const { groupJid } = req.params
+    const { threshold } = req.body
+
+    if (!isValidGroupJid(groupJid)) {
+      return res.status(400).json({ error: 'Invalid group JID format' })
+    }
+
+    // Validate threshold value (0.5 to 1.0)
+    const numThreshold = parseFloat(threshold)
+    if (isNaN(numThreshold) || numThreshold < 0.5 || numThreshold > 1.0) {
+      return res.status(400).json({ error: 'Invalid threshold. Must be between 0.5 and 1.0' })
+    }
+
+    // Database stores threshold as integer (0-100), API uses decimal (0.0-1.0)
+    const dbThreshold = Math.round(numThreshold * 100)
+
+    const { data, error } = await supabase
+      .from('group_config')
+      .update({
+        ai_threshold: dbThreshold,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('group_jid', groupJid)
+      .select()
+
+    if (error) {
+      console.error('Threshold update error:', error)
+      return res.status(500).json({ error: error.message })
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Group configuration not found' })
+    }
+
+    res.json({ success: true, threshold: numThreshold })
+  } catch (err) {
+    console.error('Threshold update error:', err)
     res.status(500).json({ error: err.message })
   }
 })
@@ -1011,6 +1138,272 @@ app.get('/api/prices/commercial-dollar', async (_req, res) => {
       error: error.message,
       cached: false,
     })
+  }
+})
+
+// =============================================================================
+// Cost Monitoring API (Story D.9-D.10)
+// =============================================================================
+
+// GET /api/costs/summary
+// Returns cost summary for a given period (day, week, month)
+app.get('/api/costs/summary', async (req, res) => {
+  try {
+    const period = req.query.period || 'day'
+
+    // H3 Fix: Validate period input
+    const validPeriods = ['day', 'week', 'month']
+    if (!validPeriods.includes(period)) {
+      return res.status(400).json({ error: `Invalid period. Must be one of: ${validPeriods.join(', ')}` })
+    }
+
+    // Calculate date range based on period
+    const now = new Date()
+    let startDate
+    switch (period) {
+      case 'week':
+        startDate = new Date(now)
+        startDate.setDate(startDate.getDate() - 7)
+        break
+      case 'month':
+        startDate = new Date(now)
+        startDate.setMonth(startDate.getMonth() - 1)
+        break
+      case 'day':
+      default:
+        startDate = new Date(now)
+        startDate.setHours(0, 0, 0, 0)
+    }
+
+    // Fetch AI usage from Supabase
+    const { data: aiUsage, error } = await supabase
+      .from('ai_usage')
+      .select('*')
+      .gte('created_at', startDate.toISOString())
+
+    if (error) {
+      console.error('Cost summary fetch error:', error)
+      return res.status(500).json({ error: error.message })
+    }
+
+    // Calculate totals
+    let totalAICalls = 0
+    let totalTokensUsed = 0
+    let estimatedCost = 0
+    let classificationCalls = 0
+    let ocrCalls = 0
+
+    for (const row of aiUsage || []) {
+      totalAICalls++
+      totalTokensUsed += (row.input_tokens || 0) + (row.output_tokens || 0)
+      estimatedCost += Number(row.cost_usd) || 0
+      if (row.service === 'classification') classificationCalls++
+      if (row.service === 'ocr') ocrCalls++
+    }
+
+    // Fetch rule match count from messages (is_trigger = true means rule matched)
+    const { count: ruleMatchCount } = await supabase
+      .from('messages')
+      .select('*', { count: 'exact', head: true })
+      .gte('created_at', startDate.toISOString())
+      .eq('is_trigger', true)
+
+    // Calculate rules vs AI ratio
+    const totalMessages = (ruleMatchCount || 0) + totalAICalls
+    const rulesVsAIRatio = totalMessages > 0
+      ? Math.round(((ruleMatchCount || 0) / totalMessages) * 100)
+      : 100
+
+    // Calculate cost per message and projected monthly cost
+    const costPerMessage = totalAICalls > 0 ? estimatedCost / totalAICalls : 0
+    const daysInPeriod = Math.max(1, Math.ceil((now - startDate) / (1000 * 60 * 60 * 24)))
+    const dailyAvgCost = estimatedCost / daysInPeriod
+    const projectedMonthlyCost = dailyAvgCost * 30
+
+    res.json({
+      period,
+      totalAICalls,
+      totalTokensUsed,
+      estimatedCost: Number(estimatedCost.toFixed(6)),
+      ruleMatchCount: ruleMatchCount || 0,
+      rulesVsAIRatio,
+      costPerMessage: Number(costPerMessage.toFixed(6)),
+      projectedMonthlyCost: Number(projectedMonthlyCost.toFixed(2)),
+      byService: {
+        classification: classificationCalls,
+        ocr: ocrCalls
+      }
+    })
+  } catch (err) {
+    console.error('Cost summary error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/costs/by-group
+// Returns per-group cost breakdown
+app.get('/api/costs/by-group', async (req, res) => {
+  try {
+    // M4 Fix: Add period filter support
+    const period = req.query.period || 'month' // Default to month for by-group
+    const now = new Date()
+    let startDate
+    switch (period) {
+      case 'day':
+        startDate = new Date(now)
+        startDate.setHours(0, 0, 0, 0)
+        break
+      case 'week':
+        startDate = new Date(now)
+        startDate.setDate(startDate.getDate() - 7)
+        break
+      case 'month':
+      default:
+        startDate = new Date(now)
+        startDate.setMonth(startDate.getMonth() - 1)
+    }
+
+    // Fetch AI usage grouped by group_jid with date filter
+    const { data: aiUsage, error } = await supabase
+      .from('ai_usage')
+      .select('group_jid, cost_usd, service')
+      .gte('created_at', startDate.toISOString())
+
+    if (error) {
+      console.error('Cost by-group fetch error:', error)
+      return res.status(500).json({ error: error.message })
+    }
+
+    // Aggregate by group
+    const groupMap = new Map()
+
+    for (const row of aiUsage || []) {
+      const groupJid = row.group_jid || 'system'
+
+      if (!groupMap.has(groupJid)) {
+        groupMap.set(groupJid, {
+          groupId: groupJid,
+          groupName: groupJid === 'system' ? 'System/Unknown' : groupJid.replace('@g.us', ''),
+          aiCalls: 0,
+          estimatedCost: 0,
+          ruleMatches: 0, // Will be filled below
+          rulesRatio: 0
+        })
+      }
+
+      const group = groupMap.get(groupJid)
+      group.aiCalls++
+      group.estimatedCost += Number(row.cost_usd) || 0
+    }
+
+    // Fetch rule matches per group with date filter
+    const { data: messages, error: msgError } = await supabase
+      .from('messages')
+      .select('group_jid')
+      .eq('is_trigger', true)
+      .gte('created_at', startDate.toISOString())
+
+    if (!msgError && messages) {
+      for (const msg of messages) {
+        const groupJid = msg.group_jid
+        if (groupMap.has(groupJid)) {
+          groupMap.get(groupJid).ruleMatches++
+        }
+      }
+    }
+
+    // Calculate rules ratio per group
+    const groups = Array.from(groupMap.values()).map(g => {
+      const total = g.ruleMatches + g.aiCalls
+      g.rulesRatio = total > 0 ? Math.round((g.ruleMatches / total) * 100) : 100
+      g.estimatedCost = Number(g.estimatedCost.toFixed(6))
+      return g
+    })
+
+    // Sort by cost descending
+    groups.sort((a, b) => b.estimatedCost - a.estimatedCost)
+
+    res.json({ groups })
+  } catch (err) {
+    console.error('Cost by-group error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/costs/trend
+// Returns cost trend over time
+app.get('/api/costs/trend', async (req, res) => {
+  try {
+    // H4 Fix: Limit max days to 365 to prevent massive queries
+    const requestedDays = parseInt(req.query.days) || 30
+    const days = Math.min(Math.max(requestedDays, 1), 365)
+
+    const startDate = new Date()
+    startDate.setDate(startDate.getDate() - days)
+    startDate.setHours(0, 0, 0, 0)
+
+    // Fetch AI usage for the period
+    const { data: aiUsage, error } = await supabase
+      .from('ai_usage')
+      .select('created_at, cost_usd')
+      .gte('created_at', startDate.toISOString())
+      .order('created_at', { ascending: true })
+
+    if (error) {
+      console.error('Cost trend fetch error:', error)
+      return res.status(500).json({ error: error.message })
+    }
+
+    // Fetch messages with triggers for rule matches
+    const { data: messages, error: msgError } = await supabase
+      .from('messages')
+      .select('created_at')
+      .eq('is_trigger', true)
+      .gte('created_at', startDate.toISOString())
+
+    // Aggregate by date
+    const trendMap = new Map()
+
+    // Initialize all dates in range
+    for (let d = new Date(startDate); d <= new Date(); d.setDate(d.getDate() + 1)) {
+      const dateStr = d.toISOString().split('T')[0]
+      trendMap.set(dateStr, {
+        date: dateStr,
+        aiCalls: 0,
+        estimatedCost: 0,
+        ruleMatches: 0
+      })
+    }
+
+    // Aggregate AI calls
+    for (const row of aiUsage || []) {
+      const dateStr = new Date(row.created_at).toISOString().split('T')[0]
+      if (trendMap.has(dateStr)) {
+        trendMap.get(dateStr).aiCalls++
+        trendMap.get(dateStr).estimatedCost += Number(row.cost_usd) || 0
+      }
+    }
+
+    // Aggregate rule matches
+    if (!msgError && messages) {
+      for (const msg of messages) {
+        const dateStr = new Date(msg.created_at).toISOString().split('T')[0]
+        if (trendMap.has(dateStr)) {
+          trendMap.get(dateStr).ruleMatches++
+        }
+      }
+    }
+
+    // Convert to array and format costs
+    const trend = Array.from(trendMap.values()).map(t => ({
+      ...t,
+      estimatedCost: Number(t.estimatedCost.toFixed(6))
+    }))
+
+    res.json({ trend })
+  } catch (err) {
+    console.error('Cost trend error:', err)
+    res.status(500).json({ error: err.message })
   }
 })
 

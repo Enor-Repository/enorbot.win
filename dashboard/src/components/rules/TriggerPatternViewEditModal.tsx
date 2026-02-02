@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { API_ENDPOINTS } from '@/lib/api'
 import { ActionSelector } from '@/components/actions/ActionSelector'
+import { RuleTester } from '@/components/rules/RuleTester'
 import { type ActionType, getActionConfig, getActionDisplayText } from '@/types/actions'
 
 interface TriggerPatternViewEditModalProps {
@@ -480,6 +481,15 @@ export function TriggerPatternViewEditModal({
                     <span className="font-mono text-[10px]">{patternData.id}</span>
                   </div>
                 </div>
+              )}
+
+              {/* Rule Tester - Story D.6 */}
+              {patternData && (
+                <RuleTester
+                  triggerPhrase={patternData.trigger_phrase}
+                  groupJid={patternData.group_jid}
+                  ruleId={patternData.id}
+                />
               )}
 
               {/* Error/Success Messages */}
