@@ -12,7 +12,7 @@ export default defineConfig({
   },
   build: {
     outDir: '../dist/dashboard',
-    emptyOutDir: true,
+    emptyOutDir: false, // Keep TypeScript-compiled server files
   },
   server: {
     port: 3002,
