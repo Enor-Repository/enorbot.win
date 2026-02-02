@@ -3,6 +3,7 @@ import { validateConfig } from './config.js'
 import { logger } from './utils/logger.js'
 import { initSupabase } from './services/supabase.js'
 import { initGroupConfigs } from './services/groupConfig.js'
+import { initRulesService } from './services/rulesService.js'
 import { checkBackupPermissions } from './services/authBackup.js'
 import { createConnection, getSocket } from './bot/connection.js'
 
@@ -34,6 +35,15 @@ async function main(): Promise<void> {
     logger.warn('Group config initialization failed, using defaults', {
       event: 'group_config_init_warning',
       error: groupConfigResult.error,
+    })
+  }
+
+  // Initialize rules service for dashboard-defined trigger rules
+  const rulesResult = await initRulesService(config)
+  if (!rulesResult.ok) {
+    logger.warn('Rules service initialization failed', {
+      event: 'rules_init_warning',
+      error: rulesResult.error,
     })
   }
 

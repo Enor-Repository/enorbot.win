@@ -1,12 +1,26 @@
 /**
  * Dashboard API: Rules endpoints
  * Story D.5-D.7: Rule Builder
+ *
+ * IMPORTANT: After any CRUD operation, we refresh the bot's rules cache
+ * so changes take effect immediately without restarting the bot.
  */
 import { Router, type Request, type Response } from 'express'
 import { getSupabase } from '../../services/supabase.js'
 import { logger } from '../../utils/logger.js'
+import { refreshRulesCache } from '../../services/rulesService.js'
 
 export const rulesRouter = Router()
+
+/**
+ * Validate groupJid format.
+ * Valid formats: '*' (global) or 'number@g.us' (group JID)
+ */
+function isValidGroupJid(jid: string): boolean {
+  if (jid === '*') return true // Global rules
+  // WhatsApp group JID format: digits@g.us
+  return /^\d+@g\.us$/.test(jid)
+}
 
 /**
  * GET /api/rules
@@ -64,10 +78,18 @@ rulesRouter.post('/', async (req: Request, res: Response) => {
     } = req.body
 
     // Validation
-    if (!groupJid || !triggerPhrase || !responseTemplate) {
+    if (!groupJid || !triggerPhrase) {
       return res.status(400).json({
         error: 'Missing required fields',
-        required: ['groupJid', 'triggerPhrase', 'responseTemplate'],
+        required: ['groupJid', 'triggerPhrase'],
+      })
+    }
+
+    // Validate groupJid format (prevents injection and ensures valid JID)
+    if (!isValidGroupJid(groupJid)) {
+      return res.status(400).json({
+        error: 'Invalid groupJid format',
+        message: 'groupJid must be "*" for global rules or a valid WhatsApp group JID (e.g., "123456789@g.us")',
       })
     }
 
@@ -98,6 +120,9 @@ rulesRouter.post('/', async (req: Request, res: Response) => {
       group_jid: groupJid,
       trigger: triggerPhrase,
     })
+
+    // Refresh bot's rules cache so this rule takes effect immediately
+    await refreshRulesCache(groupJid)
 
     res.status(201).json({ rule })
   } catch (error) {
@@ -154,6 +179,9 @@ rulesRouter.put('/:id', async (req: Request, res: Response) => {
       rule_id: id,
     })
 
+    // Refresh bot's rules cache so changes take effect immediately
+    await refreshRulesCache(rule.group_jid)
+
     res.json({ rule })
   } catch (error) {
     logger.error('Failed to update rule', {
@@ -169,7 +197,7 @@ rulesRouter.put('/:id', async (req: Request, res: Response) => {
 
 /**
  * DELETE /api/rules/:id
- * Delete a rule
+ * Delete a rule (system rules cannot be deleted, only disabled)
  */
 rulesRouter.delete('/:id', async (req: Request, res: Response) => {
   try {
@@ -180,6 +208,31 @@ rulesRouter.delete('/:id', async (req: Request, res: Response) => {
       return res.status(503).json({ error: 'Database not configured' })
     }
 
+    // First, get the rule to check if it's a system rule
+    // Note: is_system column may not exist yet (pending migration), so also fetch metadata
+    const { data: rule, error: fetchError } = await supabase
+      .from('rules')
+      .select('group_jid, is_system, metadata')
+      .eq('id', id)
+      .single()
+
+    if (fetchError) throw fetchError
+
+    // System rules cannot be deleted (they can only be disabled)
+    // Check is_system column OR fallback to inferring from group_jid='*' and metadata.source='triggers.ts'
+    const isSystemRule = rule?.is_system ||
+      (rule?.group_jid === '*' && (rule?.metadata as Record<string, unknown>)?.source === 'triggers.ts')
+
+    if (isSystemRule) {
+      return res.status(403).json({
+        error: 'Cannot delete system patterns',
+        message: 'System patterns can only be disabled, not deleted. Use PUT to toggle is_active.',
+      })
+    }
+
+    const groupJid = rule?.group_jid
+
+    // Now delete the rule
     const { error } = await supabase.from('rules').delete().eq('id', id)
 
     if (error) throw error
@@ -187,7 +240,13 @@ rulesRouter.delete('/:id', async (req: Request, res: Response) => {
     logger.info('Rule deleted', {
       event: 'rule_deleted',
       rule_id: id,
+      group_jid: groupJid,
     })
+
+    // Refresh bot's rules cache so deletion takes effect immediately
+    if (groupJid) {
+      await refreshRulesCache(groupJid)
+    }
 
     res.json({ success: true })
   } catch (error) {

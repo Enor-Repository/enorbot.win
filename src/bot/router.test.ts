@@ -4,10 +4,15 @@ import type { WASocket } from '@whiskeysockets/baileys'
 // Mock groupConfig service before importing router
 const mockGetGroupModeSync = vi.hoisted(() => vi.fn())
 const mockGetGroupConfigSync = vi.hoisted(() => vi.fn())
+const mockFindMatchingRule = vi.hoisted(() => vi.fn())
 
 vi.mock('../services/groupConfig.js', () => ({
   getGroupModeSync: mockGetGroupModeSync,
   getGroupConfigSync: mockGetGroupConfigSync,
+}))
+
+vi.mock('../services/rulesService.js', () => ({
+  findMatchingRule: mockFindMatchingRule,
 }))
 
 import {
@@ -49,6 +54,8 @@ describe('routeMessage', () => {
       updatedAt: new Date(),
       updatedBy: null,
     })
+    // Default: no rules match (rulesService returns null)
+    mockFindMatchingRule.mockReturnValue(null)
   })
 
   // AC1, AC2: Trigger messages routed to PRICE_HANDLER
@@ -249,6 +256,8 @@ describe('routeMessage receipt routing', () => {
       updatedAt: new Date(),
       updatedBy: null,
     })
+    // Default: no rules match
+    mockFindMatchingRule.mockReturnValue(null)
   })
 
   // AC1: PDF routing
@@ -388,6 +397,8 @@ describe('routeMessage per-group modes', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // Default: no rules match
+    mockFindMatchingRule.mockReturnValue(null)
   })
 
   describe('PAUSED mode - completely ignored', () => {
@@ -476,14 +487,14 @@ describe('routeMessage per-group modes', () => {
     })
   })
 
-  describe('ACTIVE mode - normal routing with group-specific triggers', () => {
+  describe('ACTIVE mode - normal routing with rules-based triggers', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('active')
       mockGetGroupConfigSync.mockReturnValue({
         groupJid: '123456789@g.us',
         groupName: 'Test Group',
         mode: 'active',
-        triggerPatterns: ['compro usdt', 'vendo btc'],
+        triggerPatterns: [], // No longer used - rules come from rulesService
         responseTemplates: {},
         playerRoles: {},
         aiThreshold: 50,
@@ -492,6 +503,8 @@ describe('routeMessage per-group modes', () => {
         updatedAt: new Date(),
         updatedBy: null,
       })
+      // Default: no rules match
+      mockFindMatchingRule.mockReturnValue(null)
     })
 
     it('routes global price trigger to PRICE_HANDLER', () => {
@@ -501,14 +514,60 @@ describe('routeMessage per-group modes', () => {
       expect(result.destination).toBe('PRICE_HANDLER')
     })
 
-    it('routes group-specific trigger to PRICE_HANDLER', () => {
+    it('routes rule-matched trigger to PRICE_HANDLER', () => {
+      // Mock rulesService to return a matching rule for 'compro usdt'
+      mockFindMatchingRule.mockImplementation((groupJid: string, message: string) => {
+        if (message.toLowerCase().includes('compro usdt')) {
+          return {
+            id: 'test-rule-1',
+            groupJid,
+            triggerPhrase: 'compro usdt',
+            responseTemplate: 'Test response',
+            actionType: 'usdt_quote',
+            actionParams: {},
+            isActive: true,
+            priority: 100,
+            conditions: {},
+            scope: 'group',
+            isSystem: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          }
+        }
+        return null
+      })
+
       const context = { ...baseContext, message: 'quero compro usdt agora' }
       const result = routeMessage(context)
 
       expect(result.destination).toBe('PRICE_HANDLER')
+      expect(result.context.matchedRule).toBeDefined()
+      expect(result.context.matchedRule?.triggerPhrase).toBe('compro usdt')
     })
 
-    it('routes message with group-specific trigger (case-insensitive) to PRICE_HANDLER', () => {
+    it('routes rule-matched trigger (case-insensitive) to PRICE_HANDLER', () => {
+      // Mock rulesService to return a matching rule
+      mockFindMatchingRule.mockImplementation((groupJid: string, message: string) => {
+        if (message.toLowerCase().includes('compro usdt')) {
+          return {
+            id: 'test-rule-1',
+            groupJid,
+            triggerPhrase: 'compro usdt',
+            responseTemplate: '',
+            actionType: 'usdt_quote',
+            actionParams: {},
+            isActive: true,
+            priority: 100,
+            conditions: {},
+            scope: 'group',
+            isSystem: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          }
+        }
+        return null
+      })
+
       const context = { ...baseContext, message: 'COMPRO USDT' }
       const result = routeMessage(context)
 

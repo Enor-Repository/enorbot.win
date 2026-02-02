@@ -200,22 +200,42 @@ analyticsRouter.get('/:groupId/analytics/players', async (req: Request, res: Res
 
 /**
  * GET /api/groups/:groupId/analytics/patterns
- * Returns common trigger patterns that don't have rules yet
+ * Returns trigger patterns with rule status from the unified rules table.
  *
  * Response: {
  *   patterns: Array<{
- *     phrase: string
+ *     trigger: string
  *     count: number
  *     hasRule: boolean
- *     examples: string[]
+ *     isEnabled: boolean
+ *     ruleId: string | null
+ *     isSystem: boolean
+ *     scope: 'group' | 'global' | 'control_only'
  *   }>
  * }
  */
+/**
+ * Validate groupId format for safe use in queries.
+ * Valid formats: 'all', 'number@g.us'
+ */
+function isValidGroupId(id: string): boolean {
+  if (id === 'all') return true
+  return /^\d+@g\.us$/.test(id)
+}
+
 analyticsRouter.get('/:groupId/analytics/patterns', async (req: Request, res: Response) => {
   try {
     const groupId = req.params.groupId as string
-    const limit = parseInt(req.query.limit as string) || 10
-    const days = parseInt(req.query.days as string) || 30
+    const limit = parseInt(req.query.limit as string) || 20
+    const days = Math.min(parseInt(req.query.days as string) || 30, MAX_DAYS_LOOKBACK)
+
+    // Validate groupId to prevent injection in .or() filter
+    if (!isValidGroupId(groupId)) {
+      return res.status(400).json({
+        error: 'Invalid groupId format',
+        message: 'groupId must be "all" or a valid WhatsApp group JID',
+      })
+    }
 
     const supabase = getSupabase()
     if (!supabase) {
@@ -225,18 +245,61 @@ analyticsRouter.get('/:groupId/analytics/patterns', async (req: Request, res: Re
     const startDate = new Date()
     startDate.setDate(startDate.getDate() - days)
 
-    // Get trigger messages
-    const { data: messages, error } = await supabase
+    // Step 1: Fetch all rules for this group AND global rules (group_jid='*')
+    // groupId is validated above to prevent injection
+    const { data: rules, error: rulesError } = await supabase
+      .from('rules')
+      .select('id, trigger_phrase, is_active, group_jid, metadata')
+      .or(`group_jid.eq.${groupId},group_jid.eq.*`)
+      .order('priority', { ascending: false })
+
+    if (rulesError) throw rulesError
+
+    // Build lookup map by trigger phrase (lowercase for matching)
+    // Note: scope and is_system columns may not exist yet, so we infer from group_jid and metadata
+    const ruleMap = new Map<string, {
+      id: string
+      isActive: boolean
+      scope: string
+      isSystem: boolean
+    }>()
+
+    rules?.forEach((r: any) => {
+      const key = r.trigger_phrase.toLowerCase()
+      // Infer system status: global patterns (group_jid='*') with source='triggers.ts' are system patterns
+      const isGlobal = r.group_jid === '*'
+      const isSystem = isGlobal && (r.metadata?.source === 'triggers.ts')
+      const scope = isGlobal ? 'global' : 'group'
+
+      // Don't overwrite group-specific rules with global ones
+      if (!ruleMap.has(key) || r.group_jid !== '*') {
+        ruleMap.set(key, {
+          id: r.id,
+          isActive: r.is_active,
+          scope,
+          isSystem,
+        })
+      }
+    })
+
+    // Step 2: Get trigger messages to discover patterns
+    let messagesQuery = supabase
       .from('messages')
       .select('content')
-      .eq('group_jid', groupId)
       .eq('is_trigger', true)
       .gte('created_at', startDate.toISOString())
-      .limit(1000) // Limit for performance
+      .limit(1000)
 
-    if (error) throw error
+    // Filter by group unless requesting all groups
+    if (groupId !== 'all') {
+      messagesQuery = messagesQuery.eq('group_jid', groupId)
+    }
 
-    // Extract common patterns (simple implementation - can be enhanced with NLP)
+    const { data: messages, error: messagesError } = await messagesQuery
+
+    if (messagesError) throw messagesError
+
+    // Step 3: Extract patterns from messages and cross-reference with rules
     const patternMap = new Map<string, { count: number; examples: string[] }>()
 
     messages?.forEach((msg: any) => {
@@ -254,18 +317,46 @@ analyticsRouter.get('/:groupId/analytics/patterns', async (req: Request, res: Re
       patternMap.set(words, existing)
     })
 
-    // Sort by count and take top patterns
-    const patterns = Array.from(patternMap.entries())
+    // Step 4: Build response with discovered patterns
+    const discoveredPatterns = Array.from(patternMap.entries())
       .sort((a, b) => b[1].count - a[1].count)
       .slice(0, limit)
-      .map(([phrase, data]) => ({
-        phrase,
-        count: data.count,
-        hasRule: false, // TODO: Check against rules table when implemented
-        examples: data.examples,
-      }))
+      .map(([phrase, data]) => {
+        const matchingRule = ruleMap.get(phrase.toLowerCase())
+        return {
+          trigger: phrase,
+          count: data.count,
+          hasRule: !!matchingRule,
+          isEnabled: matchingRule?.isActive ?? false,
+          ruleId: matchingRule?.id ?? null,
+          isSystem: matchingRule?.isSystem ?? false,
+          scope: matchingRule?.scope as 'group' | 'global' | 'control_only' | undefined,
+        }
+      })
 
-    res.json({ patterns })
+    // Step 5: Add system/global patterns that weren't discovered in messages
+    // Infer system patterns from group_jid='*' and metadata.source='triggers.ts'
+    const systemPatterns = rules?.filter((r: any) =>
+      r.group_jid === '*' && r.metadata?.source === 'triggers.ts'
+    ) || []
+    const existingTriggers = new Set(discoveredPatterns.map(p => p.trigger.toLowerCase()))
+
+    for (const rule of systemPatterns) {
+      const triggerLower = rule.trigger_phrase.toLowerCase()
+      if (!existingTriggers.has(triggerLower)) {
+        discoveredPatterns.unshift({
+          trigger: rule.trigger_phrase,
+          count: 0, // Not detected in messages
+          hasRule: true,
+          isEnabled: rule.is_active,
+          ruleId: rule.id,
+          isSystem: true,
+          scope: 'global', // System patterns are always global
+        })
+      }
+    }
+
+    res.json({ patterns: discoveredPatterns })
   } catch (error) {
     logger.error('Failed to get pattern analytics', {
       event: 'patterns_error',

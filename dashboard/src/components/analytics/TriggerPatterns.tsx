@@ -17,12 +17,31 @@ interface TriggerPattern {
   hasRule: boolean
   isEnabled: boolean
   ruleId: string | null
-  scope?: 'all_groups' | 'control_group_only'
+  scope?: 'group' | 'global' | 'control_only'
+  isSystem?: boolean
 }
 
 interface TriggerPatternsProps {
   groupId: string
   onCreateRule?: (trigger: string) => void
+}
+
+/**
+ * Map database scope to UI scope for ViewEditModal compatibility.
+ * The ViewEditModal component uses a simplified two-option scope model,
+ * while the database supports three scopes (group, global, control_only).
+ *
+ * Mapping:
+ * - 'control_only' -> 'control_group_only' (exact match)
+ * - 'group' -> 'all_groups' (applies to specific group, shown in all groups view)
+ * - 'global' -> 'all_groups' (applies globally, shown in all groups view)
+ *
+ * Note: The 'global' vs 'group' distinction is shown via the GLOBAL badge in the UI.
+ */
+function mapScopeToUI(scope?: 'group' | 'global' | 'control_only'): 'all_groups' | 'control_group_only' | undefined {
+  if (!scope) return undefined
+  if (scope === 'control_only') return 'control_group_only'
+  return 'all_groups'
 }
 
 // SVG Icon Component
@@ -187,7 +206,7 @@ export function TriggerPatterns({ groupId, onCreateRule }: TriggerPatternsProps)
         }}
         trigger={viewingPattern?.trigger || ''}
         ruleId={viewingPattern?.ruleId || null}
-        scope={viewingPattern?.scope}
+        scope={mapScopeToUI(viewingPattern?.scope)}
         onPatternUpdated={handleRuleUpdatedOrDeleted}
         onPatternDeleted={handleRuleUpdatedOrDeleted}
       />
@@ -263,17 +282,29 @@ export function TriggerPatterns({ groupId, onCreateRule }: TriggerPatternsProps)
                             <span className="font-mono text-sm text-foreground truncate">
                               "{pattern.trigger}"
                             </span>
-                            {pattern.scope === 'control_group_only' && (
+                            {pattern.isSystem && (
+                              <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[9px] px-1.5 py-0 uppercase">
+                                SYSTEM
+                              </Badge>
+                            )}
+                            {pattern.scope === 'control_only' && (
                               <Badge className="bg-purple-500/20 text-purple-300 border-purple-500/40 text-[9px] px-1.5 py-0 uppercase">
                                 CTRL
                               </Badge>
                             )}
+                            {pattern.scope === 'global' && !pattern.isSystem && (
+                              <Badge className="bg-blue-500/20 text-blue-300 border-blue-500/40 text-[9px] px-1.5 py-0 uppercase">
+                                GLOBAL
+                              </Badge>
+                            )}
                           </div>
                           <div className="text-xs font-mono text-muted-foreground mt-1">
-                            {pattern.count > 0 ? (
+                            {pattern.isSystem ? (
+                              <>System pattern (cannot be deleted)</>
+                            ) : pattern.count > 0 ? (
                               <>Detected {pattern.count} time{pattern.count !== 1 ? 's' : ''}</>
                             ) : (
-                              <>Hardcoded trigger</>
+                              <>Custom trigger</>
                             )}
                           </div>
                         </div>

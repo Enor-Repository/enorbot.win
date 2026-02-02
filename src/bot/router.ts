@@ -5,7 +5,8 @@ import {
   RECEIPT_MIME_TYPES,
   SUPPORTED_IMAGE_MIME_TYPES,
 } from '../types/handlers.js'
-import { getGroupModeSync, getGroupConfigSync } from '../services/groupConfig.js'
+import { getGroupModeSync } from '../services/groupConfig.js'
+import { findMatchingRule, type Rule } from '../services/rulesService.js'
 
 /**
  * Route destinations for message handling.
@@ -53,6 +54,8 @@ export interface RouterContext {
   rawMessage?: proto.IWebMessageInfo
   /** Whether this message contains a Tronscan transaction link */
   hasTronscan?: boolean
+  /** Matched rule from rulesService (only populated when a rule matches) */
+  matchedRule?: Rule
 }
 
 /**
@@ -149,8 +152,14 @@ export function routeMessage(
 
   // Priority 1: Control group ALWAYS works (regardless of any mode)
   if (context.isControlGroup) {
-    // Price triggers in control group go to price handler
-    if (hasTrigger) {
+    // Check rules for control group (includes global system patterns)
+    const controlGroupRule = findMatchingRule(context.groupId, context.message)
+    if (controlGroupRule) {
+      enrichedContext.matchedRule = controlGroupRule
+    }
+
+    // Price triggers in control group go to price handler (rule-based OR hardcoded fallback)
+    if (controlGroupRule || hasTrigger) {
       return { destination: 'PRICE_HANDLER', context: enrichedContext }
     }
     // Tronscan links in control group update Excel row
@@ -179,15 +188,17 @@ export function routeMessage(
     return { destination: 'OBSERVE_ONLY', context: enrichedContext }
   }
 
-  // ACTIVE mode: Normal routing with group-specific trigger check
-  // Check group-specific triggers in addition to global triggers
-  const groupConfig = getGroupConfigSync(context.groupId)
-  const hasGroupTrigger = groupConfig?.triggerPatterns.some(
-    pattern => context.message.toLowerCase().includes(pattern.toLowerCase())
-  ) ?? false
+  // ACTIVE mode: Normal routing with rules-based trigger check
+  // Check rules from dashboard (rules table) - these have priority, action types, etc.
+  const matchedRule = findMatchingRule(context.groupId, context.message)
 
-  // Priority 3: Price triggers (global OR group-specific) go to price handler
-  if (hasTrigger || hasGroupTrigger) {
+  // If a rule matches, add it to context for the handler to use
+  if (matchedRule) {
+    enrichedContext.matchedRule = matchedRule
+  }
+
+  // Priority 3: Price triggers (global OR rule-based) go to price handler
+  if (hasTrigger || matchedRule) {
     return { destination: 'PRICE_HANDLER', context: enrichedContext }
   }
 
