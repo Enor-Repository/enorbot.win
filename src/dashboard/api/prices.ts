@@ -61,12 +61,20 @@ pricesRouter.get('/usdt-brl', async (_req: Request, res: Response) => {
 /**
  * GET /api/prices/commercial-dollar
  * Proxies AwesomeAPI commercial dollar rate with server-side caching
+ * Query params:
+ *   - force=true: bypass cache and fetch fresh data
  */
-pricesRouter.get('/commercial-dollar', async (_req: Request, res: Response) => {
+pricesRouter.get('/commercial-dollar', async (req: Request, res: Response) => {
   try {
-    // Check cache first
+    const forceRefresh = req.query.force === 'true'
+
+    // Check cache first (unless force refresh)
     const now = Date.now()
-    if (commercialDollarCache && (now - commercialDollarCache.cachedAt) < CACHE_TTL_MS) {
+    if (!forceRefresh && commercialDollarCache && (now - commercialDollarCache.cachedAt) < CACHE_TTL_MS) {
+      logger.debug('Commercial dollar from cache', {
+        event: 'commercial_dollar_cache_hit',
+        cacheAge: Math.floor((now - commercialDollarCache.cachedAt) / 1000),
+      })
       return res.json({
         bid: commercialDollarCache.bid,
         ask: commercialDollarCache.ask,
@@ -77,8 +85,18 @@ pricesRouter.get('/commercial-dollar', async (_req: Request, res: Response) => {
       })
     }
 
-    // Fetch fresh data
-    const response = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL', {
+    logger.info('Fetching commercial dollar from AwesomeAPI', {
+      event: 'commercial_dollar_fetch',
+      reason: forceRefresh ? 'force_refresh' : 'cache_miss_or_expired',
+    })
+
+    // Fetch fresh data - use token if available for higher rate limits
+    const token = process.env.AWESOMEAPI_TOKEN || ''
+    const apiUrl = token
+      ? `https://economia.awesomeapi.com.br/json/last/USD-BRL?token=${token}`
+      : 'https://economia.awesomeapi.com.br/json/last/USD-BRL'
+
+    const response = await fetch(apiUrl, {
       headers: {
         'Accept': 'application/json',
       },
@@ -107,6 +125,13 @@ pricesRouter.get('/commercial-dollar', async (_req: Request, res: Response) => {
       timestamp: usdBrl.create_date || new Date().toISOString(),
       cachedAt: now,
     }
+
+    logger.info('Commercial dollar fetched successfully', {
+      event: 'commercial_dollar_success',
+      bid,
+      ask,
+      spread,
+    })
 
     res.json({
       bid,
