@@ -16,10 +16,15 @@ export const analyticsRouter = Router()
  *   range: { start: string, end: string }
  * }
  */
+// Safety limits to prevent DoS
+const MAX_HEATMAP_MESSAGES = 10000
+const MAX_PLAYERS_MESSAGES = 10000
+const MAX_DAYS_LOOKBACK = 365
+
 analyticsRouter.get('/:groupId/analytics/heatmap', async (req: Request, res: Response) => {
   try {
     const groupId = req.params.groupId as string
-    const days = parseInt(req.query.days as string) || 30
+    const days = Math.min(parseInt(req.query.days as string) || 30, MAX_DAYS_LOOKBACK)
 
     const supabase = getSupabase()
     if (!supabase) {
@@ -30,60 +35,56 @@ analyticsRouter.get('/:groupId/analytics/heatmap', async (req: Request, res: Res
     startDate.setDate(startDate.getDate() - days)
 
     // Query to get message count by hour and day of week
-    const { data, error } = await supabase.rpc('get_activity_heatmap', {
-      p_group_jid: groupId,
-      p_start_date: startDate.toISOString(),
-    })
+    // Skip RPC and use direct query (more reliable)
+    let query = supabase
+      .from('messages')
+      .select('created_at, content, is_trigger')
+      .gte('created_at', startDate.toISOString())
+      .order('created_at', { ascending: false })
 
-    if (error) {
-      // Fallback: direct query if RPC doesn't exist yet
-      const { data: messages, error: queryError } = await supabase
-        .from('messages')
-        .select('created_at, content, is_trigger')
-        .eq('group_jid', groupId)
-        .gte('created_at', startDate.toISOString())
-        .order('created_at', { ascending: false })
-
-      if (queryError) throw queryError
-
-      // Aggregate in-memory
-      const heatmapMap = new Map<string, { count: number; triggers: string[] }>()
-
-      messages?.forEach((msg: any) => {
-        const date = new Date(msg.created_at)
-        const hour = date.getHours()
-        const dayOfWeek = date.getDay() // 0 = Sunday
-        const key = `${hour}-${dayOfWeek}`
-
-        const existing = heatmapMap.get(key) || { count: 0, triggers: [] }
-        existing.count++
-        if (msg.is_trigger && msg.content) {
-          existing.triggers.push(msg.content)
-        }
-        heatmapMap.set(key, existing)
-      })
-
-      const heatmap = Array.from(heatmapMap.entries()).map(([key, data]) => {
-        const [hour, dayOfWeek] = key.split('-').map(Number)
-        return {
-          hour,
-          dayOfWeek,
-          count: data.count,
-          topTrigger: data.triggers[0] || null,
-        }
-      })
-
-      return res.json({
-        heatmap,
-        range: {
-          start: startDate.toISOString(),
-          end: new Date().toISOString(),
-        },
-      })
+    // If groupId is 'all', don't filter by group - aggregate all groups
+    if (groupId !== 'all') {
+      query = query.eq('group_jid', groupId)
     }
 
+    // Always apply safety limit to prevent OOM
+    query = query.limit(MAX_HEATMAP_MESSAGES)
+
+    const { data: messages, error: queryError } = await query
+
+    if (queryError) {
+      throw queryError
+    }
+
+    // Aggregate in-memory
+    const heatmapMap = new Map<string, { count: number; triggers: string[] }>()
+
+    messages?.forEach((msg: any) => {
+      const date = new Date(msg.created_at)
+      const hour = date.getHours()
+      const dayOfWeek = date.getDay() // 0 = Sunday
+      const key = `${hour}-${dayOfWeek}`
+
+      const existing = heatmapMap.get(key) || { count: 0, triggers: [] }
+      existing.count++
+      if (msg.is_trigger && msg.content) {
+        existing.triggers.push(msg.content)
+      }
+      heatmapMap.set(key, existing)
+    })
+
+    const heatmap = Array.from(heatmapMap.entries()).map(([key, data]) => {
+      const [hour, dayOfWeek] = key.split('-').map(Number)
+      return {
+        hour,
+        dayOfWeek,
+        count: data.count,
+        topTrigger: data.triggers[0] || null,
+      }
+    })
+
     res.json({
-      heatmap: data,
+      heatmap,
       range: {
         start: startDate.toISOString(),
         end: new Date().toISOString(),
@@ -131,13 +132,14 @@ analyticsRouter.get('/:groupId/analytics/players', async (req: Request, res: Res
     const startDate = new Date()
     startDate.setDate(startDate.getDate() - days)
 
-    // Get message counts per sender in this group
+    // Get message counts per sender in this group (with safety limit)
     const { data: messages, error } = await supabase
       .from('messages')
       .select('sender_jid, is_trigger, created_at')
       .eq('group_jid', groupId)
       .eq('is_from_bot', false) // Exclude bot messages
       .gte('created_at', startDate.toISOString())
+      .limit(MAX_PLAYERS_MESSAGES)
 
     if (error) throw error
 
@@ -311,12 +313,13 @@ analyticsRouter.get('/:groupId/learning', async (req: Request, res: Response) =>
       return res.status(404).json({ error: 'Group not found' })
     }
 
-    // Get unique players count
+    // Get unique players count (limit to recent messages for performance)
     const { data: uniquePlayers, error: playersError } = await supabase
       .from('messages')
       .select('sender_jid')
       .eq('group_jid', groupId)
       .eq('is_from_bot', false)
+      .limit(MAX_PLAYERS_MESSAGES)
 
     if (playersError) throw playersError
 

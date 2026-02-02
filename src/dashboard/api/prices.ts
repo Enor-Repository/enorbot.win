@@ -7,7 +7,12 @@ import { logger } from '../../utils/logger.js'
 
 export const pricesRouter = Router()
 
-// Cache for commercial dollar (5 minute TTL)
+// Fallback values when API is rate-limited (updated 2026-02-02)
+const FALLBACK_USD_BRL_BID = 5.26
+const FALLBACK_USD_BRL_ASK = 5.27
+const FALLBACK_USD_BRL_SPREAD = 0.01
+
+// Cache for commercial dollar (15 minute TTL - AwesomeAPI rate limits)
 let commercialDollarCache: {
   bid: number
   ask: number
@@ -133,9 +138,9 @@ pricesRouter.get('/commercial-dollar', async (_req: Request, res: Response) => {
     // Return a reasonable fallback value when rate-limited and no cache
     // This prevents the UI from showing blank
     res.json({
-      bid: 5.26,
-      ask: 5.27,
-      spread: 0.01,
+      bid: FALLBACK_USD_BRL_BID,
+      ask: FALLBACK_USD_BRL_ASK,
+      spread: FALLBACK_USD_BRL_SPREAD,
       timestamp: new Date().toISOString(),
       cached: false,
       cacheAge: 0,
