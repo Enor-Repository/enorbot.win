@@ -152,6 +152,14 @@ export function initSupabase(config: EnvConfig): void {
 }
 
 /**
+ * Get the Supabase client instance.
+ * Returns null if not initialized.
+ */
+export function getSupabase() {
+  return supabase
+}
+
+/**
  * Check if Supabase is reachable with a simple query.
  * Uses a 5-second timeout to detect connectivity issues quickly.
  *

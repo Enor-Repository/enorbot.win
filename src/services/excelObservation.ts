@@ -89,6 +89,14 @@ const GRAPH_TIMEOUT_MS = 10000
 // =============================================================================
 
 /**
+ * Check if a group name matches the Liqd group pattern.
+ * Case-insensitive match for "liqd" anywhere in the name.
+ */
+function isLiqdGroup(groupName: string): boolean {
+  return groupName.toLowerCase().includes('liqd')
+}
+
+/**
  * Build the URL for the Observations worksheet rows endpoint.
  * Uses the EXCEL_OBSERVATIONS_WORKSHEET_NAME and EXCEL_OBSERVATIONS_TABLE_NAME config.
  */
@@ -99,6 +107,21 @@ function buildObservationsRowsUrl(): string {
   const fileId = config.EXCEL_FILE_ID || ''
   const worksheetName = config.EXCEL_OBSERVATIONS_WORKSHEET_NAME || 'Observations'
   const tableName = config.EXCEL_OBSERVATIONS_TABLE_NAME || 'ObservationsTable'
+
+  return `${GRAPH_API_BASE}/sites/${siteId}/drives/${driveId}/items/${fileId}/workbook/worksheets/${worksheetName}/tables/${tableName}/rows`
+}
+
+/**
+ * Build the URL for the Liqd worksheet rows endpoint.
+ * Dedicated worksheet for Liqd group observations.
+ */
+function buildLiqdRowsUrl(): string {
+  const config = getConfig()
+  const siteId = config.EXCEL_SITE_ID || ''
+  const driveId = config.EXCEL_DRIVE_ID || ''
+  const fileId = config.EXCEL_FILE_ID || ''
+  const worksheetName = config.EXCEL_LIQD_WORKSHEET_NAME || 'Liqd'
+  const tableName = config.EXCEL_LIQD_TABLE_NAME || 'LiqdTable'
 
   return `${GRAPH_API_BASE}/sites/${siteId}/drives/${driveId}/items/${fileId}/workbook/worksheets/${worksheetName}/tables/${tableName}/rows`
 }
@@ -157,6 +180,8 @@ function formatObservationRow(entry: ObservationLogEntry): string[][] {
  * Core implementation for appending observation row to Excel.
  * Issue fix: Extracted to avoid code duplication.
  *
+ * Routes Liqd group messages to dedicated worksheet, others to general Observations.
+ *
  * @param entry - The observation entry to write
  * @param eventPrefix - Prefix for log events ('observation' or 'observation_direct')
  * @returns Promise<Result<{rowNumber: number}>> - Row number on success
@@ -175,7 +200,9 @@ async function appendObservationRowCore(
     return err(`Auth failed: ${tokenResult.error}`)
   }
 
-  const url = buildObservationsRowsUrl()
+  // Route to Liqd worksheet if group name matches, otherwise general Observations
+  const isLiqd = isLiqdGroup(entry.groupName)
+  const url = isLiqd ? buildLiqdRowsUrl() : buildObservationsRowsUrl()
   const rowData = formatObservationRow(entry)
 
   const controller = new AbortController()
@@ -211,6 +238,7 @@ async function appendObservationRowCore(
       rowNumber,
       groupId: entry.groupId,
       messageType: entry.messageType,
+      worksheet: isLiqd ? 'Liqd' : 'Observations',
       ...(eventPrefix === 'observation' && { threadId: entry.conversationThread }),
     })
 

@@ -5,15 +5,17 @@
 | Property | Value |
 |----------|-------|
 | **Name** | eNorBOT |
-| **Type** | WhatsApp Bot Service |
+| **Type** | WhatsApp Bot Service + Management Dashboard |
 | **Language** | TypeScript 5.9+ |
-| **Runtime** | Node.js 20+ |
-| **Architecture** | Event-driven message router |
-| **Repository** | Monolith |
+| **Runtime** | Node.js 20+ / Browser |
+| **Architecture** | Event-driven message router + React SPA |
+| **Repository** | Multi-part (Bot Backend + Dashboard Frontend) |
 
-**Purpose**: Real-time USDT/BRL OTC price quotes via WhatsApp groups with CIO control interface, Excel logging, and receipt processing.
+**Purpose**: Real-time USDT/BRL OTC price quotes via WhatsApp groups with CIO control interface, Excel logging, receipt processing, and web-based management dashboard.
 
 ## Quick Reference
+
+**Bot Backend:**
 
 | Item | Details |
 |------|---------|
@@ -21,21 +23,42 @@
 | **Tech Stack** | TypeScript, Baileys, Supabase, Zod, Vitest |
 | **WhatsApp Auth** | Pairing code (not QR) |
 | **Price Source** | Binance API |
-| **Trigger Words** | "preço", "cotação" |
-| **Control Commands** | pause, resume, status, training |
+| **Trigger Words** | "preço", "cotação" (+ custom patterns) |
+| **Control Commands** | pause, resume, status, mode, training |
 | **Deploy Path** | `/opt/enorbot/` |
 | **Health Endpoint** | `:3000` |
+
+**Dashboard Frontend:**
+
+| Item | Details |
+|------|---------|
+| **Entry Point** | `dashboard/src/main.tsx` |
+| **Tech Stack** | React 18, Vite 6, Tailwind CSS, Radix UI |
+| **Dev Server** | `http://localhost:3003` (Express backend) |
+| **Build Tool** | Vite with TypeScript |
+| **Pages** | Overview, Groups & Rules, Trigger Patterns, Costs |
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
 | [README](../README.md) | Project overview, quick start, deployment |
+| **[Project Status](./project-status.md)** | **Current state, recent changes, what's next** ⭐ |
 | [Architecture](./architecture.md) | System design, data flows, integrations |
 | [Source Tree Analysis](./source-tree-analysis.md) | File structure and purposes |
 | [Development Guide](./development-guide.md) | Setup, scripts, testing, deployment |
 | [Project Context](./project-context.md) | AI agent context rules |
 | [Code Review Checklist](./code-review-checklist.md) | Review guidelines |
+
+**Tech Specs:**
+- [Dashboard Technical Spec](./tech-spec-dashboard.md)
+- [Group Modes Technical Spec](./tech-spec-group-modes.md)
+- [Message Logging Technical Spec](./tech-spec-full-message-logging.md)
+
+**Progress Tracking:**
+- [Dashboard Progress](./progress-dashboard.md)
+- [Group Modes Progress](./progress-group-modes.md)
+- [Message Logging Progress](./progress-message-logging.md)
 
 ## Architecture Summary
 
@@ -50,14 +73,27 @@ WhatsApp ──► Baileys ──► Router ──► Handlers ──► Service
 
 ## Key Features
 
+**Bot Features:**
+
 | Feature | Description |
 |---------|-------------|
 | **Price Quotes** | Real-time USDT/BRL from Binance (2s timeout) |
-| **CIO Control** | pause/resume/status/training commands |
+| **Trigger Patterns** | Modular action system (text, quotes, AI prompts) |
+| **CIO Control** | pause/resume/status/mode/training commands |
+| **Group Modes** | Per-group learning, production, monitor, disabled modes |
 | **Excel Logging** | Quote logging via MS Graph API with offline queue |
 | **Receipt Processing** | PIX receipt OCR and validation |
-| **Training Mode** | Observe-only mode for data collection |
+| **AI Classification** | OpenRouter-powered message classification |
 | **Error Resilience** | Auto-pause after 3 failures, auto-recovery in 5 min |
+
+**Dashboard Features:**
+
+| Feature | Description |
+|---------|-------------|
+| **Group Management** | View all groups, set modes, assign player roles |
+| **Trigger Patterns** | Create, edit, delete custom trigger patterns |
+| **Analytics** | Message volumes, pattern discovery, active patterns |
+| **Real-time Status** | Bot health, queue status, classification metrics |
 
 ## Key Integrations
 
@@ -110,13 +146,20 @@ pm2 logs enorbot --lines 100  # Last 100 lines
 4. **Auto-recovery**: Resumes after 5 minutes
 5. **Manual recovery**: Send "resume" in control group
 
-## Database Schema
+## Database Schema (Supabase)
 
 | Table | Purpose |
 |-------|---------|
 | `sessions` | WhatsApp auth state persistence |
-| `log_queue` | Offline Excel logging queue |
+| `log_queue` | Offline Excel logging queue with retry |
 | `receipts` | Validated PIX receipt data |
+| `group_config` | Per-group modes and player roles |
+| `observation_queue` | Analytical observation logging |
+| `message_history` | Comprehensive message logging |
+| `rules` | Trigger patterns with modular actions |
+| `messages` | Analytics data for pattern discovery |
+| `groups` | Group metadata |
+| `players` | Player role assignments |
 
 ## Feature Epics
 
@@ -132,6 +175,7 @@ pm2 logs enorbot --lines 100  # Last 100 lines
 
 ---
 
-*Documentation generated: 2026-01-27*
+*Documentation generated: 2026-01-30*
 *Scan level: Deep*
 *Workflow: document-project v1.2.0*
+*Project Type: Multi-part (Bot Backend + Dashboard Frontend)*

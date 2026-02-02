@@ -85,3 +85,30 @@ export function formatRelativeTime(date: Date | null): string {
   if (diffHours === 1) return '1h ago'
   return `${diffHours}h ago`
 }
+
+// =============================================================================
+// Commercial Dollar Formatting
+// =============================================================================
+
+/**
+ * Format commercial dollar exchange rate.
+ * Shows both bid and ask prices with spread.
+ *
+ * @param bid - Buy price (what you get when selling USD)
+ * @param ask - Sell price (what you pay when buying USD)
+ * @returns Formatted string (e.g., "Dólar Comercial:\nCompra: R$5,2584\nVenda: R$5,2614")
+ */
+export function formatCommercialDollar(bid: number, ask: number): string {
+  // Defensive validation
+  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+    throw new Error(`Invalid commercial dollar values: bid=${bid}, ask=${ask}`)
+  }
+
+  // Format with 4 decimal places and Brazilian comma separator
+  const formatRate = (rate: number): string => {
+    const truncated = Math.trunc(rate * 10_000) / 10_000
+    return `R$${truncated.toFixed(4).replace('.', ',')}`
+  }
+
+  return `💲 *Dólar Comercial*\nCompra: ${formatRate(bid)}\nVenda: ${formatRate(ask)}`
+}

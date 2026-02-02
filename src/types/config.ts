@@ -70,6 +70,17 @@ export const envSchema = z.object({
     .min(1, 'EXCEL_OBSERVATIONS_TABLE_NAME must be a valid Excel table name')
     .default('ObservationsTable'),
 
+  // Liqd group dedicated worksheet (separate from general observations)
+  // Routes observations from groups matching "liqd" (case-insensitive) to dedicated tab
+  EXCEL_LIQD_WORKSHEET_NAME: z
+    .string()
+    .min(1, 'EXCEL_LIQD_WORKSHEET_NAME must be a valid worksheet name')
+    .default('Liqd'),
+  EXCEL_LIQD_TABLE_NAME: z
+    .string()
+    .min(1, 'EXCEL_LIQD_TABLE_NAME must be a valid Excel table name')
+    .default('LiqdTable'),
+
   // Bot configuration
   PHONE_NUMBER: z.string().regex(
     /^\d{12,15}$/,
@@ -81,6 +92,17 @@ export const envSchema = z.object({
 
   // Group modes - default mode for newly discovered groups
   DEFAULT_GROUP_MODE: z.enum(['learning', 'assisted', 'active', 'paused']).default('learning'),
+
+  // Dashboard configuration
+  DASHBOARD_PORT: z
+    .string()
+    .default('3003')
+    .transform(Number)
+    .pipe(z.number().int().min(1).max(65535)),
+  DASHBOARD_ENABLED: z
+    .string()
+    .default('true')
+    .transform(v => v === 'true'),
 })
 
 export type EnvConfig = z.infer<typeof envSchema>

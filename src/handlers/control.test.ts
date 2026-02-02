@@ -505,17 +505,77 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       )
     })
 
-    it('sets all groups to active mode on training off', async () => {
+    it('shows interactive group selection on training off', async () => {
       const context = { ...baseContext, message: 'training off' }
 
       await handleControlMessage(context)
 
-      expect(mockSetGroupMode).toHaveBeenCalled()
+      // Should show numbered list instead of immediately activating
       expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
         mockSock,
         'control-group@g.us',
-        expect.stringContaining('Training Mode OFF')
+        expect.stringContaining('Which group would you like to activate?')
       )
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('1. ')
+      )
+    })
+
+    it('activates selected group when number is replied', async () => {
+      // First, trigger the training off to set up pending selection
+      const offContext = { ...baseContext, message: 'training off' }
+      await handleControlMessage(offContext)
+
+      // Reset mocks for clarity
+      mockSetGroupMode.mockClear()
+      mockSendWithAntiDetection.mockClear()
+
+      // Now send a number selection
+      const selectContext = { ...baseContext, message: '1' }
+      await handleControlMessage(selectContext)
+
+      // Should have activated the first group
+      expect(mockSetGroupMode).toHaveBeenCalledWith(
+        'binance@g.us',
+        'active',
+        expect.any(String)
+      )
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('is now ACTIVE!')
+      )
+    })
+
+    it('shows all groups active message when none in learning mode', async () => {
+      // Mock no learning groups
+      mockGetGroupsByMode.mockImplementation((mode: string) => {
+        if (mode === 'learning') return []
+        if (mode === 'active') return [{
+          groupJid: 'active@g.us',
+          groupName: 'Active Group',
+          mode: 'active',
+        }]
+        return []
+      })
+
+      const context = { ...baseContext, message: 'training off' }
+      await handleControlMessage(context)
+
+      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
+        mockSock,
+        'control-group@g.us',
+        expect.stringContaining('All 1 groups are already active!')
+      )
+
+      // Restore mock
+      mockGetGroupsByMode.mockImplementation((mode: string) => {
+        if (mode === 'learning') return [mockGroupConfigs.get('binance@g.us')]
+        if (mode === 'active') return [mockGroupConfigs.get('otc@g.us')]
+        return []
+      })
     })
 
     it('shows error for invalid training action', async () => {

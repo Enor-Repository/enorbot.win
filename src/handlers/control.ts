@@ -47,6 +47,57 @@ import {
 import { getClassificationMetrics } from '../services/classificationEngine.js'
 
 // =============================================================================
+// Interactive Selection State
+// =============================================================================
+
+/**
+ * Pending group selection for "training off" interactive flow.
+ * Maps sender JID -> selection context.
+ */
+interface PendingGroupSelection {
+  /** Groups available for selection (indexed 1-N) */
+  groups: Array<{ groupJid: string; groupName: string }>
+  /** Timestamp when selection was initiated */
+  createdAt: number
+  /** Control group ID where the selection was initiated */
+  controlGroupId: string
+}
+
+/**
+ * Active pending selections by sender.
+ * Times out after 60 seconds.
+ */
+const pendingSelections: Map<string, PendingGroupSelection> = new Map()
+
+/**
+ * Selection timeout in milliseconds (60 seconds).
+ */
+const SELECTION_TIMEOUT_MS = 60 * 1000
+
+/**
+ * Check if a sender has a pending selection that hasn't expired.
+ */
+function getPendingSelection(senderJid: string): PendingGroupSelection | null {
+  const selection = pendingSelections.get(senderJid)
+  if (!selection) return null
+
+  // Check if expired
+  if (Date.now() - selection.createdAt > SELECTION_TIMEOUT_MS) {
+    pendingSelections.delete(senderJid)
+    return null
+  }
+
+  return selection
+}
+
+/**
+ * Clear a pending selection for a sender.
+ */
+function clearPendingSelection(senderJid: string): void {
+  pendingSelections.delete(senderJid)
+}
+
+// =============================================================================
 // Known Groups Cache (deprecated - use groupConfig service)
 // =============================================================================
 
@@ -98,6 +149,7 @@ export type ControlCommandType =
   | 'config'    // config <group> - show group config
   | 'trigger'   // trigger add|remove <group> <pattern>
   | 'role'      // role <group> <player> operator|client|cio
+  | 'select'    // Number selection for interactive group selection
   | 'unknown'
 
 /**
@@ -172,6 +224,12 @@ export function parseControlCommand(message: string): ControlCommand {
   }
   if (lower === 'training off') {
     return { type: 'training', args: ['off'] }
+  }
+
+  // Number selection (1-99) for interactive group selection
+  const numberMatch = lower.match(/^(\d{1,2})$/)
+  if (numberMatch) {
+    return { type: 'select', args: [numberMatch[1]] }
   }
 
   return { type: 'unknown', args: [] }
@@ -754,8 +812,62 @@ async function handleResumeCommand(context: RouterContext, args: string[]): Prom
 }
 
 /**
+ * Build the numbered group list message for interactive selection.
+ */
+function buildGroupSelectionMessage(groups: Array<{ groupJid: string; groupName: string }>): string {
+  const lines: string[] = [
+    '🎓 Which group would you like to activate?',
+    '',
+  ]
+
+  groups.forEach((group, index) => {
+    lines.push(`${index + 1}. ${group.groupName}`)
+  })
+
+  lines.push('')
+  lines.push('Reply with the number to activate that group.')
+
+  return lines.join('\n')
+}
+
+/**
+ * Build the updated group list message after selection.
+ */
+async function buildUpdatedGroupListMessage(activatedGroupName: string): Promise<string> {
+  const learningGroups = getGroupsByMode('learning')
+  const activeGroups = getGroupsByMode('active')
+
+  const lines: string[] = [
+    `🟢 ${activatedGroupName} is now ACTIVE!`,
+    '',
+  ]
+
+  if (learningGroups.length > 0) {
+    lines.push('📚 Groups still in learning mode:')
+    learningGroups.forEach((g, i) => {
+      lines.push(`${i + 1}. ${g.groupName}`)
+    })
+    lines.push('')
+    lines.push('Send "training off" to activate another group.')
+  } else {
+    lines.push('✅ All groups are now active!')
+  }
+
+  if (activeGroups.length > 0) {
+    lines.push('')
+    lines.push('🟢 Active groups:')
+    activeGroups.forEach(g => {
+      lines.push(`• ${g.groupName}`)
+    })
+  }
+
+  return lines.join('\n')
+}
+
+/**
  * Handle training command.
- * Maps to setting all groups to learning/active for backward compatibility.
+ * "training on" - sets all groups to learning mode
+ * "training off" - shows interactive numbered list for group activation
  *
  * @param context - Router context
  * @param args - Command arguments ('on' or 'off')
@@ -768,35 +880,125 @@ async function handleTrainingCommand(context: RouterContext, args: string[]): Pr
     return
   }
 
-  // Log deprecation notice
-  logger.info('Legacy training command used', {
-    event: 'legacy_training_command',
+  logger.info('Training command received', {
+    event: 'training_command',
     action,
     triggeredBy: context.sender,
   })
 
-  const configs = await getAllGroupConfigs()
-  const targetMode: GroupMode = action === 'on' ? 'learning' : 'active'
-  let count = 0
+  if (action === 'on') {
+    // Set all groups to learning mode
+    const configs = await getAllGroupConfigs()
+    let count = 0
 
-  for (const config of configs.values()) {
-    if (config.mode !== targetMode && config.mode !== 'paused') {
-      await setGroupMode(config.groupJid, targetMode, context.sender)
-      count++
+    for (const config of configs.values()) {
+      if (config.mode !== 'learning' && config.mode !== 'paused') {
+        await setGroupMode(config.groupJid, 'learning', context.sender)
+        count++
+      }
     }
+
+    logger.info('Training mode enabled', {
+      event: 'training_mode_on',
+      groupCount: count,
+      triggeredBy: context.sender,
+    })
+
+    await sendControlResponse(context, `🎓 Training Mode ON - ${count} groups set to learning (observe-only)`)
+    return
   }
 
-  const message = action === 'on'
-    ? `🎓 Training Mode ON - ${count} groups set to learning (observe-only)`
-    : `🎓 Training Mode OFF - ${count} groups set to active`
+  // action === 'off' - show interactive group selection
+  const learningGroups = getGroupsByMode('learning')
 
-  logger.info(`Training mode ${action === 'on' ? 'enabled' : 'disabled'}`, {
-    event: action === 'on' ? 'training_mode_on' : 'training_mode_off',
-    groupCount: count,
+  if (learningGroups.length === 0) {
+    // No groups in learning mode
+    const activeGroups = getGroupsByMode('active')
+    if (activeGroups.length === 0) {
+      await sendControlResponse(context, '⚠️ No groups registered yet. Groups will appear when the bot receives messages from them.')
+    } else {
+      await sendControlResponse(context, `✅ All ${activeGroups.length} groups are already active!`)
+    }
+    return
+  }
+
+  // Build the selection list
+  const selectableGroups = learningGroups.map(g => ({
+    groupJid: g.groupJid,
+    groupName: g.groupName,
+  }))
+
+  // Store pending selection
+  pendingSelections.set(context.sender, {
+    groups: selectableGroups,
+    createdAt: Date.now(),
+    controlGroupId: context.groupId,
+  })
+
+  logger.info('Group selection initiated', {
+    event: 'group_selection_initiated',
+    groupCount: selectableGroups.length,
     triggeredBy: context.sender,
   })
 
-  await sendControlResponse(context, message)
+  await sendControlResponse(context, buildGroupSelectionMessage(selectableGroups))
+}
+
+/**
+ * Handle select command (number input for group selection).
+ *
+ * @param context - Router context
+ * @param args - Command arguments (the number)
+ */
+async function handleSelectCommand(context: RouterContext, args: string[]): Promise<void> {
+  const selection = getPendingSelection(context.sender)
+
+  if (!selection) {
+    // No pending selection - ignore the number
+    logger.debug('Number received but no pending selection', {
+      event: 'select_no_pending',
+      number: args[0],
+      sender: context.sender,
+    })
+    return
+  }
+
+  const selectedNumber = parseInt(args[0], 10)
+
+  // Validate selection
+  if (selectedNumber < 1 || selectedNumber > selection.groups.length) {
+    await sendControlResponse(
+      context,
+      `⚠️ Invalid selection. Please enter a number between 1 and ${selection.groups.length}.`
+    )
+    return
+  }
+
+  // Get the selected group
+  const selectedGroup = selection.groups[selectedNumber - 1]
+
+  // Activate the group
+  const result = await setGroupMode(selectedGroup.groupJid, 'active', context.sender)
+
+  if (!result.ok) {
+    await sendControlResponse(context, `❌ Failed to activate group: ${result.error}`)
+    return
+  }
+
+  // Clear the pending selection
+  clearPendingSelection(context.sender)
+
+  logger.info('Group activated via selection', {
+    event: 'group_activated_via_selection',
+    groupJid: selectedGroup.groupJid,
+    groupName: selectedGroup.groupName,
+    selectedNumber,
+    triggeredBy: context.sender,
+  })
+
+  // Send updated list
+  const updatedMessage = await buildUpdatedGroupListMessage(selectedGroup.groupName)
+  await sendControlResponse(context, updatedMessage)
 }
 
 /**
@@ -999,6 +1201,10 @@ export async function handleControlMessage(context: RouterContext): Promise<Resu
 
     case 'training':
       await handleTrainingCommand(context, command.args)
+      break
+
+    case 'select':
+      await handleSelectCommand(context, command.args)
       break
 
     case 'unknown':
