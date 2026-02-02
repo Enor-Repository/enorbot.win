@@ -5,7 +5,6 @@ import { initSupabase } from './services/supabase.js'
 import { initGroupConfigs } from './services/groupConfig.js'
 import { checkBackupPermissions } from './services/authBackup.js'
 import { createConnection, getSocket } from './bot/connection.js'
-import { startDashboardServer } from './dashboard/server.js'
 
 let healthServer: Server | null = null
 
@@ -57,8 +56,18 @@ async function main(): Promise<void> {
     logger.info('Health endpoint started', { port: config.HEALTH_PORT })
   })
 
-  // Start dashboard server
-  startDashboardServer()
+  // Start dashboard server (only if enabled and express is available)
+  if (config.DASHBOARD_ENABLED) {
+    try {
+      const { startDashboardServer } = await import('./dashboard/server.js')
+      startDashboardServer()
+    } catch (err) {
+      logger.warn('Dashboard server not started', {
+        event: 'dashboard_start_skipped',
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   // Initialize WhatsApp connection
   await createConnection(config)

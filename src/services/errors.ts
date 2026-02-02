@@ -29,7 +29,7 @@ export type ErrorClassification = 'transient' | 'critical'
 /**
  * Source of the error for independent tracking per integration.
  */
-export type ErrorSource = 'binance' | 'whatsapp' | 'excel' | 'supabase'
+export type ErrorSource = 'binance' | 'whatsapp' | 'excel' | 'supabase' | 'awesomeapi'
 
 /**
  * Fully classified error with all context required for logging (NFR13).
@@ -66,6 +66,7 @@ const failureCounts: Record<ErrorSource, number> = {
   whatsapp: 0,
   excel: 0,
   supabase: 0,
+  awesomeapi: 0,
 }
 
 // ============================================================================
