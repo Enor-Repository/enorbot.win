@@ -14,6 +14,7 @@ import { groupsRouter } from './api/groups.js'
 import { analyticsRouter } from './api/analytics.js'
 import { costsRouter } from './api/costs.js'
 import { rulesRouter } from './api/rules.js'
+import { pricesRouter } from './api/prices.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -40,6 +41,7 @@ app.use('/api/groups', groupsRouter)
 app.use('/api/groups', analyticsRouter)
 app.use('/api/costs', costsRouter)
 app.use('/api/rules', rulesRouter)
+app.use('/api/prices', pricesRouter)
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {

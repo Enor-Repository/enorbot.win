@@ -44,23 +44,22 @@ export function PriceTracker() {
     try {
       setPrices((prev) => ({ ...prev, loading: true, error: null }))
 
-      // Fetch both prices in parallel
+      // Fetch both prices in parallel via our backend proxy (avoids CORS)
       const [binanceResponse, commercialResponse] = await Promise.allSettled([
-        fetch('https://api.binance.com/api/v3/ticker/price?symbol=USDTBRL'),
+        fetch(`${API_BASE_URL}/api/prices/usdt-brl`),
         fetch(`${API_BASE_URL}/api/prices/commercial-dollar`),
       ])
 
       let usdtBrl: number | null = null
       let commercialDollar: CommercialDollarData | null = null
 
-      // Process Binance response
+      // Process USDT/BRL response (via our backend proxy)
       if (binanceResponse.status === 'fulfilled' && binanceResponse.value.ok) {
         const data = await binanceResponse.value.json()
-        if (data && typeof data.price === 'string') {
-          const price = parseFloat(data.price)
-          if (!isNaN(price) && price >= MIN_VALID_PRICE && price <= MAX_VALID_PRICE) {
-            usdtBrl = price
-          }
+        // Our proxy returns { price: number, ... } directly
+        const price = typeof data.price === 'number' ? data.price : parseFloat(data.price)
+        if (!isNaN(price) && price >= MIN_VALID_PRICE && price <= MAX_VALID_PRICE) {
+          usdtBrl = price
         }
       }
 
