@@ -7,6 +7,7 @@ import { initRulesService } from './services/rulesService.js'
 import { checkBackupPermissions } from './services/authBackup.js'
 import { createConnection, getSocket } from './bot/connection.js'
 import { startDealSweepTimer, stopDealSweepTimer } from './handlers/deal.js'
+import { initTriggerMode } from './services/triggerMigration.js'
 
 let healthServer: Server | null = null
 
@@ -27,6 +28,9 @@ async function main(): Promise<void> {
   }
   const config = configResult.data
 
+  // Initialize trigger mode from TRIGGER_SHADOW_MODE env var
+  initTriggerMode()
+
   // Initialize Supabase for session persistence
   initSupabase(config)
 
@@ -39,7 +43,9 @@ async function main(): Promise<void> {
     })
   }
 
-  // Initialize rules service for dashboard-defined trigger rules
+  // Initialize rules service (old system). Still loaded as rollback safety net:
+  // if TRIGGER_SHADOW_MODE is reverted to "shadow" or "off", the router needs
+  // rules in memory. Removing this is safe only after the old rules table is dropped.
   const rulesResult = await initRulesService(config)
   if (!rulesResult.ok) {
     logger.warn('Rules service initialization failed', {

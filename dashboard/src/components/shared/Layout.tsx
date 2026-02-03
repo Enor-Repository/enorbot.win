@@ -1,6 +1,6 @@
 import { ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Activity, BarChart3, ListTree, Zap, Sparkles } from 'lucide-react'
+import { Activity, BarChart3, ListTree, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SystemStatus } from './SystemStatus'
 
@@ -11,7 +11,6 @@ interface LayoutProps {
 const navItems = [
   { to: '/overview', icon: Activity, label: 'Overview' },
   { to: '/groups', icon: ListTree, label: 'Groups & Rules' },
-  { to: '/patterns', icon: Sparkles, label: 'Trigger Patterns' },
   { to: '/costs', icon: BarChart3, label: 'Costs' },
 ]
 
@@ -62,7 +61,7 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Footer */}
         <div className="p-4 border-t border-border text-xs text-muted-foreground">
-          <p>v1.0.0 • Feature #3</p>
+          <p>v2.0.0 • Sprint 6</p>
         </div>
       </aside>
 

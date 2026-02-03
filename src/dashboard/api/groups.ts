@@ -67,7 +67,9 @@ groupsRouter.get('/', async (_req: Request, res: Response) => {
         isControlGroup: config.groupName.includes('CONTROLE'),
         learningDays: Math.floor((Date.now() - config.learningStartedAt.getTime()) / (1000 * 60 * 60 * 24)),
         messagesCollected: stats?.messageCount ?? 0,
-        rulesActive: config.triggerPatterns.length, // Count custom trigger patterns as "rules"
+        // Note: counts hardcoded trigger_patterns from groups table config,
+        // not dynamic group_triggers entries. TODO (Task 6.5): query group_triggers count.
+        rulesActive: config.triggerPatterns.length,
         lastActivity: stats?.lastActivity ?? null,
       }
     })

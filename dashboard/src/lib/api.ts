@@ -19,17 +19,17 @@ export const API_ENDPOINTS = {
   groupConfig: (jid: string): string => `${API_BASE_URL}/api/groups/${jid}/config`,
   /** Update AI threshold (D.12) */
   groupThreshold: (jid: string): string => `${API_BASE_URL}/api/groups/${jid}/threshold`,
-  /** Get all rules */
+  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. Use groupTriggers instead. */
   rules: `${API_BASE_URL}/api/rules`,
-  /** Get/Update/Delete specific rule by ID */
+  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. */
   rule: (id: string): string => `${API_BASE_URL}/api/rules/${id}`,
-  /** Get rules for specific group */
+  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. */
   groupRules: (groupJid: string): string => `${API_BASE_URL}/api/rules?groupJid=${groupJid}`,
   /** Get players for specific group */
   groupPlayers: (groupJid: string): string => `${API_BASE_URL}/api/groups/${groupJid}/players`,
   /** Update player role */
   playerRole: (groupJid: string, playerJid: string): string => `${API_BASE_URL}/api/groups/${groupJid}/players/${playerJid}/role`,
-  /** Test a rule against a message */
+  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. */
   testRule: `${API_BASE_URL}/api/rules/test`,
   /** Cost summary (period=day|week|month) */
   costSummary: (period?: string): string =>

@@ -3,7 +3,7 @@
 > **Document Purpose**: Living roadmap for transforming eNorBOT into Daniel's automated CIO desk with full control via dashboard.
 >
 > **Last Updated**: 2026-02-03
-> **Status**: Sprint 1, 2, 3, 4 & 5 Complete
+> **Status**: Sprint 1-5 Complete, Sprint 6 (Hardening) In Progress
 > **Architecture**: Triggers + Rules (separated concerns)
 
 ---
@@ -256,6 +256,7 @@ This ensures the bot always has a valid pricing configuration.
 | **3** | Group Triggers | ✅ COMPLETE | ✅ Approved |
 | **4** | Deal Flow Engine | ✅ COMPLETE | ✅ Approved |
 | **5** | Message Lookback & Polish | ✅ COMPLETE | ✅ Approved |
+| **6** | Demo Hardening & Production Readiness | 🟡 IN PROGRESS | Pending |
 
 ---
 
@@ -279,7 +280,7 @@ Enable Daniel to configure per-group default pricing spreads via dashboard.
 - [x] API endpoints with validation
 - [x] UI component with live rate preview
 - [x] TypeScript builds passing
-- [ ] **Pending: Deploy to production**
+- [x] Deployed to production (VPS + Supabase migration applied 2026-02-03)
 
 ### Role in New Architecture
 The `group_spreads` table becomes the **fallback default** when no time-based rule matches. Rules override this default when active.
@@ -643,11 +644,286 @@ Context awareness from message history, plus production refinements.
 **>> REVIEW GATE: Production readiness ✅**
 
 ### Code Review
-- Pending (Sprint 5 retrospective)
+- Adversarial code review found 7 issues (1 HIGH, 3 MEDIUM, 3 LOW) -- all resolved:
+  - H1: Sprint 5 services not wired into router pipeline → `shouldSuppressResponse` + `recordBotResponse` integrated (phased: `skipOperatorCheck: true`)
+  - M1: Unbounded in-memory cooldown Map → eviction at 500 entries / 10-min max age
+  - M2: Query filter ordering → reordered to apply filters before `.order().limit()`
+  - M3: Tests didn't verify lookback window parameters → 2 new lookback window tests
+  - L1: Dead imports removed (`buildSenderContext`, `Message`, `SenderContext`)
+  - L2: Array.find() ordering edge case documented (newest-first, acceptable for 3-min window)
+  - L3: `archived_at` NOT NULL constraint verified and documented
+
+### Deployment
+- [x] All Sprint 1-5 code committed to Azure DevOps (51 files, 17,150+ lines)
+- [x] Supabase migrations applied: `group_rules`, `group_triggers`, `active_deals`, `deal_history`, message lookback indexes
+- [x] VPS deployment: dist synced, PM2 restarted, all API endpoints verified 200
+- [x] CRUD operations verified: create/read/delete rules and triggers working
+- [x] Bot startup clean: Supabase init, 10 groups loaded, deal sweep timer running, WhatsApp connected
+- [x] Dashboard accessible at http://181.215.135.75:3004/
 
 ---
 
-## 11. Risk Register
+## 11. Sprint 6: Demo Hardening & Production Readiness
+
+### Goal
+Prepare eNorBOT for Daniel Hon (CIO) demo presentation. Ensure the dashboard looks polished, has realistic demo data, handles edge cases gracefully, and can be confidently demonstrated without embarrassment.
+
+**Critical Constraint**: Daniel is the first non-developer user. Every rough edge he encounters is a trust loss. This sprint prioritizes _perceived_ quality — what Daniel sees and clicks — over internal technical quality (which Sprints 1-5 already ensured).
+
+### Deployment Baseline
+- All 5 sprints deployed to VPS (verified 2026-02-03)
+- All Supabase tables created and indexed
+- Dashboard serving at http://181.215.135.75:3004/
+- Bot connected to WhatsApp, processing messages
+- 1,537 tests passing, 55 code review issues resolved across sprints
+
+### Tasks
+
+#### 6.1 Trigger System Consolidation (BLOCKER — must complete first)
+**Objective**: Eliminate the confusing three-system trigger overlap. Cut over to the new `group_triggers` system as the single source of truth, remove the legacy Trigger Patterns tab, and clean up the old Response Rules section.
+
+**Background**: Currently three features manage trigger-like data:
+1. **Response Rules** (old `rules` table) — CRUD inside Groups & Rules expanded view
+2. **Trigger Patterns tab** (old `rules` table + analytics) — separate `/patterns` page
+3. **Group Triggers** (new `group_triggers` table, Sprint 3) — inside Groups & Rules expanded view
+
+The bot router runs in **shadow mode** (`TRIGGER_SHADOW_MODE`), comparing both old and new systems but using the OLD `rules` table for actual routing decisions. Demo triggers seeded into `group_triggers` won't work until the router cuts over.
+
+**Phase A — Router Cutover:**
+- [ ] Check shadow mode logs on VPS for old-vs-new matching discrepancies:
+  ```
+  grep "shadow_match" /opt/enorbot/logs/out.log | tail -50
+  ```
+  If zero discrepancies → safe to cut over. If discrepancies exist → analyze and fix before proceeding.
+- [ ] Migrate any remaining production rules from `rules` table to `group_triggers` via `triggerMigration.ts` (Sprint 3 built this)
+- [ ] Set `TRIGGER_SHADOW_MODE=new` in the VPS `.env` file
+- [ ] Restart PM2 and verify bot responds using new trigger system
+- [ ] Monitor logs for 10 minutes to confirm no errors
+
+**Phase B — Dashboard UI Cleanup:**
+- [ ] Remove Trigger Patterns tab from sidebar navigation (`Layout.tsx` — remove navItem with `to: '/patterns'`)
+- [ ] Remove `/patterns` route from `App.tsx` (remove import of `PatternsPage` and its `<Route>`)
+- [ ] Remove or redirect any `/rules` legacy routes in `App.tsx`
+- [ ] Remove the old "Response Rules" section from `GroupsAndRulesPage.tsx`:
+  - Remove the `groupRules` state, `addingRuleForGroup`, `newRuleForm`, `savingRule`, `editingRule` state
+  - Remove the `fetchRules()`, `handleSaveRule()`, `handleDeleteRule()` functions
+  - Remove the rules rendering block (trigger_phrase → response_template CRUD form)
+  - Keep the Player Roles section if it serves a current purpose (operator identification)
+- [ ] Reorder expanded group sections (top to bottom):
+  1. **⚡ Triggers** (Sprint 3 — primary interaction, what Daniel configures most)
+  2. **⏰ Time-Based Rules** (Sprint 2 — schedule + pricing rules)
+  3. **📊 Pricing Configuration** (Sprint 1 — default spread fallback)
+  4. **🤝 Active Deals** (Sprint 4 — deal monitoring)
+  5. **👥 Player Roles** (if kept — operator identification utility)
+
+**Phase C — Dead Code Removal:**
+- [ ] Delete `dashboard/src/pages/PatternsPage.tsx`
+- [ ] Delete `dashboard/src/components/analytics/TriggerPatterns.tsx`
+- [ ] Delete `dashboard/src/components/rules/TriggerPatternCreationModal.tsx` (if not imported elsewhere)
+- [ ] Delete `dashboard/src/components/rules/TriggerPatternViewEditModal.tsx` (if not imported elsewhere)
+- [ ] Keep `src/dashboard/api/rules.ts` alive (API safety net for rollback, not exposed in UI)
+- [ ] Keep `src/services/rulesService.ts` alive (router fallback if `TRIGGER_SHADOW_MODE` reverted)
+
+**Files affected**: `App.tsx`, `Layout.tsx`, `GroupsAndRulesPage.tsx`, `PatternsPage.tsx` (delete), `TriggerPatterns.tsx` (delete), `TriggerPatternCreationModal.tsx` (delete), `TriggerPatternViewEditModal.tsx` (delete), VPS `.env`
+
+**Why this is first**: All subsequent tasks (demo data seeding, UI organization, smoke testing) depend on having a single, canonical trigger system. Seeding triggers into `group_triggers` while the router reads `rules` would make the demo non-functional.
+
+**>> REVIEW GATE: Router uses new system, Trigger Patterns tab removed, old Response Rules section gone, sidebar shows 3 clean pages**
+
+#### 6.2 Seed Demo Data
+**Objective**: When Daniel opens the dashboard, he should see a realistic, populated system — not empty tables.
+
+**Prerequisite**: Task 6.1 complete (router cut over, triggers are the single system).
+
+- [ ] Create 3 time-based rules for the primary demo group:
+  - **Business Hours**: Mon-Fri 09:00-18:00 (America/Sao_Paulo), pricing_source=commercial_dollar, no spread, priority=10
+  - **After Hours**: Mon-Fri 18:01-08:59, pricing_source=usdt_binance, sell_spread=50 bps, buy_spread=30 bps, priority=5
+  - **Weekend Premium**: Sat-Sun all day, pricing_source=usdt_binance, sell_spread=80 bps, buy_spread=50 bps, priority=15
+- [ ] Create 8-10 trigger patterns for the demo group:
+  - `preço` → price_quote (contains, P10) — primary Portuguese price trigger
+  - `cotação` → price_quote (contains, P10) — alternate Portuguese price word
+  - `price` → price_quote (contains, P10) — English groups
+  - `quanto tá` → price_quote (contains, P8) — informal price request
+  - `compro` → volume_quote (contains, P5) — volume inquiry
+  - `vendo` → volume_quote (contains, P5) — volume inquiry (sell side)
+  - `ajuda` → text_response (contains, P1, text: "Olá! Envie 'preço' para cotação USDT/BRL.") — help text
+  - `help` → text_response (contains, P1, text: "Send 'price' for USDT/BRL quote.") — English help
+- [ ] Configure default spread for the demo group via GroupSpreadEditor (spread_mode=bps, sell_spread=30, buy_spread=20, quote_ttl=300)
+- [ ] Verify the active rule badge shows correctly for current time
+- [ ] Verify trigger tester returns expected results with active rule context
+
+**Deliverables**: Supabase data seeded via dashboard UI (not raw SQL — validates the UI flow)
+
+**>> REVIEW GATE: Demo data looks realistic and complete**
+
+#### 6.3 Destructive Action Protection
+**Objective**: Prevent Daniel from accidentally deleting or cancelling something during the demo.
+
+- [ ] Add confirmation dialog before deleting a time-based rule
+  - Dialog text: "Delete rule '{name}'? This cannot be undone. If this rule is currently active, pricing will fall back to the default spread."
+  - Buttons: "Cancel" (secondary) / "Delete" (red, destructive)
+- [ ] Add confirmation dialog before deleting a trigger
+  - Dialog text: "Delete trigger '{phrase}'? The bot will no longer respond to this phrase in this group."
+  - Buttons: "Cancel" (secondary) / "Delete" (red, destructive)
+- [ ] Add confirmation dialog before cancelling a deal
+  - Dialog text: "Cancel deal with {clientName}? The client will be notified that the deal was cancelled."
+  - Buttons: "Keep Deal" (secondary) / "Cancel Deal" (red, destructive)
+- [ ] Ensure all delete/cancel buttons require a second click (no single-click destructive actions)
+
+**Files affected**: `GroupTimeRulesEditor.tsx`, `GroupTriggersEditor.tsx`, `GroupDealsView.tsx`
+
+**>> REVIEW GATE: No single-click destructive actions remain**
+
+#### 6.4 UI Polish & Visual Feedback
+**Objective**: When Daniel clicks "Save" or "Delete", the result should be immediately obvious — not inferred from a tiny toast.
+
+- [ ] Add brief green flash/highlight animation on rule/trigger cards after successful save
+- [ ] Add brief fade-out animation on cards after successful delete
+- [ ] Improve toast messages with action-specific text:
+  - Save: "Rule '{name}' saved successfully" (not generic "Rule saved")
+  - Delete: "Rule '{name}' deleted" (not generic "Deleted")
+  - Toggle: "Trigger '{phrase}' {enabled/disabled}"
+- [ ] Add loading skeleton placeholders while sections load (instead of plain "Loading..." text)
+- [ ] Ensure the "ACTIVE" badge on time rules updates when a new rule is saved that should become active
+- [ ] Add tooltip on priority badges explaining "Higher priority wins when schedules overlap"
+- [ ] Commercial Dollar card: Add Portuguese/English labels ("Compra/Bid", "Venda/Ask")
+
+**Files affected**: `GroupTimeRulesEditor.tsx`, `GroupTriggersEditor.tsx`, `GroupDealsView.tsx`, `PriceTracker.tsx`
+
+**>> REVIEW GATE: Visual feedback feels responsive and clear**
+
+#### 6.5 Section Organization & Readability
+**Objective**: After 6.1 removed the old clutter, ensure the remaining sections are well-organized with collapsible headers and summary counts.
+
+**Prerequisite**: Task 6.1 complete (old sections removed, new order established).
+
+- [ ] Add collapsible section headers for each feature area with icons and counts:
+  - ⚡ Triggers (8) — starts expanded (primary interaction)
+  - ⏰ Time-Based Rules (3) — starts collapsed
+  - 📊 Pricing Configuration — starts collapsed
+  - 🤝 Active Deals (0) — starts expanded only if deals exist
+  - 👥 Player Roles — starts collapsed (utility)
+- [ ] Each section header clickable to expand/collapse with smooth animation
+- [ ] Persist expand/collapse state in localStorage per group (so Daniel doesn't have to re-expand every visit)
+- [ ] Ensure section counts update after CRUD operations without full page reload
+
+**Files affected**: `GroupsAndRulesPage.tsx`
+
+**>> REVIEW GATE: Expanded group view is clean, navigable, and remembers state**
+
+#### 6.6 Demo Group Activation
+**Objective**: At least one group must be in "active" mode for the demo so the bot actually responds to WhatsApp messages using the new trigger+rules system.
+
+**Prerequisite**: Tasks 6.1 (router cutover) and 6.2 (demo data seeded) complete.
+
+- [ ] Identify the best demo group (criteria: low traffic, non-critical, Daniel is a member so he can test)
+- [ ] Switch the demo group from "learning" to "active" mode via the dashboard mode selector
+- [ ] Verify the bot processes messages in the active group:
+  - Send "preço" → should return USDT/BRL quote (or commercial dollar, depending on active rule)
+  - Send "ajuda" → should return help text
+  - Send random text → should NOT trigger a response
+- [ ] Verify response suppression is working: send "preço" twice in 10 seconds → second should be suppressed
+- [ ] Verify deal flow triggers: send a volume inquiry ("compro 5000") → should create a QUOTED deal
+
+**Important**: This task requires coordination with Daniel or a test group. If no safe test group exists, create a test group with only the bot and one operator.
+
+**>> REVIEW GATE: Bot responds correctly in active group via WhatsApp**
+
+#### 6.7 Error State Handling
+**Objective**: When external services fail during the demo, the dashboard should degrade gracefully rather than show blank screens or cryptic errors.
+
+- [ ] Price API failure: PriceTracker should show last cached value with "Last updated X minutes ago" instead of blank
+- [ ] Supabase timeout: All sections should show "Unable to load — tap to retry" instead of hanging spinner
+- [ ] AwesomeAPI rate limit (429): Commercial dollar should show fallback values (already implemented R$ 5.26/5.27) with visual indicator that it's a fallback
+- [ ] Bot disconnection: If WhatsApp disconnects during demo, the dashboard status page should reflect this clearly
+- [ ] Empty states should be helpful:
+  - No deals: "No active deals. Deals are created when clients request quotes via WhatsApp."
+  - No triggers: "No triggers configured. Add triggers to define which messages the bot responds to."
+  - No rules: "No time-based rules. Without rules, the bot uses the default pricing configuration above."
+
+**Files affected**: `PriceTracker.tsx`, `GroupTimeRulesEditor.tsx`, `GroupTriggersEditor.tsx`, `GroupDealsView.tsx`
+
+**>> REVIEW GATE: Dashboard handles failures gracefully**
+
+#### 6.8 Sprint 1 Deployment Gap Closure
+**Objective**: Sprint 1's roadmap noted "Pending: Deploy to production." Verify it's fully operational.
+
+- [ ] Verify `group_spreads` table has data for the demo group (seeded in 6.2)
+- [ ] Verify GroupSpreadEditor loads and saves correctly on VPS
+- [ ] Verify live preview calculation works (fetches Binance rate, applies spread)
+- [ ] Confirm Sprint 1 status in roadmap updated to deployed (already done 2026-02-03)
+
+**>> REVIEW GATE: Sprint 1 fully deployed and verified**
+
+#### 6.9 End-to-End Browser Smoke Test
+**Objective**: Walk through every dashboard interaction Daniel might attempt. This is the final gate.
+
+**Prerequisite**: All other tasks complete.
+
+- [ ] Navigate to http://181.215.135.75:3004/
+- [ ] Verify page loads without console errors
+- [ ] Verify sidebar shows exactly 3 pages: Overview, Groups & Rules, Costs (no Trigger Patterns)
+- [ ] Click each group to expand — verify sections render in correct order (Triggers, Rules, Pricing, Deals)
+- [ ] Test full CRUD cycle for Time-Based Rules:
+  - Add a rule → verify it appears in list → edit it → verify changes saved → delete it (with confirmation dialog) → verify removed
+- [ ] Test full CRUD cycle for Triggers:
+  - Add a trigger → test it with Trigger Tester → toggle it off/on → edit it → delete it (with confirmation dialog)
+- [ ] Test Spread Editor:
+  - Change spread values → verify live preview updates → save → reload page → verify persisted
+- [ ] Test Deals View:
+  - Verify empty state message is helpful
+  - If deals exist: verify extend TTL and cancel (with confirmation) buttons work
+- [ ] Test PriceTracker:
+  - Verify USDT/BRL and Commercial Dollar rates display
+  - Click Refresh → verify rates update
+- [ ] Test navigation between remaining pages (Overview, Groups & Rules, Costs)
+- [ ] Verify no references to "Trigger Patterns" remain in the UI
+- [ ] Test on mobile viewport (Daniel may check on phone)
+
+**Deliverables**: Bug list with severity ratings. All HIGH/MEDIUM bugs fixed before demo.
+
+**>> REVIEW GATE: All HIGH/MEDIUM bugs from smoke test fixed**
+
+### Task Dependencies
+
+```
+6.1 Trigger Consolidation (FIRST — blocker)
+ ├── 6.2 Seed Demo Data (needs new system active)
+ │    └── 6.6 Demo Group Activation (needs data + cutover)
+ ├── 6.5 Section Organization (needs old sections removed)
+ ├── 6.3 Destructive Action Protection (independent)
+ ├── 6.4 UI Polish (independent)
+ ├── 6.7 Error State Handling (independent)
+ └── 6.8 Sprint 1 Verification (independent)
+      └── 6.9 Smoke Test (LAST — needs everything done)
+```
+
+### Acceptance Criteria
+- [ ] Dashboard sidebar shows exactly 3 pages: Overview, Groups & Rules, Costs
+- [ ] No "Trigger Patterns" tab or page exists
+- [ ] No "Response Rules" section in expanded group view
+- [ ] Bot router uses `TRIGGER_SHADOW_MODE=new` (new `group_triggers` table is authoritative)
+- [ ] At least one group has realistic demo data (3 rules, 8+ triggers, spread config)
+- [ ] Active rule badge shows correctly for current time of day
+- [ ] Trigger tester returns expected results with rule context
+- [ ] No single-click destructive actions (delete, cancel)
+- [ ] Visual feedback on all save/delete operations
+- [ ] Empty states are helpful, not confusing
+- [ ] At least one group in "active" mode with bot responding to WhatsApp messages
+- [ ] All external API failures show graceful fallbacks
+- [ ] Browser smoke test passed with no HIGH/MEDIUM bugs remaining
+
+### Sprint 6 Retrospective Lessons (Carry Forward)
+From Sprints 1-5:
+1. VALIDATE AT API BOUNDARY — all POST/PUT/DELETE endpoints validate input
+2. NO DESCOPING — implement every item listed
+3. TEST IN PRODUCTION ENVIRONMENT — curl verification on VPS, not just local
+4. SEED DATA THROUGH THE UI — validates the user flow, not just the database
+5. CONSOLIDATE BEFORE DEMO — remove legacy overlap before showing to stakeholders
+
+---
+
+## 12. Risk Register
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
@@ -656,10 +932,15 @@ Context awareness from message history, plus production refinements.
 | Migration breaks existing triggers | High | Shadow mode comparison before cutover |
 | Rule switching mid-deal | Medium | Lock rule at deal start |
 | UI complexity | High | User testing with Daniel before sprint completion |
+| Demo data looks fake | Medium | Seed through dashboard UI using realistic OTC scenarios |
+| Accidental deletion during demo | High | Confirmation dialogs on all destructive actions (Sprint 6.2) |
+| External API failure during demo | Medium | Fallback values + clear error states (Sprint 6.6) |
+| Bot doesn't respond in demo group | High | Pre-test in active mode with known trigger phrases (Sprint 6.5) |
+| Dashboard unresponsive on mobile | Low | Smoke test on mobile viewport (Sprint 6.8) |
 
 ---
 
-## 12. Review Process
+## 13. Review Process
 
 Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 
@@ -672,7 +953,7 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 
 ---
 
-## 13. Glossary
+## 14. Glossary
 
 | Term | Definition |
 |------|------------|
@@ -686,7 +967,7 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 
 ---
 
-## 14. Changelog
+## 15. Changelog
 
 | Date | Change | By |
 |------|--------|-----|
@@ -703,4 +984,9 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 | 2026-02-03 | Sprint 4 retrospective conducted | BMAD Agents |
 | 2026-02-03 | Sprint 5 marked complete (all 3 tasks: lookback, suppression, polish) | System |
 | 2026-02-03 | L3 tech debt resolved: deal history date range filter | System |
+| 2026-02-03 | Sprint 5 code review complete (7 issues found/fixed) | System |
+| 2026-02-03 | Sprint 1-5 deployed to production VPS + Supabase migrations applied | System |
+| 2026-02-03 | Sprint 6 created: Demo Hardening & Production Readiness (8 tasks) | System |
+| 2026-02-03 | Sprint 6 restructured: Added Task 6.1 Trigger Consolidation as blocker, renumbered to 9 tasks | BMAD Agents (Party Mode) |
+| 2026-02-03 | Decision: Remove Trigger Patterns tab, cut over router to new system, remove old Response Rules | BMAD Agents (John, Winston, Sally) |
 
