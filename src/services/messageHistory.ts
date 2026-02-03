@@ -31,6 +31,9 @@ export type IncomingMessageType = 'text' | 'image' | 'document' | 'other'
  * Story 7.4 AC6: Message Type Enum
  */
 export type BotMessageType = 'price_response' | 'stall' | 'notification' | 'status' | 'error'
+  | 'deal_quote' | 'deal_lock_confirmation' | 'deal_completed' | 'deal_cancelled'
+  | 'deal_reminder' | 'deal_expired' | 'deal_expiration' | 'deal_no_active'
+  | 'deal_state_reminder' | 'deal_state_hint' | 'deal_amount_needed'
 
 /**
  * All supported message types
@@ -820,4 +823,205 @@ export async function getMessageStats(
     })
     return err(errorMessage)
   }
+}
+
+// ============================================================================
+// Sprint 5, Task 5.1: Message Lookback
+// ============================================================================
+
+/**
+ * Default limit for lookback queries.
+ * Small enough for fast queries, large enough for context.
+ */
+const LOOKBACK_DEFAULT_LIMIT = 10
+const LOOKBACK_MAX_LIMIT = 50
+
+/**
+ * Get recent messages from a specific sender in a specific group.
+ * Used for conversation context (amounts, ongoing deal discussion).
+ *
+ * Uses composite index: idx_messages_group_sender_created
+ *
+ * Sprint 5, Task 5.1: Sender Message Lookback
+ *
+ * @param groupJid - The group to look in
+ * @param senderJid - The sender to look up
+ * @param limit - Max messages to return (default 10, max 50)
+ * @returns Recent messages from the sender, newest first
+ */
+export async function getRecentSenderMessages(
+  groupJid: string,
+  senderJid: string,
+  limit: number = LOOKBACK_DEFAULT_LIMIT
+): Promise<Result<Message[]>> {
+  if (!supabase) {
+    return err('Supabase not initialized')
+  }
+
+  const safeLimit = Math.min(Math.max(limit, 1), LOOKBACK_MAX_LIMIT)
+
+  try {
+    return await withPerformanceMonitoring('getRecentSenderMessages', async () => {
+      const { data, error } = await supabase!
+        .from('messages')
+        .select('*')
+        .eq('group_jid', groupJid)
+        .eq('sender_jid', senderJid)
+        .order('created_at', { ascending: false })
+        .limit(safeLimit)
+
+      if (error) {
+        logger.warn('Failed to get recent sender messages', {
+          event: 'sender_lookback_error',
+          groupJid,
+          senderJid,
+          error: error.message,
+        })
+        return err(error.message)
+      }
+
+      return ok((data ?? []) as Message[])
+    })
+  } catch (e) {
+    const errorMessage = e instanceof Error ? e.message : String(e)
+    logger.warn('Sender lookback exception', {
+      event: 'sender_lookback_exception',
+      groupJid,
+      senderJid,
+      error: errorMessage,
+    })
+    return err(errorMessage)
+  }
+}
+
+/**
+ * Get recent messages in a group (all senders).
+ * Used for response suppression (check if bot already answered, operator responded).
+ *
+ * Uses index: idx_messages_group_created
+ *
+ * Sprint 5, Task 5.1: Group Message Lookback
+ *
+ * @param groupJid - The group to look in
+ * @param limit - Max messages to return (default 10, max 50)
+ * @param options - Optional filters
+ * @returns Recent messages in the group, newest first
+ */
+export async function getRecentGroupMessages(
+  groupJid: string,
+  limit: number = LOOKBACK_DEFAULT_LIMIT,
+  options: { botOnly?: boolean; since?: Date } = {}
+): Promise<Result<Message[]>> {
+  if (!supabase) {
+    return err('Supabase not initialized')
+  }
+
+  const safeLimit = Math.min(Math.max(limit, 1), LOOKBACK_MAX_LIMIT)
+
+  try {
+    return await withPerformanceMonitoring('getRecentGroupMessages', async () => {
+      let query = supabase!
+        .from('messages')
+        .select('*')
+        .eq('group_jid', groupJid)
+
+      if (options.botOnly) {
+        query = query.eq('is_from_bot', true)
+      }
+
+      if (options.since) {
+        query = query.gte('created_at', options.since.toISOString())
+      }
+
+      query = query
+        .order('created_at', { ascending: false })
+        .limit(safeLimit)
+
+      const { data, error } = await query
+
+      if (error) {
+        logger.warn('Failed to get recent group messages', {
+          event: 'group_lookback_error',
+          groupJid,
+          error: error.message,
+        })
+        return err(error.message)
+      }
+
+      return ok((data ?? []) as Message[])
+    })
+  } catch (e) {
+    const errorMessage = e instanceof Error ? e.message : String(e)
+    logger.warn('Group lookback exception', {
+      event: 'group_lookback_exception',
+      groupJid,
+      error: errorMessage,
+    })
+    return err(errorMessage)
+  }
+}
+
+/**
+ * Context extracted from message history for intelligent response decisions.
+ * Sprint 5, Task 5.1
+ */
+export interface SenderContext {
+  /** Recent messages from this sender (newest first) */
+  recentMessages: Message[]
+  /** Whether the sender has been active recently (within the lookback window) */
+  isRecentlyActive: boolean
+  /** Count of messages from this sender in the lookback window */
+  messageCount: number
+  /** Whether any of the recent messages were triggers */
+  hasRecentTrigger: boolean
+  /** Whether the bot has responded to this sender recently */
+  botRespondedRecently: boolean
+}
+
+/**
+ * Build context for a sender in a group by looking at recent history.
+ * Combines sender messages and bot responses for decision-making.
+ *
+ * Sprint 5, Task 5.1: Context Extraction
+ *
+ * @param groupJid - The group to look in
+ * @param senderJid - The sender to build context for
+ * @param windowMinutes - How far back to look (default 5 minutes)
+ * @returns SenderContext with recent activity info
+ */
+export async function buildSenderContext(
+  groupJid: string,
+  senderJid: string,
+  windowMinutes: number = 5
+): Promise<Result<SenderContext>> {
+  const since = new Date(Date.now() - windowMinutes * 60 * 1000)
+
+  // Fetch sender messages and bot responses in parallel
+  const [senderResult, botResult] = await Promise.all([
+    getRecentSenderMessages(groupJid, senderJid, 10),
+    getRecentGroupMessages(groupJid, 10, { botOnly: true, since }),
+  ])
+
+  if (!senderResult.ok) {
+    return err(senderResult.error)
+  }
+  if (!botResult.ok) {
+    return err(botResult.error)
+  }
+
+  const senderMessages = senderResult.data
+  const botMessages = botResult.data
+
+  // Filter sender messages to the lookback window
+  const recentSenderMessages = senderMessages.filter(
+    (m) => new Date(m.created_at) >= since
+  )
+
+  return ok({
+    recentMessages: senderMessages,
+    isRecentlyActive: recentSenderMessages.length > 0,
+    messageCount: recentSenderMessages.length,
+    hasRecentTrigger: recentSenderMessages.some((m) => m.is_trigger),
+    botRespondedRecently: botMessages.length > 0,
+  })
 }

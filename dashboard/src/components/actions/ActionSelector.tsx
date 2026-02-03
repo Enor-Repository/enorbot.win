@@ -26,6 +26,12 @@ export function ActionSelector({ value, onChange, disabled }: ActionSelectorProp
       case 'text_response':
         defaultParams = { template: '' }
         break
+      case 'price_quote':
+        defaultParams = { prefix: '' }
+        break
+      case 'volume_quote':
+        defaultParams = { prefix: '' }
+        break
       case 'usdt_quote':
         defaultParams = { include_volume: false }
         break
@@ -137,6 +143,60 @@ export function ActionSelector({ value, onChange, disabled }: ActionSelectorProp
             <p className="text-xs text-muted-foreground font-mono">
               The message that will be sent when this pattern triggers
             </p>
+          </div>
+        )}
+
+        {value.type === 'price_quote' && (
+          <div className="space-y-3">
+            <div className="px-4 py-3 bg-green-500/10 border border-green-500/30 rounded-lg">
+              <p className="text-sm font-mono text-green-300">
+                Automatically uses the active time-based rule's pricing source and spread.
+                Falls back to group default spread when no rule is active.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs font-mono text-muted-foreground mb-1">
+                Custom message prefix (optional)
+              </label>
+              <input
+                type="text"
+                value={value.params.prefix || ''}
+                onChange={(e) => handleParamsChange({
+                  ...value.params,
+                  prefix: e.target.value
+                })}
+                placeholder="e.g., 'Cotação atual:'"
+                disabled={disabled}
+                className="w-full px-3 py-2 bg-black/30 border border-border/30 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-green-500/50 disabled:opacity-50"
+              />
+            </div>
+          </div>
+        )}
+
+        {value.type === 'volume_quote' && (
+          <div className="space-y-3">
+            <div className="px-4 py-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+              <p className="text-sm font-mono text-blue-300">
+                Extracts volume from the message (e.g., "compro 10k") and calculates
+                using the active rule's pricing. Falls back to price quote if no volume found.
+              </p>
+            </div>
+            <div>
+              <label className="block text-xs font-mono text-muted-foreground mb-1">
+                Custom message prefix (optional)
+              </label>
+              <input
+                type="text"
+                value={value.params.prefix || ''}
+                onChange={(e) => handleParamsChange({
+                  ...value.params,
+                  prefix: e.target.value
+                })}
+                placeholder="e.g., 'Cálculo:'"
+                disabled={disabled}
+                className="w-full px-3 py-2 bg-black/30 border border-border/30 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-50"
+              />
+            </div>
           </div>
         )}
 

@@ -39,6 +39,48 @@ export const API_ENDPOINTS = {
   /** Cost trend over time (days=30) */
   costTrend: (days?: number): string =>
     `${API_BASE_URL}/api/costs/trend${days ? `?days=${days}` : ''}`,
+  /** Get all spread configs */
+  spreads: `${API_BASE_URL}/api/spreads`,
+  /** Get/Update spread config for specific group */
+  groupSpread: (groupJid: string): string => `${API_BASE_URL}/api/spreads/${encodeURIComponent(groupJid)}`,
+  /** Preview spread calculation */
+  spreadPreview: `${API_BASE_URL}/api/spreads/preview`,
+  /** Get all time-based rules for a group */
+  groupTimeRules: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/rules`,
+  /** Get the currently active time-based rule for a group */
+  groupActiveRule: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/rules/active`,
+  /** Get/Update/Delete a specific time-based rule */
+  groupTimeRule: (groupJid: string, ruleId: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/rules/${ruleId}`,
+  /** Get all triggers for a group */
+  groupTriggers: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/triggers`,
+  /** Get/Update/Delete a specific trigger */
+  groupTrigger: (groupJid: string, triggerId: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/triggers/${triggerId}`,
+  /** Test a message against a group's triggers */
+  groupTriggerTest: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/triggers/test`,
+  /** Sprint 4: Get active deals for a group */
+  groupDeals: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals`,
+  /** Sprint 4: Get all deals for a group (including terminal) */
+  groupDealsAll: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/all`,
+  /** Sprint 4: Get deal history for a group */
+  groupDealHistory: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/history`,
+  /** Sprint 4: Cancel a deal */
+  groupDealCancel: (groupJid: string, dealId: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/${dealId}/cancel`,
+  /** Sprint 4: Extend deal TTL */
+  groupDealExtend: (groupJid: string, dealId: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/${dealId}/extend`,
+  /** Sprint 4: Trigger manual deal sweep */
+  groupDealSweep: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/sweep`,
 } as const
 
 /**

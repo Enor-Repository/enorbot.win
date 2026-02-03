@@ -15,6 +15,10 @@ import { analyticsRouter } from './api/analytics.js'
 import { costsRouter } from './api/costs.js'
 import { rulesRouter } from './api/rules.js'
 import { pricesRouter } from './api/prices.js'
+import { spreadsRouter } from './api/spreads.js'
+import { groupRulesRouter } from './api/groupRules.js'
+import { groupTriggersRouter } from './api/triggers.js'
+import { dealsRouter } from './api/deals.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -42,6 +46,10 @@ app.use('/api/groups', analyticsRouter)
 app.use('/api/costs', costsRouter)
 app.use('/api/rules', rulesRouter)
 app.use('/api/prices', pricesRouter)
+app.use('/api/spreads', spreadsRouter)
+app.use('/api/groups/:groupJid/rules', groupRulesRouter)
+app.use('/api/groups/:groupJid/triggers', groupTriggersRouter)
+app.use('/api/groups/:groupJid/deals', dealsRouter)
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {

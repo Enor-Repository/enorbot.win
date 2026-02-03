@@ -6,6 +6,7 @@ import { initGroupConfigs } from './services/groupConfig.js'
 import { initRulesService } from './services/rulesService.js'
 import { checkBackupPermissions } from './services/authBackup.js'
 import { createConnection, getSocket } from './bot/connection.js'
+import { startDealSweepTimer, stopDealSweepTimer } from './handlers/deal.js'
 
 let healthServer: Server | null = null
 
@@ -79,6 +80,9 @@ async function main(): Promise<void> {
     }
   }
 
+  // Sprint 4: Start periodic deal TTL sweep (every 30s)
+  startDealSweepTimer()
+
   // Initialize WhatsApp connection
   await createConnection(config)
 }
@@ -88,6 +92,9 @@ async function main(): Promise<void> {
  */
 function shutdown(signal: string): void {
   logger.info('Shutdown initiated', { signal })
+
+  // Stop deal sweep timer
+  stopDealSweepTimer()
 
   // Close health server
   if (healthServer) {

@@ -223,6 +223,79 @@ export async function sendDisconnectNotification(durationSeconds: number): Promi
 }
 
 // =============================================================================
+// Sprint 4: Deal Flow Notifications
+// =============================================================================
+
+/**
+ * Send a deal expiration notification to a group.
+ * Called by the TTL sweeper when deals expire.
+ *
+ * @param groupJid - The group where the deal was active
+ * @param count - Number of deals expired in this sweep
+ */
+export async function sendDealExpirationNotification(
+  groupJid: string,
+  count: number
+): Promise<void> {
+  if (!socket) {
+    logger.warn('Cannot send deal expiration notification - socket not initialized', {
+      event: 'deal_expiration_notification_skip',
+      groupJid,
+      count,
+    })
+    return
+  }
+
+  // Send to the OTC group where the deal expired
+  const message = count === 1
+    ? '⏰ Uma cotação expirou neste grupo.'
+    : `⏰ ${count} cotações expiraram neste grupo.`
+
+  const result = await sendWithAntiDetection(socket, groupJid, message)
+
+  if (result.ok) {
+    logBotMessage({
+      groupJid,
+      content: message,
+      messageType: 'deal_expiration',
+      isControlGroup: false,
+    })
+
+    logger.info('Deal expiration notification sent', {
+      event: 'deal_expiration_notification_sent',
+      groupJid,
+      count,
+    })
+  } else {
+    logger.error('Failed to send deal expiration notification', {
+      event: 'deal_expiration_notification_failed',
+      groupJid,
+      count,
+      error: result.error,
+    })
+  }
+}
+
+/**
+ * Notify the control group about deal sweep results.
+ * Only called when deals were actually expired.
+ *
+ * @param totalExpired - Total number of deals expired in this sweep
+ */
+export async function notifyDealSweepResults(totalExpired: number): Promise<void> {
+  if (totalExpired === 0) return
+
+  await queueControlNotification(
+    `⏰ Deal sweep: ${totalExpired} cotação(ões) expirada(s).`
+  )
+
+  logger.info('Deal sweep notification sent to control group', {
+    event: 'deal_sweep_notification',
+    totalExpired,
+  })
+}
+
+// =============================================================================
 // Testing Utilities
 // =============================================================================
 

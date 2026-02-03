@@ -46,16 +46,52 @@ vi.mock('../services/autoPause.js', () => ({
   triggerAutoPause: vi.fn(),
 }))
 
+// H2 fix: Mock group spread service (default: no spread applied)
+vi.mock('../services/groupSpreadService.js', () => ({
+  getSpreadConfig: vi.fn().mockResolvedValue({
+    ok: true,
+    data: {
+      groupJid: '123456789@g.us',
+      spreadMode: 'bps',
+      sellSpread: 0,
+      buySpread: 0,
+      quoteTtlSeconds: 180,
+      defaultSide: 'client_buys_usdt',
+      defaultCurrency: 'BRL',
+      language: 'pt-BR',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  }),
+  calculateQuote: vi.fn().mockImplementation((binanceRate: number) => binanceRate),
+}))
+
+// Sprint 2: Mock rule service (default: no active rule)
+vi.mock('../services/ruleService.js', () => ({
+  getActiveRule: vi.fn().mockResolvedValue({ ok: true, data: null }),
+}))
+
 vi.mock('../bot/state.js', () => ({
   recordMessageSent: vi.fn(),
+}))
+
+// Sprint 5: Mock response suppression
+vi.mock('../services/responseSuppression.js', () => ({
+  recordBotResponse: vi.fn(),
 }))
 
 import { fetchPrice } from '../services/binance.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { logger } from '../utils/logger.js'
+import { calculateQuote } from '../services/groupSpreadService.js'
+import { getActiveRule } from '../services/ruleService.js'
+import { recordBotResponse } from '../services/responseSuppression.js'
 
 const mockFetchPrice = fetchPrice as ReturnType<typeof vi.fn>
 const mockSend = sendWithAntiDetection as ReturnType<typeof vi.fn>
+const mockCalculateQuote = calculateQuote as ReturnType<typeof vi.fn>
+const mockGetActiveRule = getActiveRule as ReturnType<typeof vi.fn>
+const mockRecordBotResponse = recordBotResponse as ReturnType<typeof vi.fn>
 
 describe('handlePriceMessage', () => {
   // Mock socket
@@ -331,11 +367,13 @@ describe('handlePriceMessage', () => {
       await handlePriceMessage(baseContext)
 
       // Assert - formatted price has 4 decimal places (truncated, not rounded)
+      // H2 fix: Changed from `price` to `binanceRate`/`finalRate` fields
       expect(logger.info).toHaveBeenCalledWith(
         'Price response sent',
         expect.objectContaining({
           event: 'price_response_sent',
-          price: 5.8234,
+          binanceRate: 5.8234,
+          finalRate: 5.8234,
           formattedPrice: 'R$5,8234',
           groupId: '123456789@g.us',
         })
@@ -663,11 +701,13 @@ describe('handlePriceMessage', () => {
         await promise
 
         // Assert - verify the recovery log was called (among other logs)
+        // H2 fix: Changed from `price` to `binanceRate`/`finalRate` fields
         expect(logger.info).toHaveBeenCalledWith(
           'Recovered after retry',
           expect.objectContaining({
             event: 'price_recovered_after_retry',
-            price: 5.82,
+            binanceRate: 5.82,
+            finalRate: 5.82,
             formattedPrice: 'R$5,8200',
             retryCount: 1,
             groupId: '123456789@g.us',
@@ -912,6 +952,198 @@ describe('handlePriceMessage', () => {
           expect(result.data.retryCount).toBeUndefined()
         }
       })
+    })
+  })
+
+  // Sprint 2: Time-Based Rule Override
+  describe('Sprint 2: Active Rule Override', () => {
+    it('uses active rule spread when rule exists', async () => {
+      // Arrange
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.82 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+
+      // Active rule with 50 bps sell spread
+      mockGetActiveRule.mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: 'rule-1',
+          groupJid: '123456789@g.us',
+          name: 'Business Hours',
+          spreadMode: 'bps',
+          sellSpread: 50,
+          buySpread: -30,
+          pricingSource: 'usdt_binance',
+          priority: 10,
+        },
+      })
+
+      // calculateQuote should be called with the rule's spread values
+      mockCalculateQuote.mockImplementationOnce((rate: number) => {
+        // Simulate 50 bps spread: rate * (1 + 50/10000)
+        return Math.round(rate * (1 + 50 / 10000) * 10000) / 10000
+      })
+
+      // Act
+      const result = await handlePriceMessage(baseContext)
+
+      // Assert
+      expect(result.ok).toBe(true)
+
+      // calculateQuote was called with a config that has sellSpread=50
+      expect(mockCalculateQuote).toHaveBeenCalledWith(
+        5.82,
+        expect.objectContaining({
+          spreadMode: 'bps',
+          sellSpread: 50,
+          buySpread: -30,
+        }),
+        'client_buys_usdt'
+      )
+
+      // Rule override was logged
+      expect(logger.info).toHaveBeenCalledWith(
+        'Active time rule overriding spread config',
+        expect.objectContaining({
+          event: 'time_rule_override',
+          ruleName: 'Business Hours',
+          ruleId: 'rule-1',
+          spreadMode: 'bps',
+          sellSpread: 50,
+          buySpread: -30,
+        })
+      )
+    })
+
+    it('uses default spread when no active rule', async () => {
+      // Arrange
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.82 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+      mockGetActiveRule.mockResolvedValueOnce({ ok: true, data: null })
+
+      // Act
+      await handlePriceMessage(baseContext)
+
+      // Assert - calculateQuote called with default spread (0 bps)
+      expect(mockCalculateQuote).toHaveBeenCalledWith(
+        5.82,
+        expect.objectContaining({
+          spreadMode: 'bps',
+          sellSpread: 0,
+          buySpread: 0,
+        }),
+        'client_buys_usdt'
+      )
+    })
+
+    it('falls back to default spread when rule lookup fails', async () => {
+      // Arrange
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.82 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+      mockGetActiveRule.mockRejectedValueOnce(new Error('DB connection failed'))
+
+      // Act
+      const result = await handlePriceMessage(baseContext)
+
+      // Assert - still succeeds with default spread
+      expect(result.ok).toBe(true)
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Failed to check active rule, using default spread',
+        expect.objectContaining({
+          event: 'time_rule_lookup_fallback',
+        })
+      )
+    })
+
+    it('rule overrides even when default spread config also has spreads', async () => {
+      // Arrange
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.82 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+
+      // Active rule with abs_brl spread (overrides default bps)
+      mockGetActiveRule.mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: 'rule-2',
+          groupJid: '123456789@g.us',
+          name: 'After Hours',
+          spreadMode: 'abs_brl',
+          sellSpread: 0.05,
+          buySpread: -0.03,
+          pricingSource: 'usdt_binance',
+          priority: 5,
+        },
+      })
+
+      // Act
+      await handlePriceMessage(baseContext)
+
+      // Assert - calculateQuote called with rule's abs_brl config, not default bps
+      expect(mockCalculateQuote).toHaveBeenCalledWith(
+        5.82,
+        expect.objectContaining({
+          spreadMode: 'abs_brl',
+          sellSpread: 0.05,
+          buySpread: -0.03,
+        }),
+        'client_buys_usdt'
+      )
+    })
+  })
+
+  // ========================================================================
+  // Sprint 5: Response suppression integration
+  // ========================================================================
+  describe('Sprint 5: recordBotResponse integration', () => {
+    it('calls recordBotResponse after successful price response', async () => {
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.25 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+
+      await handlePriceMessage(baseContext)
+
+      expect(mockRecordBotResponse).toHaveBeenCalledWith('123456789@g.us')
+      expect(mockRecordBotResponse).toHaveBeenCalledTimes(1)
+    })
+
+    it('calls recordBotResponse after recovered price response', async () => {
+      // First attempt fails, retry succeeds
+      mockFetchPrice
+        .mockResolvedValueOnce({ ok: false, error: 'timeout' })
+        .mockResolvedValueOnce({ ok: true, data: 5.30 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+
+      const promise = handlePriceMessage(baseContext)
+      // Advance past retry delay
+      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS + 100)
+      await promise
+
+      expect(mockRecordBotResponse).toHaveBeenCalledWith('123456789@g.us')
+      expect(mockRecordBotResponse).toHaveBeenCalledTimes(1)
+    })
+
+    it('does NOT call recordBotResponse when price send fails', async () => {
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.25 })
+      // Ack succeeds but price send fails
+      mockSend
+        .mockResolvedValueOnce({ ok: true, data: undefined })  // ack
+        .mockResolvedValueOnce({ ok: false, error: 'send failed' })  // price
+
+      await handlePriceMessage(baseContext)
+
+      expect(mockRecordBotResponse).not.toHaveBeenCalled()
+    })
+
+    it('does NOT call recordBotResponse when all retries fail', async () => {
+      mockFetchPrice.mockResolvedValue({ ok: false, error: 'timeout' })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+
+      const promise = handlePriceMessage(baseContext)
+      // Advance past all retry delays
+      for (let i = 0; i < MAX_PRICE_RETRIES; i++) {
+        await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS + 100)
+      }
+      await promise
+
+      expect(mockRecordBotResponse).not.toHaveBeenCalled()
     })
   })
 })

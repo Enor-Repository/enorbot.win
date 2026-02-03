@@ -46,6 +46,8 @@ import { initLogQueue, startPeriodicSync, queueObservationEntry, setAppendObserv
 import { isExcelLoggingConfigured, isObservationLoggingConfigured } from '../types/config.js'
 // Message history logging to Supabase
 import { initMessageHistory, logMessageToHistory } from '../services/messageHistory.js'
+// Sprint 5: Response suppression (cooldown + dedup)
+import { shouldSuppressResponse } from '../services/responseSuppression.js'
 // Story 8.6: Observation logging services
 import { classifyMessage, inferPlayerRole } from '../services/messageClassifier.js'
 import { resolveThreadId } from '../services/conversationTracker.js'
@@ -422,7 +424,7 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         // DO NOT log message content for privacy
       })
 
-      const route = routeMessage(context)
+      const route = await routeMessage(context)
 
       // Log message to Supabase history (fire-and-forget)
       // Story 7.3 AC6: Pass hasTrigger from router
@@ -467,6 +469,26 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       if (route.destination === 'CONTROL_HANDLER') {
         await handleControlMessage(context)
       } else if (route.destination === 'PRICE_HANDLER') {
+        // Sprint 5: Check response suppression before sending price response
+        // Only for non-control-group ACTIVE mode. Phased: skipOperatorCheck for now.
+        if (!isControlGroup) {
+          const suppression = await shouldSuppressResponse({
+            groupJid: groupId,
+            senderJid: sender,
+            messageContent: messageText,
+            skipOperatorCheck: true,
+          })
+          if (suppression.shouldSuppress) {
+            logger.info('Price response suppressed', {
+              event: 'price_response_suppressed',
+              groupId,
+              sender,
+              reason: suppression.reason,
+              explanation: suppression.explanation,
+            })
+            return // Suppress silently — don't send duplicate response
+          }
+        }
         await handlePriceMessage(context)
       } else if (route.destination === 'TRONSCAN_HANDLER') {
         // Handle Tronscan transaction links - update Excel row with tx hash

@@ -4,6 +4,10 @@ import { Badge } from '@/components/ui/badge'
 import { ChevronDown, ChevronRight, Plus, Trash2, Edit, X } from 'lucide-react'
 import { API_ENDPOINTS } from '@/lib/api'
 import { showToast } from '@/lib/toast'
+import { GroupSpreadEditor } from '@/components/groups/GroupSpreadEditor'
+import { GroupTimeRulesEditor } from '@/components/groups/GroupTimeRulesEditor'
+import { GroupTriggersEditor } from '@/components/groups/GroupTriggersEditor'
+import GroupDealsView from '@/components/groups/GroupDealsView'
 
 const FETCH_TIMEOUT_MS = 10000
 const MAX_TRIGGER_LENGTH = 100
@@ -708,6 +712,26 @@ export function GroupsAndRulesPage() {
                             })}
                           </div>
                         )}
+                      </div>
+
+                      {/* Time-Based Rules Section */}
+                      <div className="space-y-3 pt-3 border-t border-blue-500/10">
+                        <GroupTimeRulesEditor groupJid={group.jid} />
+                      </div>
+
+                      {/* Trigger Patterns Section */}
+                      <div className="space-y-3 pt-3 border-t border-teal-500/10">
+                        <GroupTriggersEditor groupJid={group.jid} />
+                      </div>
+
+                      {/* Pricing Configuration Section */}
+                      <div className="space-y-3 pt-3 border-t border-amber-500/10">
+                        <GroupSpreadEditor groupJid={group.jid} />
+                      </div>
+
+                      {/* Active Deals Section */}
+                      <div className="space-y-3 pt-3 border-t border-emerald-500/10">
+                        <GroupDealsView groupJid={group.jid} />
                       </div>
                     </div>
                   </div>

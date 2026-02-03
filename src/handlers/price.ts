@@ -35,8 +35,14 @@ import { logPriceQuote, recordLastRow, type LogEntry } from '../services/excel.j
 import { extractVolumeBrl } from '../utils/triggers.js'
 import { isExcelLoggingConfigured } from '../types/config.js'
 import { getConfig } from '../config.js'
+// H2 fix: Integrate Sprint 1 group spread service
+import { getSpreadConfig, calculateQuote, type SpreadConfig } from '../services/groupSpreadService.js'
+// Sprint 2: Time-based rule override
+import { getActiveRule } from '../services/ruleService.js'
 // Story 7.4: Bot message logging to Supabase
 import { logBotMessage } from '../services/messageHistory.js'
+// Sprint 5: Record bot response for suppression cooldown
+import { recordBotResponse } from '../services/responseSuppression.js'
 // Story 8.7: Observation logging for bot responses
 import { logObservation, createObservationEntry } from '../services/excelObservation.js'
 import { addToThread } from '../services/conversationTracker.js'
@@ -239,6 +245,7 @@ export async function handlePriceMessage(
  * Shared between happy path and recovery path.
  *
  * Story 8.7: Also logs bot response to observations with response time.
+ * Sprint 1 (H2 fix): Applies group-specific spread before formatting.
  *
  * @param context - Router context
  * @param price - Raw price from Binance
@@ -251,7 +258,96 @@ async function sendPriceResponse(
   recoveryMeta?: { recovered: true; retryCount: number },
   responseStartTime?: number
 ): Promise<Result<PriceHandlerResult>> {
-  const formattedPrice = formatBrazilianPrice(price)
+  // H2 fix: Apply group-specific spread configuration
+  // Sprint 2: Active time-based rule overrides default spread
+  let finalPrice = price
+  let spreadConfig: SpreadConfig | null = null
+  let activeRuleName: string | null = null
+
+  try {
+    const configResult = await getSpreadConfig(context.groupId)
+    if (configResult.ok) {
+      spreadConfig = configResult.data
+    }
+  } catch (error) {
+    logger.warn('Failed to get spread config, using raw Binance rate', {
+      event: 'spread_config_fallback',
+      groupId: context.groupId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  // Sprint 2: Check for active time-based rule override
+  // Note: getActiveRule uses in-memory cache (1-min TTL) so this is fast for repeated calls
+  try {
+    const activeRuleResult = await getActiveRule(context.groupId)
+    if (activeRuleResult.ok && activeRuleResult.data) {
+      const rule = activeRuleResult.data
+      activeRuleName = rule.name
+
+      // Build effective config: start from default spread config (for side, currency, language, TTL),
+      // then override spread/pricing fields from the active rule
+      const now = new Date()
+      const baseConfig = spreadConfig ?? {
+        groupJid: context.groupId,
+        spreadMode: 'bps' as const,
+        sellSpread: 0,
+        buySpread: 0,
+        quoteTtlSeconds: 180,
+        defaultSide: 'client_buys_usdt' as const,
+        defaultCurrency: 'BRL' as const,
+        language: 'pt-BR' as const,
+        createdAt: now,
+        updatedAt: now,
+      }
+
+      spreadConfig = {
+        ...baseConfig,
+        spreadMode: rule.spreadMode,
+        sellSpread: rule.sellSpread,
+        buySpread: rule.buySpread,
+      }
+
+      logger.info('Active time rule overriding spread config', {
+        event: 'time_rule_override',
+        groupId: context.groupId,
+        ruleName: rule.name,
+        ruleId: rule.id,
+        pricingSource: rule.pricingSource,
+        spreadMode: rule.spreadMode,
+        sellSpread: rule.sellSpread,
+        buySpread: rule.buySpread,
+        priority: rule.priority,
+      })
+    }
+  } catch (error) {
+    // Non-fatal: if rule lookup fails, continue with default spread config
+    logger.warn('Failed to check active rule, using default spread', {
+      event: 'time_rule_lookup_fallback',
+      groupId: context.groupId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  // Apply spread (from default config or rule override)
+  if (spreadConfig) {
+    finalPrice = calculateQuote(price, spreadConfig, spreadConfig.defaultSide)
+
+    logger.debug('Applied spread to price', {
+      event: 'price_spread_applied',
+      groupId: context.groupId,
+      binanceRate: price,
+      finalRate: finalPrice,
+      spreadMode: spreadConfig.spreadMode,
+      defaultSide: spreadConfig.defaultSide,
+      spreadApplied: spreadConfig.defaultSide === 'client_buys_usdt'
+        ? spreadConfig.sellSpread
+        : spreadConfig.buySpread,
+      activeRule: activeRuleName,
+    })
+  }
+
+  const formattedPrice = formatBrazilianPrice(finalPrice)
 
   const sendResult = await sendWithAntiDetection(
     context.sock,
@@ -278,13 +374,26 @@ async function sendPriceResponse(
   const timestamp = new Date().toISOString()
 
   // Story 7.4 AC1: Log price response to history
+  // H2 fix: Include spread info in metadata
   logBotMessage({
     groupJid: context.groupId,
     content: formattedPrice,
     messageType: 'price_response',
     isControlGroup: false,
-    metadata: { price, recovered: !!recoveryMeta },
+    metadata: {
+      binanceRate: price,
+      finalRate: finalPrice,
+      spreadApplied: spreadConfig ? (spreadConfig.defaultSide === 'client_buys_usdt'
+        ? spreadConfig.sellSpread
+        : spreadConfig.buySpread) : 0,
+      spreadMode: spreadConfig?.spreadMode || 'none',
+      recovered: !!recoveryMeta,
+      ...(activeRuleName && { activeRuleName }),
+    },
   })
+
+  // Sprint 5: Record bot response for suppression cooldown tracking
+  recordBotResponse(context.groupId)
 
   // Story 8.7: Log bot response to observations (fire-and-forget)
   logBotResponseObservation({
@@ -300,12 +409,19 @@ async function sendPriceResponse(
     recordMessageSent(context.groupId)
 
     // Story 5.2: Log to Excel (fire-and-forget)
-    logToExcel(context, price)
+    // H2 fix: Log the final price with spread applied
+    logToExcel(context, finalPrice)
 
     // Recovery success logging (AC3)
+    // H2 fix: Include spread info in logs
     logger.info('Recovered after retry', {
       event: 'price_recovered_after_retry',
-      price,
+      binanceRate: price,
+      finalRate: finalPrice,
+      spreadApplied: spreadConfig ? (spreadConfig.defaultSide === 'client_buys_usdt'
+        ? spreadConfig.sellSpread
+        : spreadConfig.buySpread) : 0,
+      spreadMode: spreadConfig?.spreadMode || 'none',
       formattedPrice,
       retryCount: recoveryMeta.retryCount,
       groupId: context.groupId,
@@ -313,11 +429,12 @@ async function sendPriceResponse(
     })
 
     return ok({
-      price,
+      price: finalPrice, // Return the final price with spread
       groupId: context.groupId,
       timestamp,
       recovered: true,
       retryCount: recoveryMeta.retryCount,
+      ...(activeRuleName && { activeRuleName }),
     })
   }
 
@@ -325,21 +442,29 @@ async function sendPriceResponse(
   recordMessageSent(context.groupId)
 
   // Story 5.2: Log to Excel (fire-and-forget)
-  logToExcel(context, price)
+  // H2 fix: Log the final price with spread applied
+  logToExcel(context, finalPrice)
 
   // Normal success logging (Story 2.3)
+  // H2 fix: Include spread info in logs
   logger.info('Price response sent', {
     event: 'price_response_sent',
-    price,
+    binanceRate: price,
+    finalRate: finalPrice,
+    spreadApplied: spreadConfig ? (spreadConfig.defaultSide === 'client_buys_usdt'
+      ? spreadConfig.sellSpread
+      : spreadConfig.buySpread) : 0,
+    spreadMode: spreadConfig?.spreadMode || 'none',
     formattedPrice,
     groupId: context.groupId,
     timestamp,
   })
 
   return ok({
-    price,
+    price: finalPrice, // Return the final price with spread
     groupId: context.groupId,
     timestamp,
+    ...(activeRuleName && { activeRuleName }),
   })
 }
 

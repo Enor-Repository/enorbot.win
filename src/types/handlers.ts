@@ -22,6 +22,8 @@ export interface PriceHandlerResult {
   recovered?: boolean
   /** Number of retries before success, only present if recovered (Story 2.4) */
   retryCount?: number
+  /** Name of active time-based rule that overrode default spread (Sprint 2) */
+  activeRuleName?: string
 }
 
 /**

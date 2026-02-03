@@ -22,7 +22,11 @@ import {
   getContacts,
   getGroups,
   getMessageStats,
+  getRecentSenderMessages,
+  getRecentGroupMessages,
+  buildSenderContext,
   type BotMessageType,
+  type Message,
 } from './messageHistory.js'
 
 // Mock logger
@@ -1197,5 +1201,478 @@ describe('Story 7.5: History Query API', () => {
         expect(result.error).toBe('Database error')
       }
     })
+  })
+})
+
+// ============================================================================
+// Sprint 5, Task 5.1: Message Lookback Tests
+// ============================================================================
+
+/**
+ * Creates a fully fluent Supabase query builder mock.
+ * Every method returns `this` (or resolves with the provided result on `await`).
+ * This mimics Supabase's chainable query API without caring about call order.
+ */
+function createFluentQueryBuilder(resolvedValue: { data: Message[] | null; error: { message: string } | null; count?: number | null }) {
+  const builder: Record<string, unknown> = {}
+
+  // Make it thenable (awaitable) by adding .then()
+  const thenFn = (resolve: (v: typeof resolvedValue) => void) => {
+    resolve(resolvedValue)
+    return undefined
+  }
+
+  const methods = ['select', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'order', 'limit', 'range', 'single', 'is', 'in']
+  for (const method of methods) {
+    builder[method] = vi.fn().mockReturnValue(builder)
+  }
+  builder.then = thenFn
+
+  return builder
+}
+
+function makeMockMessage(overrides: Partial<Message> = {}): Message {
+  return {
+    id: '1',
+    message_id: null,
+    group_jid: 'test@g.us',
+    sender_jid: 'sender@s.whatsapp.net',
+    is_control_group: false,
+    message_type: 'text',
+    content: 'hello',
+    is_from_bot: false,
+    is_trigger: false,
+    metadata: {},
+    created_at: new Date().toISOString(),
+    ...overrides,
+  }
+}
+
+describe('Sprint 5, Task 5.1: getRecentSenderMessages', () => {
+  let mockSupabase: ReturnType<typeof createMockSupabase>
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    resetMessageHistoryClient()
+  })
+
+  afterEach(() => {
+    resetMessageHistoryClient()
+  })
+
+  it('returns error when client not initialized', async () => {
+    const result = await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net')
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('Supabase not initialized')
+    }
+  })
+
+  it('queries with correct group_jid and sender_jid filters', async () => {
+    mockSupabase = createMockSupabase()
+    const mockEq2 = vi.fn()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq1 = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: [], error: null })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq2.mockReturnValue({ order: mockOrder })
+    mockEq1.mockReturnValue({ eq: mockEq2 })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq1 })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(true)
+    expect(mockSupabase.from).toHaveBeenCalledWith('messages')
+    expect(mockEq1).toHaveBeenCalledWith('group_jid', 'group@g.us')
+    expect(mockEq2).toHaveBeenCalledWith('sender_jid', 'sender@s.whatsapp.net')
+    expect(mockOrder).toHaveBeenCalledWith('created_at', { ascending: false })
+  })
+
+  it('returns messages on success', async () => {
+    mockSupabase = createMockSupabase()
+    const msg1 = makeMockMessage({ id: '1', content: 'preço' })
+    const msg2 = makeMockMessage({ id: '2', content: 'cotação' })
+
+    const mockEq2 = vi.fn()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq1 = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: [msg1, msg2], error: null })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq2.mockReturnValue({ order: mockOrder })
+    mockEq1.mockReturnValue({ eq: mockEq2 })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq1 })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data).toHaveLength(2)
+      expect(result.data[0].content).toBe('preço')
+    }
+  })
+
+  it('caps limit at 50', async () => {
+    mockSupabase = createMockSupabase()
+    const mockEq2 = vi.fn()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq1 = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: [], error: null })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq2.mockReturnValue({ order: mockOrder })
+    mockEq1.mockReturnValue({ eq: mockEq2 })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq1 })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net', 200)
+
+    expect(mockLimit).toHaveBeenCalledWith(50)
+  })
+
+  it('floors limit at 1', async () => {
+    mockSupabase = createMockSupabase()
+    const mockEq2 = vi.fn()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq1 = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: [], error: null })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq2.mockReturnValue({ order: mockOrder })
+    mockEq1.mockReturnValue({ eq: mockEq1 })
+    mockEq1.mockReturnValue({ eq: mockEq2 })
+
+    // Re-setup chain properly
+    mockEq2.mockReturnValue({ order: mockOrder })
+    mockEq1.mockReturnValue({ eq: mockEq2 })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq1 })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net', -5)
+
+    expect(mockLimit).toHaveBeenCalledWith(1)
+  })
+
+  it('handles database error gracefully', async () => {
+    mockSupabase = createMockSupabase()
+    const mockEq2 = vi.fn()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq1 = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: null, error: { message: 'Query failed' } })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq2.mockReturnValue({ order: mockOrder })
+    mockEq1.mockReturnValue({ eq: mockEq2 })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq1 })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('Query failed')
+    }
+  })
+
+  it('catches unexpected exceptions', async () => {
+    mockSupabase = createMockSupabase()
+    mockSupabase._mockSelect.mockImplementation(() => {
+      throw new Error('Unexpected crash')
+    })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('Unexpected crash')
+    }
+  })
+
+  it('returns empty array when data is null', async () => {
+    mockSupabase = createMockSupabase()
+    const mockEq2 = vi.fn()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq1 = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: null, error: null })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq2.mockReturnValue({ order: mockOrder })
+    mockEq1.mockReturnValue({ eq: mockEq2 })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq1 })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentSenderMessages('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data).toEqual([])
+    }
+  })
+})
+
+describe('Sprint 5, Task 5.1: getRecentGroupMessages', () => {
+  let mockSupabase: ReturnType<typeof createMockSupabase>
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    resetMessageHistoryClient()
+  })
+
+  afterEach(() => {
+    resetMessageHistoryClient()
+  })
+
+  it('returns error when client not initialized', async () => {
+    const result = await getRecentGroupMessages('group@g.us')
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('Supabase not initialized')
+    }
+  })
+
+  it('queries with correct group_jid filter', async () => {
+    mockSupabase = createMockSupabase()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: [], error: null })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq.mockReturnValue({ order: mockOrder })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentGroupMessages('group@g.us')
+
+    expect(result.ok).toBe(true)
+    expect(mockEq).toHaveBeenCalledWith('group_jid', 'group@g.us')
+  })
+
+  it('applies botOnly filter when specified', async () => {
+    mockSupabase = createMockSupabase()
+
+    // Build a fluent chainable mock that resolves on `await`
+    // Chain: select -> eq(group_jid) -> order -> limit -> eq(is_from_bot) -> await
+    const queryBuilder = createFluentQueryBuilder({ data: [], error: null })
+    mockSupabase._mockSelect.mockReturnValue(queryBuilder)
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentGroupMessages('group@g.us', 10, { botOnly: true })
+
+    expect(result.ok).toBe(true)
+    expect(mockSupabase.from).toHaveBeenCalledWith('messages')
+  })
+
+  it('applies since filter when specified', async () => {
+    mockSupabase = createMockSupabase()
+
+    const queryBuilder = createFluentQueryBuilder({ data: [], error: null })
+    mockSupabase._mockSelect.mockReturnValue(queryBuilder)
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const since = new Date('2026-02-03T10:00:00Z')
+    const result = await getRecentGroupMessages('group@g.us', 10, { since })
+
+    expect(result.ok).toBe(true)
+    expect(mockSupabase.from).toHaveBeenCalledWith('messages')
+  })
+
+  it('handles database error gracefully', async () => {
+    mockSupabase = createMockSupabase()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: null, error: { message: 'DB error' } })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq.mockReturnValue({ order: mockOrder })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await getRecentGroupMessages('group@g.us')
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('DB error')
+    }
+  })
+
+  it('caps limit at 50', async () => {
+    mockSupabase = createMockSupabase()
+    const mockOrder = vi.fn()
+    const mockLimit = vi.fn()
+    const mockEq = vi.fn()
+
+    mockLimit.mockResolvedValue({ data: [], error: null })
+    mockOrder.mockReturnValue({ limit: mockLimit })
+    mockEq.mockReturnValue({ order: mockOrder })
+    mockSupabase._mockSelect.mockReturnValue({ eq: mockEq })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    await getRecentGroupMessages('group@g.us', 999)
+
+    expect(mockLimit).toHaveBeenCalledWith(50)
+  })
+})
+
+describe('Sprint 5, Task 5.1: buildSenderContext', () => {
+  let mockSupabase: ReturnType<typeof createMockSupabase>
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    resetMessageHistoryClient()
+  })
+
+  afterEach(() => {
+    resetMessageHistoryClient()
+  })
+
+  it('returns error when client not initialized', async () => {
+    const result = await buildSenderContext('group@g.us', 'sender@s.whatsapp.net')
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('Supabase not initialized')
+    }
+  })
+
+  it('builds context with recent active sender', async () => {
+    mockSupabase = createMockSupabase()
+
+    const recentMsg = makeMockMessage({
+      id: '1',
+      content: 'preço',
+      is_trigger: true,
+      created_at: new Date().toISOString(),
+    })
+
+    const botMsg = makeMockMessage({
+      id: '2',
+      content: 'USDT/BRL: R$ 5,25',
+      is_from_bot: true,
+      sender_jid: 'bot',
+      created_at: new Date().toISOString(),
+    })
+
+    // Route calls: first call = sender lookback, second call = group lookback
+    let callCount = 0
+    mockSupabase._mockSelect.mockImplementation(() => {
+      callCount++
+      if (callCount === 1) {
+        return createFluentQueryBuilder({ data: [recentMsg], error: null })
+      }
+      return createFluentQueryBuilder({ data: [botMsg], error: null })
+    })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await buildSenderContext('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.isRecentlyActive).toBe(true)
+      expect(result.data.messageCount).toBe(1)
+      expect(result.data.hasRecentTrigger).toBe(true)
+      expect(result.data.botRespondedRecently).toBe(true)
+      expect(result.data.recentMessages).toHaveLength(1)
+    }
+  })
+
+  it('builds context with inactive sender (old messages)', async () => {
+    mockSupabase = createMockSupabase()
+
+    const oldMsg = makeMockMessage({
+      id: '1',
+      content: 'hello',
+      is_trigger: false,
+      created_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    })
+
+    let callCount = 0
+    mockSupabase._mockSelect.mockImplementation(() => {
+      callCount++
+      if (callCount === 1) {
+        return createFluentQueryBuilder({ data: [oldMsg], error: null })
+      }
+      return createFluentQueryBuilder({ data: [], error: null })
+    })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await buildSenderContext('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.isRecentlyActive).toBe(false)
+      expect(result.data.messageCount).toBe(0)
+      expect(result.data.hasRecentTrigger).toBe(false)
+      expect(result.data.botRespondedRecently).toBe(false)
+      expect(result.data.recentMessages).toHaveLength(1)
+    }
+  })
+
+  it('propagates error from sender lookback', async () => {
+    mockSupabase = createMockSupabase()
+
+    mockSupabase._mockSelect.mockReturnValue(
+      createFluentQueryBuilder({ data: null, error: { message: 'Sender query failed' } })
+    )
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await buildSenderContext('group@g.us', 'sender@s.whatsapp.net')
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('Sender query failed')
+    }
+  })
+
+  it('uses custom window minutes', async () => {
+    mockSupabase = createMockSupabase()
+
+    const recentMsg = makeMockMessage({
+      created_at: new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+    })
+
+    let callCount = 0
+    mockSupabase._mockSelect.mockImplementation(() => {
+      callCount++
+      if (callCount === 1) {
+        return createFluentQueryBuilder({ data: [recentMsg], error: null })
+      }
+      return createFluentQueryBuilder({ data: [], error: null })
+    })
+
+    setMessageHistoryClient(mockSupabase as unknown as Parameters<typeof setMessageHistoryClient>[0])
+
+    const result = await buildSenderContext('group@g.us', 'sender@s.whatsapp.net', 3)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.isRecentlyActive).toBe(true)
+      expect(result.data.messageCount).toBe(1)
+    }
   })
 })

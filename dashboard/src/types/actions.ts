@@ -5,8 +5,10 @@
 
 export type ActionType =
   | 'text_response'           // Simple text template response
-  | 'usdt_quote'              // Get USDT/BRL price quote
-  | 'commercial_dollar_quote' // Get commercial dollar quote
+  | 'price_quote'             // Rule-aware price quote (uses active rule's source + spread)
+  | 'volume_quote'            // Rule-aware volume calculation (extracts amount, applies rule pricing)
+  | 'usdt_quote'              // Get USDT/BRL price quote (legacy, kept for backward compatibility)
+  | 'commercial_dollar_quote' // Get commercial dollar quote (legacy, kept for backward compatibility)
   | 'ai_prompt'               // Trigger AI with custom prompt
   | 'custom'                  // Reserved for future extensions
 
@@ -16,6 +18,12 @@ export type ActionType =
 export interface ActionParams {
   text_response: {
     template: string
+  }
+  price_quote: {
+    prefix?: string
+  }
+  volume_quote: {
+    prefix?: string
   }
   usdt_quote: {
     include_volume?: boolean
@@ -61,10 +69,28 @@ export const ACTION_CONFIGS: Record<ActionType, ActionConfig> = {
     requiresParams: true,
     category: 'response',
   },
+  price_quote: {
+    type: 'price_quote',
+    label: 'Price Quote',
+    description: 'Rule-aware price: uses active rule\'s source + spread',
+    icon: '📊',
+    color: 'green',
+    requiresParams: false,
+    category: 'data',
+  },
+  volume_quote: {
+    type: 'volume_quote',
+    label: 'Volume Quote',
+    description: 'Rule-aware calculation: extracts amount and applies rule pricing',
+    icon: '🧮',
+    color: 'blue',
+    requiresParams: false,
+    category: 'data',
+  },
   usdt_quote: {
     type: 'usdt_quote',
     label: 'USDT/BRL Quote',
-    description: 'Fetch and send current USDT/BRL price',
+    description: 'Fetch live USDT/BRL price (legacy - use Price Quote for rule-aware)',
     icon: '💵',
     color: 'green',
     requiresParams: false,
@@ -72,8 +98,8 @@ export const ACTION_CONFIGS: Record<ActionType, ActionConfig> = {
   },
   commercial_dollar_quote: {
     type: 'commercial_dollar_quote',
-    label: 'Commercial Dollar Quote',
-    description: 'Fetch and send commercial dollar exchange rate',
+    label: 'Commercial Dollar',
+    description: 'Fetch commercial dollar rate (legacy - use Price Quote for rule-aware)',
     icon: '💲',
     color: 'blue',
     requiresParams: false,
@@ -124,6 +150,8 @@ export function validateActionParams(type: ActionType, params: any): { valid: bo
       }
       return { valid: true }
 
+    case 'price_quote':
+    case 'volume_quote':
     case 'usdt_quote':
     case 'commercial_dollar_quote':
       // Optional params, always valid
@@ -156,6 +184,12 @@ export function getActionDisplayText(type: ActionType, params: any): string {
   switch (type) {
     case 'text_response':
       return params.template || '(No template set)'
+
+    case 'price_quote':
+      return `Rule-aware price quote${params?.prefix ? ` (prefix: "${params.prefix}")` : ''}`
+
+    case 'volume_quote':
+      return `Rule-aware volume calculation${params?.prefix ? ` (prefix: "${params.prefix}")` : ''}`
 
     case 'usdt_quote':
       return `Fetches live USDT/BRL price from Binance${params.include_volume ? ' with volume info' : ''}`

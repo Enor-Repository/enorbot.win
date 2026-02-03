@@ -2,8 +2,12 @@
  * Dashboard API: Price endpoints
  * Proxies external price APIs to avoid CORS issues
  */
+import { config as loadEnv } from 'dotenv'
 import { Router, type Request, type Response } from 'express'
 import { logger } from '../../utils/logger.js'
+
+// Ensure .env is loaded for AWESOMEAPI_TOKEN
+loadEnv()
 
 export const pricesRouter = Router()
 

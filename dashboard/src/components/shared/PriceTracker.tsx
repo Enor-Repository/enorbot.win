@@ -40,14 +40,19 @@ export function PriceTracker() {
   // Use ref to prevent stale closure issues with intervals
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
 
-  const fetchPrices = useCallback(async () => {
+  const fetchPrices = useCallback(async (forceRefresh = false) => {
     try {
       setPrices((prev) => ({ ...prev, loading: true, error: null }))
 
       // Fetch both prices in parallel via our backend proxy (avoids CORS)
+      // When forceRefresh=true, bypass server-side cache to get fresh data
+      const commercialUrl = forceRefresh
+        ? `${API_BASE_URL}/api/prices/commercial-dollar?force=true`
+        : `${API_BASE_URL}/api/prices/commercial-dollar`
+
       const [binanceResponse, commercialResponse] = await Promise.allSettled([
         fetch(`${API_BASE_URL}/api/prices/usdt-brl`),
-        fetch(`${API_BASE_URL}/api/prices/commercial-dollar`),
+        fetch(commercialUrl),
       ])
 
       let usdtBrl: number | null = null
@@ -104,9 +109,9 @@ export function PriceTracker() {
     }
   }, [])
 
-  // Initial fetch
+  // Initial fetch (uses cache if available)
   useEffect(() => {
-    fetchPrices()
+    fetchPrices(false)
   }, [fetchPrices])
 
   // Auto-refresh with proper cleanup
@@ -116,8 +121,8 @@ export function PriceTracker() {
       clearInterval(intervalRef.current)
     }
 
-    // Set new interval
-    intervalRef.current = setInterval(fetchPrices, PRICE_REFRESH_INTERVAL_MS)
+    // Set new interval (auto-refresh uses cache, no force)
+    intervalRef.current = setInterval(() => fetchPrices(false), PRICE_REFRESH_INTERVAL_MS)
 
     // Cleanup on unmount
     return () => {
@@ -244,7 +249,7 @@ export function PriceTracker() {
 
       {/* Manual Refresh Button */}
       <button
-        onClick={fetchPrices}
+        onClick={() => fetchPrices(true)}
         disabled={prices.loading}
         className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded border border-border/30 bg-muted/20 hover:bg-muted/30 text-muted-foreground hover:text-foreground transition-colors text-xs font-mono disabled:opacity-50"
       >
