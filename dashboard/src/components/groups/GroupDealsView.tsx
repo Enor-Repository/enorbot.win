@@ -15,8 +15,9 @@ import {
   ChevronRight,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { API_ENDPOINTS } from '@/lib/api'
+import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 
 // ============================================================================
 // Types (local mirrors of service types)
@@ -73,6 +74,9 @@ interface DealHistoryRecord {
 
 interface Props {
   groupJid: string
+  hideTitle?: boolean
+  isVisible?: boolean
+  onCountChange?: (count: number) => void
 }
 
 // ============================================================================
@@ -143,16 +147,20 @@ function getClientPhone(jid: string): string {
 // Component
 // ============================================================================
 
-export default function GroupDealsView({ groupJid }: Props) {
+export default function GroupDealsView({ groupJid, hideTitle, isVisible = true, onCountChange }: Props) {
   const [activeDeals, setActiveDeals] = useState<ActiveDeal[]>([])
   const [history, setHistory] = useState<DealHistoryRecord[]>([])
   const [loading, setLoading] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [extending, setExtending] = useState<string | null>(null)
+  const [fetchError, setFetchError] = useState(false)
+  const [confirmCancel, setConfirmCancel] = useState<ActiveDeal | null>(null)
+  const [cancelling, setCancelling] = useState(false)
 
   // Fetch active deals
   const fetchDeals = useCallback(async () => {
     setLoading(true)
+    setFetchError(false)
     try {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
@@ -165,9 +173,13 @@ export default function GroupDealsView({ groupJid }: Props) {
       if (res.ok) {
         const data = await res.json()
         setActiveDeals(data.deals || [])
+      } else {
+        setFetchError(true)
       }
-    } catch {
-      // Silently fail on fetch errors
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        setFetchError(true)
+      }
     } finally {
       setLoading(false)
     }
@@ -193,12 +205,18 @@ export default function GroupDealsView({ groupJid }: Props) {
     }
   }, [groupJid])
 
-  // Auto-refresh active deals every 15 seconds
+  // Auto-refresh active deals every 15 seconds (only when visible)
   useEffect(() => {
+    if (!isVisible) return
     fetchDeals()
     const interval = setInterval(fetchDeals, 15000)
     return () => clearInterval(interval)
-  }, [fetchDeals])
+  }, [fetchDeals, isVisible])
+
+  // Report count changes to parent
+  useEffect(() => {
+    onCountChange?.(activeDeals.length)
+  }, [activeDeals.length, onCountChange])
 
   // Fetch history when section is expanded
   useEffect(() => {
@@ -207,12 +225,18 @@ export default function GroupDealsView({ groupJid }: Props) {
     }
   }, [showHistory, fetchHistory])
 
-  // Cancel deal
-  const handleCancel = async (dealId: string) => {
+  // Cancel deal — opens confirmation dialog
+  const handleCancel = (dealId: string) => {
+    const deal = activeDeals.find(d => d.id === dealId)
+    if (deal) setConfirmCancel(deal)
+  }
+
+  const executeCancelDeal = async (dealId: string) => {
+    setCancelling(true)
     try {
       const res = await fetch(API_ENDPOINTS.groupDealCancel(groupJid, dealId), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
       })
 
       if (res.ok) {
@@ -224,6 +248,8 @@ export default function GroupDealsView({ groupJid }: Props) {
       }
     } catch {
       showToast({ type: 'error', message: 'Failed to cancel deal' })
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -233,7 +259,7 @@ export default function GroupDealsView({ groupJid }: Props) {
     try {
       const res = await fetch(API_ENDPOINTS.groupDealExtend(groupJid, dealId), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify({ seconds }),
       })
 
@@ -256,7 +282,7 @@ export default function GroupDealsView({ groupJid }: Props) {
     try {
       const res = await fetch(API_ENDPOINTS.groupDealSweep(groupJid), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
       })
 
       if (res.ok) {
@@ -274,17 +300,19 @@ export default function GroupDealsView({ groupJid }: Props) {
   return (
     <div className="space-y-3">
       {/* Header with actions */}
-      <div className="flex items-center justify-between pb-2 border-b border-emerald-500/10">
-        <h4 className="text-xs font-mono text-emerald-400 uppercase tracking-widest flex items-center gap-2">
-          <span className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse"></span>
-          Active Deals
-          {activeDeals.length > 0 && (
-            <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/40 text-[10px] px-1.5 py-0">
-              {activeDeals.length}
-            </Badge>
-          )}
-        </h4>
-        <div className="flex gap-1.5">
+      <div className={`flex items-center justify-between${hideTitle ? '' : ' pb-2 border-b border-emerald-500/10'}`}>
+        {!hideTitle && (
+          <h4 className="text-xs font-mono text-emerald-400 uppercase tracking-widest flex items-center gap-2">
+            <span className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse"></span>
+            Active Deals
+            {activeDeals.length > 0 && (
+              <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/40 text-[10px] px-1.5 py-0">
+                {activeDeals.length}
+              </Badge>
+            )}
+          </h4>
+        )}
+        <div className={`flex gap-1.5${hideTitle ? ' ml-auto' : ''}`}>
           <button
             onClick={handleSweep}
             className="flex items-center gap-1 px-2 py-1 rounded-md bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-mono transition-all"
@@ -305,14 +333,25 @@ export default function GroupDealsView({ groupJid }: Props) {
       </div>
 
       {/* Active Deals List */}
-      {loading && activeDeals.length === 0 ? (
+      {fetchError && activeDeals.length === 0 ? (
+        <button
+          onClick={() => fetchDeals()}
+          className="w-full px-4 py-6 text-center text-sm text-muted-foreground bg-red-500/5 border border-red-500/20 rounded-lg hover:bg-red-500/10 transition-colors"
+        >
+          <p>Unable to load deals</p>
+          <p className="text-xs mt-1 text-red-400">Tap to retry</p>
+        </button>
+      ) : loading && activeDeals.length === 0 ? (
         <div className="text-center py-4 text-muted-foreground text-sm">
           Loading deals...
         </div>
       ) : activeDeals.length === 0 ? (
-        <div className="text-center py-4 border border-dashed border-emerald-500/30 rounded-md">
+        <div className="text-center py-6 border border-dashed border-emerald-500/30 rounded-md">
           <p className="text-muted-foreground text-xs">
-            No active deals in this group
+            No active deals
+          </p>
+          <p className="text-muted-foreground text-[10px] mt-1">
+            Deals are created when clients request quotes via WhatsApp.
           </p>
         </div>
       ) : (
@@ -362,6 +401,23 @@ export default function GroupDealsView({ groupJid }: Props) {
           </div>
         )}
       </div>
+
+      {/* Cancel Deal Confirmation Dialog */}
+      <ConfirmDialog
+        open={!!confirmCancel}
+        onOpenChange={(open) => { if (!open) setConfirmCancel(null) }}
+        title="Cancel deal"
+        description={`Cancel deal with ${confirmCancel ? getClientPhone(confirmCancel.clientJid) : ''}? The client will be notified that the deal was cancelled.`}
+        confirmLabel="Cancel Deal"
+        cancelLabel="Keep Deal"
+        loading={cancelling}
+        onConfirm={async () => {
+          if (confirmCancel) {
+            await executeCancelDeal(confirmCancel.id)
+            setConfirmCancel(null)
+          }
+        }}
+      />
     </div>
   )
 }

@@ -1,14 +1,12 @@
 import type { WASocket, proto } from '@whiskeysockets/baileys'
-import { isPriceTrigger, hasTronscanLink } from '../utils/triggers.js'
+import { isPriceTrigger, isPriceTriggerSync, hasTronscanLink } from '../utils/triggers.js'
 import {
   type ReceiptType,
   RECEIPT_MIME_TYPES,
   SUPPORTED_IMAGE_MIME_TYPES,
 } from '../types/handlers.js'
 import { getGroupModeSync } from '../services/groupConfig.js'
-import { findMatchingRule, type Rule } from '../services/rulesService.js'
-import { shadowMatch, getTriggerMode, type ShadowMatchResult } from '../services/triggerMigration.js'
-import type { GroupTrigger } from '../services/triggerService.js'
+import { matchTrigger, type GroupTrigger } from '../services/triggerService.js'
 import { isPriceLockMessage, isConfirmationMessage, isDealCancellation, hasVolumeInfo } from '../handlers/deal.js'
 import { logger } from '../utils/logger.js'
 
@@ -58,9 +56,7 @@ export interface RouterContext {
   rawMessage?: proto.IWebMessageInfo
   /** Whether this message contains a Tronscan transaction link */
   hasTronscan?: boolean
-  /** Matched rule from rulesService (only populated when a rule matches) */
-  matchedRule?: Rule
-  /** Sprint 3: Matched trigger from new triggerService (populated in shadow/new mode) */
+  /** Matched trigger from triggerService (populated when a group trigger matches) */
   matchedTrigger?: GroupTrigger
   /** Sprint 4: Deal flow action type for DEAL_HANDLER routing */
   dealAction?: 'volume_inquiry' | 'price_lock' | 'confirmation' | 'cancellation'
@@ -124,14 +120,11 @@ export function detectReceiptType(baileysMessage: BaileysMessage | undefined): R
  *    - learning → OBSERVE_ONLY (log but don't respond)
  *    - assisted → OBSERVE_ONLY (future: suggestion system)
  *    - active → Normal routing with group-specific triggers
- * 3. Price triggers (global or group-specific) → PRICE_HANDLER
+ * 3. Price triggers (global keywords or group triggers) → PRICE_HANDLER
  * 4. Deal flow messages (cancel, lock, confirm, volume) → DEAL_HANDLER
  * 5. Tronscan links → TRONSCAN_HANDLER
  * 6. Receipt messages → RECEIPT_HANDLER
  * 7. Otherwise → IGNORE
- *
- * Story 6.1 - Added receipt detection and routing
- * Group Modes - Added per-group mode routing
  *
  * @param context - The router context with message metadata
  * @param baileysMessage - Optional raw Baileys message for receipt detection
@@ -141,19 +134,14 @@ export async function routeMessage(
   context: RouterContext,
   baileysMessage?: BaileysMessage
 ): Promise<RouteResult> {
-  // Check for global price trigger - used for context enrichment
-  const hasTrigger = isPriceTrigger(context.message)
-
-  // Check for Tronscan transaction link
+  // CPU-only checks run eagerly (no DB hit)
   const hasTronscan = hasTronscanLink(context.message)
-
-  // Story 6.1 - Detect receipt type (only for non-control-group messages)
   const receiptType = context.isControlGroup ? null : detectReceiptType(baileysMessage)
   const isReceipt = receiptType !== null
 
   const enrichedContext: RouterContext = {
     ...context,
-    hasTrigger,
+    hasTrigger: false,
     hasTronscan,
     isReceipt,
     receiptType,
@@ -161,36 +149,31 @@ export async function routeMessage(
 
   // Priority 1: Control group ALWAYS works (regardless of any mode)
   if (context.isControlGroup) {
-    // Sprint 3: Shadow mode — run both old and new trigger systems
-    let shadow: ShadowMatchResult
+    // DB calls only for control group messages
+    const hasTrigger = await isPriceTrigger(context.message)
+    enrichedContext.hasTrigger = hasTrigger
+
+    // Match against group triggers (database-driven)
+    let triggerMatch: GroupTrigger | null = null
     try {
-      shadow = await shadowMatch(context.groupId, context.message)
+      const result = await matchTrigger(context.message, context.groupId)
+      if (result.ok) {
+        triggerMatch = result.data
+      }
     } catch (e) {
-      logger.error('shadowMatch failed in control group, falling back', {
-        event: 'shadow_match_error',
+      logger.error('matchTrigger failed in control group, falling back', {
+        event: 'trigger_match_error',
         groupId: context.groupId,
         error: e instanceof Error ? e.message : String(e),
       })
-      // Fallback: use only hasTrigger (hardcoded patterns)
-      if (hasTrigger) {
-        return { destination: 'PRICE_HANDLER', context: enrichedContext }
-      }
-      if (hasTronscan) {
-        return { destination: 'TRONSCAN_HANDLER', context: enrichedContext }
-      }
-      return { destination: 'CONTROL_HANDLER', context: enrichedContext }
     }
 
-    const mode = getTriggerMode()
-
-    if (mode === 'new' && shadow.newMatch) {
-      enrichedContext.matchedTrigger = shadow.newMatch
-    } else if (shadow.oldMatch) {
-      enrichedContext.matchedRule = shadow.oldMatch
+    if (triggerMatch) {
+      enrichedContext.matchedTrigger = triggerMatch
     }
 
-    // Price triggers in control group go to price handler (rule-based, trigger-based, OR hardcoded fallback)
-    if (shadow.oldMatch || shadow.newMatch || hasTrigger) {
+    // Price triggers in control group go to price handler (trigger-based OR global keyword fallback)
+    if (triggerMatch || hasTrigger) {
       return { destination: 'PRICE_HANDLER', context: enrichedContext }
     }
     // Tronscan links in control group update Excel row
@@ -201,7 +184,7 @@ export async function routeMessage(
     return { destination: 'CONTROL_HANDLER', context: enrichedContext }
   }
 
-  // Priority 2: Check per-group mode
+  // Priority 2: Check per-group mode (no DB call needed for non-active modes)
   const groupMode = getGroupModeSync(context.groupId)
 
   // PAUSED: Completely ignore (no logging, no response)
@@ -209,28 +192,30 @@ export async function routeMessage(
     return { destination: 'IGNORE', context: enrichedContext }
   }
 
-  // LEARNING: Log everything, respond to nothing
-  if (groupMode === 'learning') {
+  // LEARNING/ASSISTED: Enrich context with trigger info for logging, but don't route
+  if (groupMode === 'learning' || groupMode === 'assisted') {
+    // Use sync cache check for context enrichment (no DB round-trip)
+    enrichedContext.hasTrigger = isPriceTriggerSync(context.message)
     return { destination: 'OBSERVE_ONLY', context: enrichedContext }
   }
 
-  // ASSISTED: Route to observe-only for now (future: suggestion system)
-  if (groupMode === 'assisted') {
-    return { destination: 'OBSERVE_ONLY', context: enrichedContext }
-  }
+  // ACTIVE mode: DB calls for full routing
+  const hasTrigger = await isPriceTrigger(context.message)
+  enrichedContext.hasTrigger = hasTrigger
 
-  // ACTIVE mode: Normal routing with shadow mode trigger matching
-  // Sprint 3: Run both old (rules table) and new (group_triggers table) systems
-  let shadow: ShadowMatchResult
+  let triggerMatch: GroupTrigger | null = null
   try {
-    shadow = await shadowMatch(context.groupId, context.message)
+    const result = await matchTrigger(context.message, context.groupId)
+    if (result.ok) {
+      triggerMatch = result.data
+    }
   } catch (e) {
-    logger.error('shadowMatch failed in active mode, falling back', {
-      event: 'shadow_match_error',
+    logger.error('matchTrigger failed in active mode, falling back', {
+      event: 'trigger_match_error',
       groupId: context.groupId,
       error: e instanceof Error ? e.message : String(e),
     })
-    // Fallback: use only hasTrigger (hardcoded patterns)
+    // Fallback: use only hasTrigger (global keyword patterns)
     if (hasTrigger) {
       return { destination: 'PRICE_HANDLER', context: enrichedContext }
     }
@@ -243,33 +228,27 @@ export async function routeMessage(
     return { destination: 'IGNORE', context: enrichedContext }
   }
 
-  const mode = getTriggerMode()
-
-  // In "new" mode, prefer new trigger match; otherwise use old rule match
-  if (mode === 'new' && shadow.newMatch) {
-    enrichedContext.matchedTrigger = shadow.newMatch
-  } else if (shadow.oldMatch) {
-    enrichedContext.matchedRule = shadow.oldMatch
+  if (triggerMatch) {
+    enrichedContext.matchedTrigger = triggerMatch
   }
 
-  const hasMatch = shadow.oldMatch || shadow.newMatch
-
-  // Priority 3: Price triggers (global, rule-based, or trigger-based) go to price handler
-  if (hasTrigger || hasMatch) {
+  // Priority 3: Price triggers (global keyword or group-specific trigger) go to price handler
+  if (hasTrigger || triggerMatch) {
     return { destination: 'PRICE_HANDLER', context: enrichedContext }
   }
 
   // Priority 4: Deal flow messages (Sprint 4)
   // Check for deal-related messages: cancellation, lock, confirmation, volume
-  if (isDealCancellation(context.message)) {
+  // These are now async — keywords loaded from DB via systemPatternService
+  if (await isDealCancellation(context.message)) {
     enrichedContext.dealAction = 'cancellation'
     return { destination: 'DEAL_HANDLER', context: enrichedContext }
   }
-  if (isPriceLockMessage(context.message)) {
+  if (await isPriceLockMessage(context.message)) {
     enrichedContext.dealAction = 'price_lock'
     return { destination: 'DEAL_HANDLER', context: enrichedContext }
   }
-  if (isConfirmationMessage(context.message)) {
+  if (await isConfirmationMessage(context.message)) {
     enrichedContext.dealAction = 'confirmation'
     return { destination: 'DEAL_HANDLER', context: enrichedContext }
   }

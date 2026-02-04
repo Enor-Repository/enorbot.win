@@ -4,25 +4,38 @@ import type { WASocket } from '@whiskeysockets/baileys'
 // Mock groupConfig service before importing router
 const mockGetGroupModeSync = vi.hoisted(() => vi.fn())
 const mockGetGroupConfigSync = vi.hoisted(() => vi.fn())
-const mockFindMatchingRule = vi.hoisted(() => vi.fn())
-const mockShadowMatch = vi.hoisted(() => vi.fn())
-const mockGetTriggerMode = vi.hoisted(() => vi.fn())
+const mockMatchTrigger = vi.hoisted(() => vi.fn())
 
 vi.mock('../services/groupConfig.js', () => ({
   getGroupModeSync: mockGetGroupModeSync,
   getGroupConfigSync: mockGetGroupConfigSync,
 }))
 
-vi.mock('../services/rulesService.js', () => ({
-  findMatchingRule: mockFindMatchingRule,
+vi.mock('../services/triggerService.js', () => ({
+  matchTrigger: mockMatchTrigger,
 }))
 
-vi.mock('../services/triggerMigration.js', () => ({
-  shadowMatch: mockShadowMatch,
-  getTriggerMode: mockGetTriggerMode,
+// Mock systemPatternService so router exercises DB-read code path
+vi.mock('../services/systemPatternService.js', () => ({
+  getKeywordsForPattern: vi.fn((key: string) => {
+    const defaults: Record<string, string[]> = {
+      price_request: ['preço', 'cotação'],
+      deal_cancellation: ['cancela', 'cancelar', 'cancel'],
+      price_lock: ['trava', 'lock', 'travar'],
+      deal_confirmation: ['fechado', 'fecha', 'fechar', 'confirma', 'confirmado', 'confirmed'],
+    }
+    return Promise.resolve(defaults[key] || [])
+  }),
+  getKeywordsForPatternSync: vi.fn((key: string) => {
+    const defaults: Record<string, string[]> = {
+      price_request: ['preço', 'cotação'],
+      deal_cancellation: ['cancela', 'cancelar', 'cancel'],
+      price_lock: ['trava', 'lock', 'travar'],
+      deal_confirmation: ['fechado', 'fecha', 'fechar', 'confirma', 'confirmado', 'confirmed'],
+    }
+    return defaults[key] || []
+  }),
 }))
-
-vi.mock('../services/triggerService.js', () => ({}))
 
 import {
   routeMessage,
@@ -32,28 +45,6 @@ import {
   type BaileysMessage,
 } from './router.js'
 import { RECEIPT_MIME_TYPES } from '../types/handlers.js'
-
-/** Default shadow match result: no match from either system */
-function noShadowMatch() {
-  return {
-    mode: 'shadow',
-    oldMatch: null,
-    newMatch: null,
-    parity: true,
-    parityDetail: 'both returned no match',
-  }
-}
-
-/** Shadow match result with an old rule match */
-function oldRuleShadowMatch(rule: unknown) {
-  return {
-    mode: 'shadow',
-    oldMatch: rule,
-    newMatch: null,
-    parity: false,
-    parityDetail: 'OLD matched but NEW did not',
-  }
-}
 
 describe('routeMessage', () => {
   // Mock socket for tests
@@ -85,11 +76,8 @@ describe('routeMessage', () => {
       updatedAt: new Date(),
       updatedBy: null,
     })
-    // Default: no rules match (rulesService returns null)
-    mockFindMatchingRule.mockReturnValue(null)
-    // Default: shadow mode returns no match, mode is 'shadow'
-    mockShadowMatch.mockResolvedValue(noShadowMatch())
-    mockGetTriggerMode.mockReturnValue('shadow')
+    // Default: no trigger match from database
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
   })
 
   // AC1, AC2: Trigger messages routed to PRICE_HANDLER
@@ -290,10 +278,8 @@ describe('routeMessage receipt routing', () => {
       updatedAt: new Date(),
       updatedBy: null,
     })
-    // Default: no rules match
-    mockFindMatchingRule.mockReturnValue(null)
-    mockShadowMatch.mockResolvedValue(noShadowMatch())
-    mockGetTriggerMode.mockReturnValue('shadow')
+    // Default: no trigger match from database
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
   })
 
   // AC1: PDF routing
@@ -433,10 +419,8 @@ describe('routeMessage per-group modes', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    // Default: no rules match
-    mockFindMatchingRule.mockReturnValue(null)
-    mockShadowMatch.mockResolvedValue(noShadowMatch())
-    mockGetTriggerMode.mockReturnValue('shadow')
+    // Default: no trigger match from database
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
   })
 
   describe('PAUSED mode - completely ignored', () => {
@@ -525,14 +509,14 @@ describe('routeMessage per-group modes', () => {
     })
   })
 
-  describe('ACTIVE mode - normal routing with rules-based triggers', () => {
+  describe('ACTIVE mode - normal routing with database triggers', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('active')
       mockGetGroupConfigSync.mockReturnValue({
         groupJid: '123456789@g.us',
         groupName: 'Test Group',
         mode: 'active',
-        triggerPatterns: [], // No longer used - rules come from rulesService
+        triggerPatterns: [],
         responseTemplates: {},
         playerRoles: {},
         aiThreshold: 50,
@@ -541,9 +525,8 @@ describe('routeMessage per-group modes', () => {
         updatedAt: new Date(),
         updatedBy: null,
       })
-      // Default: no rules match
-      mockFindMatchingRule.mockReturnValue(null)
-      mockShadowMatch.mockResolvedValue(noShadowMatch())
+      // Default: no trigger match
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
     })
 
     it('routes global price trigger to PRICE_HANDLER', async () => {
@@ -553,57 +536,28 @@ describe('routeMessage per-group modes', () => {
       expect(result.destination).toBe('PRICE_HANDLER')
     })
 
-    it('routes rule-matched trigger to PRICE_HANDLER', async () => {
-      const matchedRule = {
-        id: 'test-rule-1',
+    it('routes database trigger match to PRICE_HANDLER', async () => {
+      const trigger = {
+        id: 'trigger-1',
         groupJid: '123456789@g.us',
         triggerPhrase: 'compro usdt',
-        responseTemplate: 'Test response',
-        actionType: 'usdt_quote',
+        patternType: 'contains',
+        actionType: 'price_quote',
         actionParams: {},
-        isActive: true,
         priority: 100,
-        conditions: {},
-        scope: 'group',
-        isSystem: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        isActive: true,
+        createdAt: '2026-01-01',
+        updatedAt: '2026-01-01',
       }
 
-      // Shadow match returns the old rule match
-      mockShadowMatch.mockResolvedValue(oldRuleShadowMatch(matchedRule))
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: trigger })
 
       const context = { ...baseContext, message: 'quero compro usdt agora' }
       const result = await routeMessage(context)
 
       expect(result.destination).toBe('PRICE_HANDLER')
-      expect(result.context.matchedRule).toBeDefined()
-      expect(result.context.matchedRule?.triggerPhrase).toBe('compro usdt')
-    })
-
-    it('routes rule-matched trigger (case-insensitive) to PRICE_HANDLER', async () => {
-      const matchedRule = {
-        id: 'test-rule-1',
-        groupJid: '123456789@g.us',
-        triggerPhrase: 'compro usdt',
-        responseTemplate: '',
-        actionType: 'usdt_quote',
-        actionParams: {},
-        isActive: true,
-        priority: 100,
-        conditions: {},
-        scope: 'group',
-        isSystem: false,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      }
-
-      mockShadowMatch.mockResolvedValue(oldRuleShadowMatch(matchedRule))
-
-      const context = { ...baseContext, message: 'COMPRO USDT' }
-      const result = await routeMessage(context)
-
-      expect(result.destination).toBe('PRICE_HANDLER')
+      expect(result.context.matchedTrigger).toBeDefined()
+      expect(result.context.matchedTrigger?.triggerPhrase).toBe('compro usdt')
     })
 
     it('routes non-trigger to IGNORE in active mode', async () => {
@@ -678,29 +632,28 @@ describe('routeMessage per-group modes', () => {
     })
   })
 
-  // Sprint 3: Shadow mode integration tests
-  describe('shadow mode integration', () => {
+  // Trigger service integration tests
+  describe('trigger service integration', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('active')
     })
 
-    it('uses shadow match for active groups', async () => {
+    it('calls matchTrigger for active groups', async () => {
       const context = { ...baseContext, message: 'hello' }
       await routeMessage(context)
 
-      expect(mockShadowMatch).toHaveBeenCalledWith('123456789@g.us', 'hello')
+      expect(mockMatchTrigger).toHaveBeenCalledWith('hello', '123456789@g.us')
     })
 
-    it('uses shadow match for control group', async () => {
+    it('calls matchTrigger for control group', async () => {
       const context = { ...baseContext, message: 'hello', isControlGroup: true }
       await routeMessage(context)
 
-      expect(mockShadowMatch).toHaveBeenCalledWith('123456789@g.us', 'hello')
+      expect(mockMatchTrigger).toHaveBeenCalledWith('hello', '123456789@g.us')
     })
 
-    it('populates matchedTrigger when in new mode', async () => {
-      mockGetTriggerMode.mockReturnValue('new')
-      const newTrigger = {
+    it('populates matchedTrigger when trigger matches', async () => {
+      const trigger = {
         id: 'trigger-1',
         groupJid: '123456789@g.us',
         triggerPhrase: 'compro usdt',
@@ -712,13 +665,7 @@ describe('routeMessage per-group modes', () => {
         createdAt: '2026-01-01',
         updatedAt: '2026-01-01',
       }
-      mockShadowMatch.mockResolvedValue({
-        mode: 'new',
-        oldMatch: null,
-        newMatch: newTrigger,
-        parity: true,
-        parityDetail: 'mode=new',
-      })
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: trigger })
 
       const context = { ...baseContext, message: 'compro usdt' }
       const result = await routeMessage(context)
@@ -728,8 +675,8 @@ describe('routeMessage per-group modes', () => {
       expect(result.context.matchedTrigger?.triggerPhrase).toBe('compro usdt')
     })
 
-    it('falls back gracefully when shadowMatch throws in active mode', async () => {
-      mockShadowMatch.mockRejectedValue(new Error('DB connection failed'))
+    it('falls back gracefully when matchTrigger throws in active mode', async () => {
+      mockMatchTrigger.mockRejectedValue(new Error('DB connection failed'))
 
       const context = { ...baseContext, message: 'hello' }
       const result = await routeMessage(context)
@@ -738,8 +685,8 @@ describe('routeMessage per-group modes', () => {
       expect(result.destination).toBe('IGNORE')
     })
 
-    it('falls back to PRICE_HANDLER via hasTrigger when shadowMatch throws', async () => {
-      mockShadowMatch.mockRejectedValue(new Error('DB connection failed'))
+    it('falls back to PRICE_HANDLER via hasTrigger when matchTrigger throws', async () => {
+      mockMatchTrigger.mockRejectedValue(new Error('DB connection failed'))
 
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
@@ -747,8 +694,8 @@ describe('routeMessage per-group modes', () => {
       expect(result.destination).toBe('PRICE_HANDLER')
     })
 
-    it('falls back gracefully when shadowMatch throws in control group', async () => {
-      mockShadowMatch.mockRejectedValue(new Error('DB connection failed'))
+    it('falls back gracefully when matchTrigger throws in control group', async () => {
+      mockMatchTrigger.mockRejectedValue(new Error('DB connection failed'))
 
       const context = { ...baseContext, message: 'status', isControlGroup: true }
       const result = await routeMessage(context)

@@ -13,12 +13,13 @@ import { statusRouter } from './api/status.js'
 import { groupsRouter } from './api/groups.js'
 import { analyticsRouter } from './api/analytics.js'
 import { costsRouter } from './api/costs.js'
-import { rulesRouter } from './api/rules.js'
 import { pricesRouter } from './api/prices.js'
 import { spreadsRouter } from './api/spreads.js'
 import { groupRulesRouter } from './api/groupRules.js'
 import { groupTriggersRouter } from './api/triggers.js'
 import { dealsRouter } from './api/deals.js'
+import { systemPatternsRouter } from './api/systemPatterns.js'
+import { dashboardAuth } from './middleware/auth.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -26,8 +27,12 @@ const __dirname = path.dirname(__filename)
 const app = express()
 
 // Middleware
-app.use(cors())
-app.use(express.json())
+const config = getConfig()
+const allowedOrigins = config.ALLOWED_ORIGINS
+  ? config.ALLOWED_ORIGINS.split(',').map((o: string) => o.trim())
+  : undefined
+app.use(cors(allowedOrigins ? { origin: allowedOrigins } : undefined))
+app.use(express.json({ limit: '100kb' }))
 
 // Request logging
 app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -39,17 +44,20 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
   next()
 })
 
+// Auth middleware — protects write endpoints (POST/PUT/DELETE), allows reads
+app.use('/api', dashboardAuth)
+
 // API routes
 app.use('/api/status', statusRouter)
 app.use('/api/groups', groupsRouter)
 app.use('/api/groups', analyticsRouter)
 app.use('/api/costs', costsRouter)
-app.use('/api/rules', rulesRouter)
 app.use('/api/prices', pricesRouter)
 app.use('/api/spreads', spreadsRouter)
 app.use('/api/groups/:groupJid/rules', groupRulesRouter)
 app.use('/api/groups/:groupJid/triggers', groupTriggersRouter)
 app.use('/api/groups/:groupJid/deals', dealsRouter)
+app.use('/api/system-patterns', systemPatternsRouter)
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {

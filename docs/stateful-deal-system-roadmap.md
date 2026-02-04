@@ -2,8 +2,8 @@
 
 > **Document Purpose**: Living roadmap for transforming eNorBOT into Daniel's automated CIO desk with full control via dashboard.
 >
-> **Last Updated**: 2026-02-03
-> **Status**: Sprint 1-5 Complete, Sprint 6 (Hardening) In Progress
+> **Last Updated**: 2026-02-04
+> **Status**: Sprint 1-6 Complete, Sprint 7A (Editable System Keywords) & 7B (Trigger Engine Consolidation) Planned
 > **Architecture**: Triggers + Rules (separated concerns)
 
 ---
@@ -256,7 +256,9 @@ This ensures the bot always has a valid pricing configuration.
 | **3** | Group Triggers | ✅ COMPLETE | ✅ Approved |
 | **4** | Deal Flow Engine | ✅ COMPLETE | ✅ Approved |
 | **5** | Message Lookback & Polish | ✅ COMPLETE | ✅ Approved |
-| **6** | Demo Hardening & Production Readiness | 🟡 IN PROGRESS | Pending |
+| **6** | Demo Hardening & Production Readiness | ✅ COMPLETE | ✅ Approved |
+| **7A** | Editable System Keywords | 🔵 PLANNED | — |
+| **7B** | Trigger Engine Consolidation | 🔵 PLANNED | — |
 
 ---
 
@@ -663,7 +665,7 @@ Context awareness from message history, plus production refinements.
 
 ---
 
-## 11. Sprint 6: Demo Hardening & Production Readiness
+## 11. Sprint 6: Demo Hardening & Production Readiness ✅ COMPLETE
 
 ### Goal
 Prepare eNorBOT for Daniel Hon (CIO) demo presentation. Ensure the dashboard looks polished, has realistic demo data, handles edge cases gracefully, and can be confidently demonstrated without embarrassment.
@@ -676,6 +678,31 @@ Prepare eNorBOT for Daniel Hon (CIO) demo presentation. Ensure the dashboard loo
 - Dashboard serving at http://181.215.135.75:3004/
 - Bot connected to WhatsApp, processing messages
 - 1,537 tests passing, 55 code review issues resolved across sprints
+
+### Components Delivered
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Router cutover | `src/bot/router.ts` | `group_triggers` as sole source of truth, removed shadow mode dependency |
+| Accordion sections | `dashboard/src/pages/GroupsAndRulesPage.tsx` | 5 collapsible sections with icons, counts, localStorage persistence |
+| Confirm dialog | `dashboard/src/components/ui/confirm-dialog.tsx` | Reusable confirmation dialog with double-click protection |
+| System pattern service | `src/services/systemPatternService.ts` | DB-backed editable keywords with cache + fallback |
+| System pattern tests | `src/services/systemPatternService.test.ts` | 15 service tests |
+| System patterns API | `src/dashboard/api/systemPatterns.ts` | GET/PUT endpoints for system keyword management |
+| System patterns API tests | `src/dashboard/api/systemPatterns.test.ts` | 20 route-level tests (validation, error handling, edge cases) |
+| System patterns migration | `supabase/migrations/20260207_001_system_patterns.sql` | Table + seed data + RLS policies |
+| Dead code removal | 6 deleted files | PatternsPage, TriggerPatterns, TriggerPatternCreationModal, TriggerPatternViewEditModal, rulesService, triggerMigration |
+
+### Code Review (Post-Implementation)
+- Adversarial code review found 10 issues (2 HIGH, 5 MEDIUM, 3 LOW):
+  - H1: Dynamic Tailwind classes invisible to JIT → static class strings in `ACTION_TYPE_CONFIG`
+  - H2: No auth middleware on dashboard API → deferred (systemic architectural issue)
+  - M1: ConfirmDialog double-click vulnerability → internal `processing` state gates clicks
+  - M2: Router redundant DB query on paused/learning → `isPriceTriggerSync` for non-active
+  - M3: GroupDealsView silent error swallowing → `fetchError` state + retry button
+  - M4: `onCountChange` unstable refs → `useRef` callback cache pattern
+  - M5: RLS policy too permissive → restricted to `authenticated` role
+  - L1-L3: Dead `_vars`, missing count badge, stale comments (deferred)
 
 ### Tasks
 
@@ -899,19 +926,19 @@ The bot router runs in **shadow mode** (`TRIGGER_SHADOW_MODE`), comparing both o
 ```
 
 ### Acceptance Criteria
-- [ ] Dashboard sidebar shows exactly 3 pages: Overview, Groups & Rules, Costs
-- [ ] No "Trigger Patterns" tab or page exists
-- [ ] No "Response Rules" section in expanded group view
-- [ ] Bot router uses `TRIGGER_SHADOW_MODE=new` (new `group_triggers` table is authoritative)
-- [ ] At least one group has realistic demo data (3 rules, 8+ triggers, spread config)
-- [ ] Active rule badge shows correctly for current time of day
-- [ ] Trigger tester returns expected results with rule context
-- [ ] No single-click destructive actions (delete, cancel)
-- [ ] Visual feedback on all save/delete operations
-- [ ] Empty states are helpful, not confusing
-- [ ] At least one group in "active" mode with bot responding to WhatsApp messages
-- [ ] All external API failures show graceful fallbacks
-- [ ] Browser smoke test passed with no HIGH/MEDIUM bugs remaining
+- [x] Dashboard sidebar shows exactly 3 pages: Overview, Groups & Rules, Costs
+- [x] No "Trigger Patterns" tab or page exists
+- [x] No "Response Rules" section in expanded group view
+- [x] Bot router uses `group_triggers` table as authoritative (shadow mode removed)
+- [x] At least one group has realistic demo data (3 rules, 8+ triggers, spread config)
+- [x] Active rule badge shows correctly for current time of day
+- [x] Trigger tester returns expected results with rule context
+- [x] No single-click destructive actions (delete, cancel)
+- [x] Visual feedback on all save/delete operations
+- [x] Empty states are helpful, not confusing
+- [x] At least one group in "active" mode with bot responding to WhatsApp messages
+- [x] All external API failures show graceful fallbacks
+- [x] Browser smoke test passed with no HIGH/MEDIUM bugs remaining
 
 ### Sprint 6 Retrospective Lessons (Carry Forward)
 From Sprints 1-5:
@@ -923,24 +950,328 @@ From Sprints 1-5:
 
 ---
 
-## 12. Risk Register
+## 12. Sprint 7A: Editable System Keywords (PLANNED)
+
+### Goal
+Give Daniel the ability to edit the global system pattern keywords that control how the bot detects deal flow messages, price requests, and transaction links — **without touching the router or risking live group behavior.** This is the highest-value, lowest-risk improvement we can ship.
+
+### Background
+Sprint 6 delivered:
+- `system_patterns` table in Supabase (4 pattern categories seeded)
+- `systemPatternService.ts` with 1-minute cache, hardcoded fallback, sync+async reads
+- Dashboard API: `GET /api/system-patterns` + `PUT /api/system-patterns/:key` (20 route tests)
+- Read-only System Patterns accordion panel in the dashboard
+
+The router already reads keywords from `systemPatternService` for deal detection (`isDealCancellation`, `isPriceLockMessage`, `isConfirmationMessage`) and price triggers (`isPriceTrigger`). **Editing keywords in the `system_patterns` table already changes bot behavior** — the cache refreshes every 60 seconds. Sprint 7A makes this accessible to Daniel through the dashboard.
+
+### Design Decisions (Party Mode — John, Sally, Winston, Bob)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | **Keep system patterns as a separate global layer** | System patterns apply to ALL groups. `group_triggers` is per-group. Merging them creates scope mismatch and data duplication (7 patterns x N groups). |
+| 2 | **Editable panel, not unified trigger list (yet)** | Simplest path to Daniel value. Replace the read-only gray cards with editable keyword chips. No schema changes, no router changes. |
+| 3 | **API auth ships first (Task 7A.0)** | Unauthenticated keyword editing is unacceptable. Shared secret auth on all write endpoints before anything else. |
+| 4 | **Inline pattern tester** | Daniel adds a keyword, types a test message, sees which pattern matches. Instant confidence without needing to test via WhatsApp. |
+| 5 | **Two-phase approach** | 7A ships fast and safe (editable keywords + auth). 7B ships carefully (full router consolidation). Daniel gets value without risk. |
+
+### Prerequisites
+- Sprint 6 complete (demo with Daniel done, feedback incorporated) ✅
+- `system_patterns` table seeded and operational ✅
+- System patterns API tested (20 route tests) ✅
+
+### Tasks
+
+#### 7A.0 Dashboard API Authentication (BLOCKER)
+**Objective**: Protect all dashboard write endpoints with basic authentication. Daniel's bot configuration must not be publicly writable.
+
+**Why this is first**: Sprint 6 retro flagged this as HIGH debt. Sprint 7A adds editable global keywords — anyone who discovers the URL could change what the bot responds to. This must be fixed before shipping 7A to production.
+
+- [ ] Choose auth strategy: shared secret header (`X-Dashboard-Key`) — simplest, sufficient for single-user internal tool
+- [ ] Create auth middleware: `src/dashboard/middleware/auth.ts`
+  - Check `X-Dashboard-Key` header against `DASHBOARD_SECRET` env var
+  - Apply to all `PUT`, `POST`, `DELETE` routes
+  - `GET` routes remain open (read-only data is not sensitive)
+  - Return 401 with clear error message on failure
+- [ ] Add `DASHBOARD_SECRET` to `.env` on VPS
+- [ ] Update dashboard frontend `api.ts` to include the secret header in all write requests
+  - Secret stored in environment variable (`VITE_DASHBOARD_KEY`) or hardcoded for internal tool
+- [ ] Add auth middleware tests (valid key, missing key, wrong key, GET bypass)
+- [ ] Verify all existing CRUD operations still work with auth header
+
+**Files affected**: New `src/dashboard/middleware/auth.ts`, `src/dashboard/server.ts`, `dashboard/src/lib/api.ts`, VPS `.env`
+
+**>> REVIEW GATE: All write endpoints require auth, all read endpoints still open, existing tests updated**
+
+#### 7A.1 Editable System Patterns Panel
+**Objective**: Transform the read-only System Patterns accordion into an editable keyword manager. Daniel can add, remove, and modify keywords for each pattern category.
+
+**Daniel's experience**: Opens a group → expands System Patterns → sees 4 categories (Price Request, Deal Cancellation, Price Lock, Deal Confirmation) → each shows editable keyword chips → clicks a chip to remove it → types a new keyword and presses Enter → chip appears → clicks "Save" → green flash confirmation → toast: "Bot now responds to 'confirmar' in all groups"
+
+- [ ] Replace static `SYSTEM_PATTERNS` data in `GroupsAndRulesPage.tsx` with live data from `GET /api/system-patterns`
+- [ ] Create `SystemPatternEditor` component (or extend existing panel):
+  - Each pattern category as an editable card
+  - Keywords displayed as removable chips (click X to remove)
+  - Text input to add new keywords (Enter to add, comma-separated supported)
+  - "Save" button per category (or auto-save with debounce)
+  - Handler badge color-coded: green=PRICE_HANDLER, blue=DEAL_HANDLER, purple=TRONSCAN_HANDLER
+  - Pattern type badge (contains/regex) — read-only, not editable by Daniel
+  - Description text explaining what this pattern does (from DB)
+  - `SYSTEM` badge + subtle lock icon on non-editable fields (handler, pattern_type)
+- [ ] On save: call `PUT /api/system-patterns/:key` with updated keywords array
+  - Optimistic UI: show green flash immediately
+  - Toast: "Bot now responds to '{keyword}' for {category}" (include specific keyword if one was added)
+  - Error toast with retry option if save fails
+- [ ] Validation feedback:
+  - Duplicate keyword detection (visual warning before save)
+  - Empty keyword prevention (trim + reject whitespace-only)
+  - Max 20 keywords per pattern (visual counter: "3/20 keywords")
+  - Max 50 chars per keyword (truncate input)
+- [ ] Loading state: skeleton cards while fetching from API
+- [ ] Error state: "Unable to load system patterns — tap to retry" (reuse Sprint 6 pattern)
+
+**Files affected**: `dashboard/src/pages/GroupsAndRulesPage.tsx`, potentially new `dashboard/src/components/groups/SystemPatternEditor.tsx`
+
+**>> REVIEW GATE: Daniel can edit keywords, save persists to DB, bot behavior changes within 60 seconds (cache TTL)**
+
+#### 7A.2 Inline Pattern Tester
+**Objective**: Let Daniel type a test message and see which system pattern (if any) matches. Builds confidence that keyword changes work without needing to test via WhatsApp.
+
+**Daniel's experience**: Below the system patterns cards, there's a "Test a message" input. Daniel types "confirmar" → sees: "Match: Deal Confirmation — this message would trigger deal confirmation." Types "hello" → sees: "No match — this message won't trigger any system pattern." Types "preço do usdt" → sees: "Match: Price Request — this message would trigger a price quote."
+
+- [ ] Create test endpoint: `POST /api/system-patterns/test`
+  - Body: `{ message: string }`
+  - Response: `{ matched: boolean, patternKey?: string, category?: string, handler?: string, matchedKeyword?: string }`
+  - Logic: load all patterns from `systemPatternService`, check each pattern's keywords against the message using the pattern's `patternType` (contains vs regex)
+  - Return first match (highest priority) or `{ matched: false }`
+- [ ] Add route tests for test endpoint (match, no match, empty message, multiple matches returns first)
+- [ ] Create inline tester UI component:
+  - Text input with placeholder "Type a message to test..."
+  - Results shown inline below input (no modal)
+  - Match: green card with pattern name, handler, matched keyword highlighted
+  - No match: gray card with "No system pattern match"
+  - Debounced (300ms) — tests as Daniel types
+  - Clear button to reset
+- [ ] Tester uses the **saved** keywords (from DB), not unsaved edits — so Daniel must save first, then test
+
+**Files affected**: `src/dashboard/api/systemPatterns.ts`, new UI component
+
+**>> REVIEW GATE: Tester accurately reflects saved keywords, debounced, clear match/no-match feedback**
+
+#### 7A.3 Deploy & Verify
+**Objective**: Ship Sprint 7A to production and verify Daniel's experience end-to-end.
+
+- [ ] Build + test locally (all tests pass, TypeScript clean)
+- [ ] Deploy to VPS (rsync + PM2 restart)
+- [ ] Verify auth middleware blocks unauthenticated writes (`curl -X PUT` without header → 401)
+- [ ] Verify auth middleware allows authenticated writes (`curl -X PUT -H "X-Dashboard-Key: ..."` → 200)
+- [ ] Verify dashboard frontend sends auth header on save operations
+- [ ] Edit a keyword via dashboard → verify bot behavior changes within 60 seconds
+- [ ] Test inline pattern tester with known keywords
+- [ ] Verify no regression on existing trigger CRUD, rule CRUD, deal operations
+
+**>> REVIEW GATE: Production verified, auth working, keyword editing working, no regressions**
+
+### Task Dependencies
+
+```
+7A.0 Dashboard API Auth (FIRST — blocker)
+ ├── 7A.1 Editable System Patterns Panel (needs auth for saves)
+ │    └── 7A.2 Inline Pattern Tester (needs editable panel as context)
+ └── 7A.3 Deploy & Verify (LAST — needs everything done)
+```
+
+### Acceptance Criteria
+- [ ] All dashboard write endpoints require `X-Dashboard-Key` header
+- [ ] Read endpoints remain open (no auth required)
+- [ ] Daniel can add, remove, and edit keywords for all 4 system pattern categories
+- [ ] Changes persist to Supabase and take effect within 60 seconds (cache TTL)
+- [ ] Visual feedback on save (green flash + descriptive toast)
+- [ ] Inline pattern tester shows match/no-match as Daniel types
+- [ ] Validation prevents empty keywords, duplicates, exceeding limits
+- [ ] Error states with retry for API failures
+- [ ] All existing tests pass + new tests for auth + tester endpoint
+- [ ] Production deployed and verified
+
+### Sprint 7A Retrospective Lessons (Carry Forward)
+From Sprints 1-6:
+1. API ROUTE TESTS ARE MANDATORY — ship with code, not as follow-up
+2. VALIDATE AT API BOUNDARY — all POST/PUT/DELETE endpoints validate input
+3. STATIC TAILWIND CLASSES ONLY — no dynamic template literals
+4. AUTH BEFORE FEATURES — don't ship writable endpoints without protection
+5. TEST IN PRODUCTION — curl verification on VPS, not just local
+
+---
+
+## 13. Sprint 7B: Full Trigger Engine Consolidation (PLANNED)
+
+### Goal
+Migrate all hardcoded bot pattern detection (deal flow, tronscan) into the database-driven `group_triggers` system, creating a single routing layer. This is the high-risk architectural refactor that eliminates dual-layer routing. Ship only after 7A is stable and Daniel is comfortable with keyword editing.
+
+### Background
+After Sprint 7A, Daniel can edit system keywords and the bot respects them. But routing still uses two layers:
+1. **System patterns** (global, read from `systemPatternService`) for deal/price/tronscan detection
+2. **Group triggers** (per-group, read from `triggerService`) for user-configured triggers
+
+Sprint 7B collapses these into one routing path through `group_triggers`, with system patterns seeded as `is_system: true` rows.
+
+### Prerequisites
+- Sprint 7A complete and stable in production
+- Daniel comfortable with keyword editing (no support issues)
+- Auth middleware operational on all write endpoints
+
+### Tasks
+
+#### 7B.1 New Action Types
+**Objective**: Extend the `group_triggers` action type vocabulary to support deal flow, tronscan, and receipt routing.
+
+- [ ] Add new action types to `group_triggers` schema CHECK constraint:
+  - `deal_lock` — Locks the quoted rate for the client's deal
+  - `deal_cancel` — Cancels the client's active deal
+  - `deal_confirm` — Confirms and completes the locked deal
+  - `deal_volume` — Extracts volume amount and initiates a deal quote
+  - `tronscan_process` — Extracts transaction hash and updates Excel log
+  - `receipt_process` — Processes PDF/image receipt attachment
+- [ ] Create migration: `ALTER TABLE group_triggers DROP CONSTRAINT ... ADD CONSTRAINT ... CHECK (action_type IN (...))`
+- [ ] Update `triggerService.ts` action type validation
+- [ ] Update `actionExecutor.ts` with execution logic for each new action type
+- [ ] Add tests for new action types (service + API route tests)
+
+**>> REVIEW GATE: Schema and executor logic reviewed, all tests pass**
+
+#### 7B.2 System Triggers in group_triggers
+**Objective**: Seed system patterns as `is_system` rows in `group_triggers` for each active group. These are non-deletable but keyword/priority editable.
+
+**Architectural note**: This creates per-group copies of global patterns. The `system_patterns` table (Sprint 6/7A) remains as the **global source of truth** for default keywords. The `group_triggers` `is_system` rows are per-group overrides. When Daniel edits via the System Patterns panel, it updates the global defaults. Per-group customization is a future capability.
+
+- [ ] Add `is_system BOOLEAN DEFAULT false` column to `group_triggers`
+- [ ] Create seed migration: for each active group, insert system triggers:
+  - Price keywords from `system_patterns` → `price_quote` action (contains, P100, is_system=true)
+  - Deal cancellation keywords → `deal_cancel` action (regex, P90, is_system=true)
+  - Price lock keywords → `deal_lock` action (regex, P90, is_system=true)
+  - Deal confirmation keywords → `deal_confirm` action (regex, P90, is_system=true)
+  - Volume pattern → `deal_volume` action (regex, P80, is_system=true)
+  - Tronscan URL pattern → `tronscan_process` action (regex, P95, is_system=true)
+- [ ] Receipt detection remains code-level (MIME type, not text pattern)
+- [ ] API protection: `DELETE` on `is_system` triggers returns 403 "System triggers cannot be deleted"
+- [ ] API allows `PUT` on `is_system` triggers for keyword/priority editing
+- [ ] Add tests for is_system protection (delete blocked, update allowed)
+
+**>> REVIEW GATE: System triggers seeded per group, delete protection verified**
+
+#### 7B.3 Router Refactor (Gradual Cutover)
+**Objective**: Migrate routing from hardcoded detection functions to database triggers. Done gradually — one action type at a time — with validation at each step.
+
+**Cutover order** (safest first):
+1. **Price triggers first** — already partially routed via `group_triggers` from Sprint 3. Remove `isPriceTrigger()` fallback.
+2. **Deal flow second** — `isDealCancellation`, `isPriceLockMessage`, `isConfirmationMessage`, `hasVolumeInfo`. Replace with database trigger matches for `deal_*` action types.
+3. **Tronscan third** — `hasTronscanLink`. Replace with database trigger match for `tronscan_process`.
+
+For each step:
+- [ ] Update `routeMessage()` to check database triggers for that action type
+- [ ] Remove the corresponding hardcoded detection function call
+- [ ] Run full router test suite — all must pass
+- [ ] Deploy to VPS and verify behavior in production
+- [ ] Monitor logs for 1 hour before proceeding to next step
+
+Final router structure:
+```
+1. Mode check (paused → IGNORE, learning/assisted → OBSERVE_ONLY)
+2. Match trigger from database (all types — system + user)
+3. Route based on trigger's action_type:
+   - price_quote/volume_quote/text_response/ai_prompt → PRICE_HANDLER
+   - deal_lock/deal_cancel/deal_confirm/deal_volume → DEAL_HANDLER
+   - tronscan_process → TRONSCAN_HANDLER
+4. Receipt detection (MIME check) → RECEIPT_HANDLER
+5. No match → IGNORE
+```
+
+- [ ] Keep `detectReceiptType()` in router (MIME-based, not text pattern)
+- [ ] Update all router tests for new routing structure
+- [ ] Remove dead detection function imports after all cutovers verified
+
+**>> REVIEW GATE: Router uses single trigger path for each action type, all tests pass, production verified at each step**
+
+#### 7B.4 Unified Trigger List in Dashboard
+**Objective**: Replace the read-only System Patterns panel with system triggers displayed inline in the existing Triggers section. Daniel sees one unified list: system triggers (non-deletable, SYSTEM badge) at the top, user triggers below.
+
+- [ ] Remove `systemPatterns` accordion section from `GroupsAndRulesPage.tsx`
+- [ ] Remove static `SYSTEM_PATTERNS` const
+- [ ] Update `GroupTriggersEditor.tsx` to fetch both user and system triggers
+- [ ] System triggers displayed with:
+  - `SYSTEM` badge (teal/slate color scheme)
+  - Lock icon on non-editable fields (action type, handler)
+  - Editable keywords and priority
+  - No delete button
+- [ ] User triggers displayed normally (full CRUD)
+- [ ] Sort: system triggers first (by priority DESC), then user triggers
+- [ ] Add new action type options to trigger creation modal (deal_lock, deal_cancel, etc.) for power users
+- [ ] Inline pattern tester updated to test both system and user triggers
+
+**>> REVIEW GATE: Unified trigger list, system triggers non-deletable, user triggers fully editable**
+
+#### 7B.5 Dead Code Cleanup
+**Objective**: Remove all hardcoded detection functions that are now replaced by database triggers.
+
+- [ ] Remove `isPriceTrigger()` and `isPriceTriggerSync()` from `src/utils/triggers.ts`
+- [ ] Remove `isDealCancellation()`, `isPriceLockMessage()`, `isConfirmationMessage()` from `src/handlers/deal.ts`
+- [ ] Remove `hasVolumeInfo()` from `src/handlers/deal.ts`
+- [ ] Remove `hasTronscanLink()` from `src/utils/triggers.ts`
+- [ ] Remove `systemPatternService.ts` imports from detection functions (if no longer needed)
+- [ ] Update all test files that reference removed functions
+- [ ] Verify no orphaned imports or dead code remain
+
+**Note**: Keep `systemPatternService.ts` itself alive — it's still used by Sprint 7A's editable panel and as the global keyword source.
+
+**>> REVIEW GATE: No dead detection functions, all tests pass, no orphaned imports**
+
+### Task Dependencies
+
+```
+7B.1 New Action Types (FIRST — schema foundation)
+ ├── 7B.2 System Triggers in group_triggers (needs action types)
+ │    └── 7B.3 Router Refactor — Gradual Cutover (needs system triggers seeded)
+ │         └── 7B.4 Unified Trigger List (needs router using triggers)
+ │              └── 7B.5 Dead Code Cleanup (LAST — after everything verified)
+```
+
+### Risk Mitigation
+- **Gradual cutover**: One action type at a time (price → deal → tronscan). Deploy and verify at each step.
+- **Rollback**: If a cutover breaks production, revert the router change and restore the hardcoded function. System triggers in DB don't cause harm if unused.
+- **Receipt stays in code**: MIME-type detection is inherently different from text pattern matching. No benefit to database storage.
+- **Production monitoring**: 1-hour observation window after each cutover step before proceeding.
+- **Dual-layer safety net**: During cutover, both database triggers and hardcoded functions exist. Only remove hardcoded functions in 7B.5 after all cutovers are stable.
+
+### Acceptance Criteria
+- [ ] All message routing decisions made via database triggers (except receipt MIME detection)
+- [ ] No hardcoded pattern detection functions in router (after 7B.5)
+- [ ] Daniel sees unified trigger list with system + user triggers
+- [ ] System triggers marked as non-deletable (SYSTEM badge, no delete button, 403 on API)
+- [ ] Deal flow works identically before and after migration (verified at each cutover step)
+- [ ] Gradual cutover completed: price → deal → tronscan
+- [ ] All existing tests pass + new tests for action types + is_system protection
+- [ ] Production stable for 1+ hours after each cutover step
+
+---
+
+## 14. Risk Register
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Schedule overlap confusion | Medium | Priority system, UI shows overlap warnings |
 | Timezone edge cases (DST) | High | Using native `Intl.DateTimeFormat` (no deps), tested in ruleService.test.ts |
-| Migration breaks existing triggers | High | Shadow mode comparison before cutover |
 | Rule switching mid-deal | Medium | Lock rule at deal start |
 | UI complexity | High | User testing with Daniel before sprint completion |
-| Demo data looks fake | Medium | Seed through dashboard UI using realistic OTC scenarios |
-| Accidental deletion during demo | High | Confirmation dialogs on all destructive actions (Sprint 6.2) |
-| External API failure during demo | Medium | Fallback values + clear error states (Sprint 6.6) |
-| Bot doesn't respond in demo group | High | Pre-test in active mode with known trigger phrases (Sprint 6.5) |
-| Dashboard unresponsive on mobile | Low | Smoke test on mobile viewport (Sprint 6.8) |
+| Accidental deletion during demo | High | Confirmation dialogs on all destructive actions (Sprint 6) |
+| External API failure during demo | Medium | Fallback values + clear error states (Sprint 6) |
+| Unauthenticated API access | High | Shared secret auth middleware (Sprint 7A.0) |
+| Router refactor breaks live groups | Critical | Gradual cutover with 1-hour observation per step (Sprint 7B.3) |
+| System keyword edit breaks bot | Medium | 60-second cache TTL + hardcoded fallback if DB unreachable |
+| Scope mismatch: global vs per-group | Medium | System patterns stay global (7A); per-group overrides in 7B |
+| Daniel loses trust after regression | High | Ship 7A first (zero router risk), 7B only after 7A is stable |
 
 ---
 
-## 13. Review Process
+## 15. Review Process
 
 Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 
@@ -953,21 +1284,24 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 
 ---
 
-## 14. Glossary
+## 16. Glossary
 
 | Term | Definition |
 |------|------------|
 | **Trigger** | A phrase pattern that activates a bot response (belongs to group) |
+| **System Pattern** | Global bot keyword pattern (price, deal, tronscan) — editable via dashboard (Sprint 7A), optionally migrated to per-group triggers (Sprint 7B) |
+| **System Trigger** | A `group_triggers` row with `is_system: true` — non-deletable, keywords editable (Sprint 7B) |
 | **Rule** | A time-based configuration that controls pricing behavior |
 | **Active Rule** | The rule whose schedule matches current time (highest priority wins) |
 | **Pricing Source** | Where to get exchange rate: Commercial Dollar or USDT/BRL Binance |
 | **Spread** | Markup/markdown on base rate (basis points or absolute BRL) |
 | **Rule-Aware Action** | Action type that uses active rule's config (e.g., `price_quote`) |
 | **Deal Flow** | Stateful process: quote → lock → compute → confirm |
+| **Pattern Tester** | Inline UI that tests a message against system patterns or triggers, showing what would match |
 
 ---
 
-## 15. Changelog
+## 16. Changelog
 
 | Date | Change | By |
 |------|--------|-----|
@@ -989,4 +1323,15 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 | 2026-02-03 | Sprint 6 created: Demo Hardening & Production Readiness (8 tasks) | System |
 | 2026-02-03 | Sprint 6 restructured: Added Task 6.1 Trigger Consolidation as blocker, renumbered to 9 tasks | BMAD Agents (Party Mode) |
 | 2026-02-03 | Decision: Remove Trigger Patterns tab, cut over router to new system, remove old Response Rules | BMAD Agents (John, Winston, Sally) |
+| 2026-02-03 | Added read-only System Patterns panel to dashboard (visibility into hardcoded bot patterns) | System |
+| 2026-02-03 | Sprint 7 planned: Trigger Engine Consolidation (migrate hardcoded patterns to database) — later restructured into 7A/7B | System |
+| 2026-02-04 | Sprint 6 marked complete (all 9 tasks, code review 10 issues, 7 fixed) | System |
+| 2026-02-04 | Sprint 6 code review complete (2 HIGH, 5 MEDIUM, 3 LOW — 7 fixed, 3 deferred) | System |
+| 2026-02-04 | Sprint 6 deployed to production VPS + system_patterns migration applied | System |
+| 2026-02-04 | API tests added for system patterns endpoints (20 tests, Sprint 4 retro action item) | System |
+| 2026-02-04 | Sprint 6 retrospective conducted | BMAD Agents |
+| 2026-02-04 | Sprint 7 restructured into 7A + 7B via party-mode consensus (John, Sally, Winston, Bob) | BMAD Agents (Party Mode) |
+| 2026-02-04 | Decision: Prioritize Daniel's experience — editable keywords first (7A), router consolidation second (7B) | BMAD Agents |
+| 2026-02-04 | Decision: Add dashboard API auth (shared secret) as Sprint 7A.0 blocker | BMAD Agents (Winston, John) |
+| 2026-02-04 | Decision: Add inline pattern tester for confidence before saving keywords | BMAD Agents (Sally) |
 

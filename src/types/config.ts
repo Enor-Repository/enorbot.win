@@ -103,6 +103,13 @@ export const envSchema = z.object({
     .string()
     .default('true')
     .transform(v => v === 'true'),
+  DASHBOARD_SECRET: z
+    .string()
+    .min(8, 'DASHBOARD_SECRET must be at least 8 characters')
+    .optional(),
+  ALLOWED_ORIGINS: z
+    .string()
+    .optional(),
 })
 
 export type EnvConfig = z.infer<typeof envSchema>

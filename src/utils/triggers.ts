@@ -1,26 +1,66 @@
 /**
  * Price trigger detection for eNorBOT.
  * Detects keywords that trigger price quote requests.
+ * Keywords are loaded from Supabase via systemPatternService (editable in dashboard).
  */
 
+import { getKeywordsForPattern, getKeywordsForPatternSync } from '../services/systemPatternService.js'
+
 /**
- * Keywords that trigger price quote requests.
- * IMPORTANT: Keywords must be lowercase for case-insensitive matching.
- * Add new keywords here to expand trigger detection.
+ * Default price trigger keywords — used as compile-time reference only.
+ * At runtime, both async and sync callers read from the systemPatternService
+ * cache (populated from the system_patterns DB table, editable via dashboard).
+ * These defaults are only used before the first DB load completes.
  */
 export const PRICE_TRIGGER_KEYWORDS = ['preço', 'cotação'] as const
 
 /**
- * Check if a message contains a price trigger keyword.
- * Case-insensitive matching (message is normalized to lowercase).
+ * Check if a message contains a price trigger keyword (async).
+ * Keywords are loaded from the database (editable via dashboard).
+ * Used by the router for primary routing decisions.
  *
  * @param message - The message text to check
  * @returns true if message contains a trigger keyword
  */
-export function isPriceTrigger(message: string): boolean {
+export async function isPriceTrigger(message: string): Promise<boolean> {
   const normalized = message.toLowerCase()
-  // Keywords are already lowercase, no need to normalize them
-  return PRICE_TRIGGER_KEYWORDS.some(keyword => normalized.includes(keyword))
+  const keywords = await getKeywordsForPattern('price_request')
+  if (keywords.length === 0) return false
+  return matchesWordBoundary(normalized, keywords)
+}
+
+/**
+ * Synchronous price trigger check using cached DB keywords.
+ * Reads from the in-memory cache populated by previous async calls.
+ * Falls back to PRICE_TRIGGER_KEYWORDS if cache is empty (before first DB load).
+ * Used by the message classifier which cannot be async.
+ */
+export function isPriceTriggerSync(message: string): boolean {
+  const normalized = message.toLowerCase()
+  const keywords = getKeywordsForPatternSync('price_request')
+  if (keywords.length === 0) return false
+  return matchesWordBoundary(normalized, keywords)
+}
+
+/**
+ * Build a Unicode-aware word boundary regex for the given keywords.
+ * Uses lookbehind/lookahead for Latin letter boundaries (ç, ã, é, etc.)
+ * that JS \b doesn't handle. Shared by triggers.ts and systemPatternService.ts.
+ */
+export function buildWordBoundaryRegex(keywords: string[]): RegExp {
+  const escaped = keywords.map(k => k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  return new RegExp(
+    `(?<![a-zA-Z\\u00C0-\\u024F])(${escaped.join('|')})(?![a-zA-Z\\u00C0-\\u024F])`
+  )
+}
+
+/**
+ * Check if normalized text contains any keyword as a whole word.
+ * Prevents false positives: keyword "ok" won't match in "books",
+ * keyword "tx" won't match in "text".
+ */
+function matchesWordBoundary(normalizedText: string, keywords: string[]): boolean {
+  return buildWordBoundaryRegex(keywords).test(normalizedText)
 }
 
 /**

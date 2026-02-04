@@ -19,27 +19,20 @@ export const API_ENDPOINTS = {
   groupConfig: (jid: string): string => `${API_BASE_URL}/api/groups/${jid}/config`,
   /** Update AI threshold (D.12) */
   groupThreshold: (jid: string): string => `${API_BASE_URL}/api/groups/${jid}/threshold`,
-  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. Use groupTriggers instead. */
-  rules: `${API_BASE_URL}/api/rules`,
-  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. */
-  rule: (id: string): string => `${API_BASE_URL}/api/rules/${id}`,
-  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. */
-  groupRules: (groupJid: string): string => `${API_BASE_URL}/api/rules?groupJid=${groupJid}`,
   /** Get players for specific group */
   groupPlayers: (groupJid: string): string => `${API_BASE_URL}/api/groups/${groupJid}/players`,
-  /** Update player role */
+  /** Update player role — backend route NOT YET IMPLEMENTED (no Express handler exists) */
   playerRole: (groupJid: string, playerJid: string): string => `${API_BASE_URL}/api/groups/${groupJid}/players/${playerJid}/role`,
-  /** @deprecated Sprint 6: Old rules system — kept for rollback safety net only. */
-  testRule: `${API_BASE_URL}/api/rules/test`,
   /** Cost summary (period=day|week|month) */
   costSummary: (period?: string): string =>
     `${API_BASE_URL}/api/costs/summary${period ? `?period=${period}` : ''}`,
   /** Cost breakdown by group */
-  costByGroup: `${API_BASE_URL}/api/costs/by-group`,
+  costByGroup: (period?: string): string =>
+    `${API_BASE_URL}/api/costs/by-group${period ? `?period=${period}` : ''}`,
   /** Cost trend over time (days=30) */
   costTrend: (days?: number): string =>
     `${API_BASE_URL}/api/costs/trend${days ? `?days=${days}` : ''}`,
-  /** Get all spread configs */
+  /** Get all spread configs — not currently used by any component */
   spreads: `${API_BASE_URL}/api/spreads`,
   /** Get/Update spread config for specific group */
   groupSpread: (groupJid: string): string => `${API_BASE_URL}/api/spreads/${encodeURIComponent(groupJid)}`,
@@ -63,10 +56,20 @@ export const API_ENDPOINTS = {
   /** Test a message against a group's triggers */
   groupTriggerTest: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/triggers/test`,
+  /** System status */
+  status: `${API_BASE_URL}/api/status`,
+  /** Current USDT/BRL price */
+  priceUsdtBrl: `${API_BASE_URL}/api/prices/usdt-brl`,
+  /** Activity heatmap for a group */
+  analyticsHeatmap: (groupId: string, days?: number): string =>
+    `${API_BASE_URL}/api/groups/${groupId}/analytics/heatmap${days ? `?days=${days}` : ''}`,
+  /** Player leaderboard for a group */
+  analyticsPlayers: (groupId: string, limit?: number): string =>
+    `${API_BASE_URL}/api/groups/${groupId}/analytics/players${limit ? `?limit=${limit}` : ''}`,
   /** Sprint 4: Get active deals for a group */
   groupDeals: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals`,
-  /** Sprint 4: Get all deals for a group (including terminal) */
+  /** Sprint 4: Get all deals for a group (including terminal) — not currently used by any component */
   groupDealsAll: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/all`,
   /** Sprint 4: Get deal history for a group */
@@ -81,6 +84,13 @@ export const API_ENDPOINTS = {
   /** Sprint 4: Trigger manual deal sweep */
   groupDealSweep: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/sweep`,
+  /** Sprint 7: Get all system patterns */
+  systemPatterns: `${API_BASE_URL}/api/system-patterns`,
+  /** Sprint 7: Update keywords for a specific system pattern */
+  systemPattern: (patternKey: string): string =>
+    `${API_BASE_URL}/api/system-patterns/${encodeURIComponent(patternKey)}`,
+  /** Sprint 7A.2: Test a message against all system patterns */
+  systemPatternTest: `${API_BASE_URL}/api/system-patterns/test`,
 } as const
 
 /**
@@ -88,3 +98,28 @@ export const API_ENDPOINTS = {
  */
 export type APIEndpoint = typeof API_ENDPOINTS
 export type APIEndpointKey = keyof APIEndpoint
+
+/**
+ * Dashboard auth secret from build-time env var.
+ * Sent as X-Dashboard-Key header on all write requests.
+ *
+ * NOTE: This value is embedded in the JS bundle at build time. It is NOT
+ * a true secret — anyone with browser DevTools can read it. The header
+ * acts as an accidental-write guard, not as a security boundary. For
+ * proper auth, replace with session-based authentication (Sprint 7B+).
+ */
+const DASHBOARD_SECRET = import.meta.env.VITE_DASHBOARD_SECRET || ''
+
+/**
+ * Returns headers object for write requests (POST/PUT/DELETE).
+ * Includes Content-Type and auth header if configured.
+ */
+export function writeHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (DASHBOARD_SECRET) {
+    headers['X-Dashboard-Key'] = DASHBOARD_SECRET
+  }
+  return headers
+}

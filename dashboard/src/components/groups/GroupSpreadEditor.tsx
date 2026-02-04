@@ -4,7 +4,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, Save, RotateCcw } from 'lucide-react'
-import { API_ENDPOINTS, API_BASE_URL } from '@/lib/api'
+import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 
 type SpreadMode = 'bps' | 'abs_brl' | 'flat'
@@ -31,6 +31,7 @@ interface PreviewResult {
 
 interface GroupSpreadEditorProps {
   groupJid: string
+  hideTitle?: boolean
 }
 
 const DEFAULT_CONFIG: Omit<SpreadConfig, 'groupJid'> = {
@@ -43,7 +44,7 @@ const DEFAULT_CONFIG: Omit<SpreadConfig, 'groupJid'> = {
   language: 'pt-BR',
 }
 
-export function GroupSpreadEditor({ groupJid }: GroupSpreadEditorProps) {
+export function GroupSpreadEditor({ groupJid, hideTitle }: GroupSpreadEditorProps) {
   const [config, setConfig] = useState<SpreadConfig>({ ...DEFAULT_CONFIG, groupJid })
   const [originalConfig, setOriginalConfig] = useState<SpreadConfig | null>(null)
   const [loading, setLoading] = useState(true)
@@ -100,7 +101,7 @@ export function GroupSpreadEditor({ groupJid }: GroupSpreadEditorProps) {
   // Fetch Binance rate for preview
   const fetchBinanceRate = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/prices/usdt-brl`)
+      const response = await fetch(API_ENDPOINTS.priceUsdtBrl)
       if (!response.ok) throw new Error('Failed to fetch rate')
       const data = await response.json()
       setBinanceRate(data.price)
@@ -117,7 +118,7 @@ export function GroupSpreadEditor({ groupJid }: GroupSpreadEditorProps) {
     try {
       const response = await fetch(API_ENDPOINTS.spreadPreview, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify({
           binanceRate,
           spreadMode: config.spreadMode,
@@ -170,7 +171,7 @@ export function GroupSpreadEditor({ groupJid }: GroupSpreadEditorProps) {
     try {
       const response = await fetch(API_ENDPOINTS.groupSpread(groupJid), {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify({
           spreadMode: config.spreadMode,
           sellSpread: config.sellSpread,
@@ -239,12 +240,14 @@ export function GroupSpreadEditor({ groupJid }: GroupSpreadEditorProps) {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between pb-2 border-b border-amber-500/10">
-        <h4 className="text-xs font-mono text-amber-400 uppercase tracking-widest flex items-center gap-2">
-          <span className="h-1 w-1 rounded-full bg-amber-400 animate-pulse"></span>
-          Pricing Configuration
-        </h4>
-        <div className="flex items-center gap-2">
+      <div className={`flex items-center justify-between${hideTitle ? '' : ' pb-2 border-b border-amber-500/10'}`}>
+        {!hideTitle && (
+          <h4 className="text-xs font-mono text-amber-400 uppercase tracking-widest flex items-center gap-2">
+            <span className="h-1 w-1 rounded-full bg-amber-400 animate-pulse"></span>
+            Pricing Configuration
+          </h4>
+        )}
+        <div className={`flex items-center gap-2${hideTitle ? ' ml-auto' : ''}`}>
           {hasChanges && (
             <button
               onClick={resetConfig}

@@ -25,6 +25,7 @@ import type { RouterContext } from '../bot/router.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { logBotMessage } from '../services/messageHistory.js'
 import { recordMessageSent } from '../bot/state.js'
+import { getKeywordsForPattern } from '../services/systemPatternService.js'
 import {
   findClientDeal,
   createDeal,
@@ -774,30 +775,35 @@ export function stopDealSweepTimer(): void {
 
 /**
  * Check if a message is a deal cancellation request.
+ * Keywords loaded from database (editable via dashboard).
  */
-export function isDealCancellation(message: string): boolean {
+export async function isDealCancellation(message: string): Promise<boolean> {
   const lower = message.toLowerCase().trim()
-  return /\b(cancela|cancelar|cancel)\b/.test(lower)
+  const keywords = await getKeywordsForPattern('deal_cancellation')
+  const pattern = new RegExp(`\\b(${keywords.map(k => k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`)
+  return pattern.test(lower)
 }
 
 /**
  * Check if a message is a price lock request.
- * Uses the same patterns as the message classifier's price_lock detection.
+ * Keywords loaded from database (editable via dashboard).
  */
-export function isPriceLockMessage(message: string): boolean {
+export async function isPriceLockMessage(message: string): Promise<boolean> {
   const lower = message.toLowerCase().trim()
-  return /\b(trava|lock|travar)\b/.test(lower)
+  const keywords = await getKeywordsForPattern('price_lock')
+  const pattern = new RegExp(`\\b(${keywords.map(k => k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`)
+  return pattern.test(lower)
 }
 
 /**
  * Check if a message is a deal confirmation.
- * Uses patterns matching the message classifier's confirmation detection.
+ * Keywords loaded from database (editable via dashboard).
  */
-export function isConfirmationMessage(message: string): boolean {
+export async function isConfirmationMessage(message: string): Promise<boolean> {
   const lower = message.toLowerCase().trim()
-  // H3 Fix: Removed "ok" and "vamos" — too broad, causes false positives in group chat.
-  // "fechado" (deal closed) and "confirma" variants are specific to deal confirmation context.
-  return /\b(fechado|fecha|fechar|confirma|confirmado|confirmed)\b/.test(lower)
+  const keywords = await getKeywordsForPattern('deal_confirmation')
+  const pattern = new RegExp(`\\b(${keywords.map(k => k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`)
+  return pattern.test(lower)
 }
 
 /**

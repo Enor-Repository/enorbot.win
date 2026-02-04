@@ -3,6 +3,7 @@
  */
 import { useState, useEffect } from 'react'
 import { Activity, WifiOff } from 'lucide-react'
+import { API_ENDPOINTS } from '@/lib/api'
 
 interface StatusData {
   connection: string
@@ -30,7 +31,7 @@ export function SystemStatus() {
 
   const checkStatus = async () => {
     try {
-      const response = await fetch('/api/status', {
+      const response = await fetch(API_ENDPOINTS.status, {
         signal: AbortSignal.timeout(5000), // 5 second timeout
       })
 

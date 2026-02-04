@@ -59,7 +59,7 @@ export function CostsPage() {
     try {
       const [summaryRes, groupsRes, trendRes] = await Promise.all([
         fetch(API_ENDPOINTS.costSummary(period), { signal }),
-        fetch(API_ENDPOINTS.costByGroup + `?period=${period}`, { signal }),
+        fetch(API_ENDPOINTS.costByGroup(period), { signal }),
         fetch(API_ENDPOINTS.costTrend(trendDays), { signal }),
       ])
 

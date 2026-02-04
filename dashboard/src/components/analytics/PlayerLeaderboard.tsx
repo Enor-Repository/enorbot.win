@@ -6,6 +6,7 @@ import { useState, useEffect } from 'react'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ArrowUpDown, ArrowUp, ArrowDown, Search } from 'lucide-react'
+import { API_ENDPOINTS } from '@/lib/api'
 
 interface Player {
   jid: string
@@ -49,9 +50,7 @@ export function PlayerLeaderboard({ groupId, limit = 20, onRoleChange }: PlayerL
     const fetchPlayers = async () => {
       try {
         setLoading(true)
-        const response = await fetch(
-          `/api/groups/${groupId}/analytics/players?limit=${limit}`
-        )
+        const response = await fetch(API_ENDPOINTS.analyticsPlayers(groupId, limit))
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`)

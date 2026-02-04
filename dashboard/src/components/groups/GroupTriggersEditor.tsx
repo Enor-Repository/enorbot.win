@@ -12,8 +12,9 @@
  */
 import { useState, useEffect, useCallback } from 'react'
 import { Plus, Trash2, Edit, X, Zap, Search, ToggleLeft, ToggleRight } from 'lucide-react'
-import { API_ENDPOINTS } from '@/lib/api'
+import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 
 // ============================================================================
 // Types (intentional duplication to avoid cross-build dependencies — L2 pattern)
@@ -72,11 +73,11 @@ const PATTERN_TYPE_LABELS: Record<PatternType, string> = {
   regex: 'Regex',
 }
 
-const ACTION_TYPE_CONFIG: Record<TriggerActionType, { label: string; icon: string; color: string }> = {
-  price_quote: { label: 'Price Quote', icon: '📊', color: 'green' },
-  volume_quote: { label: 'Volume Quote', icon: '🧮', color: 'blue' },
-  text_response: { label: 'Text Response', icon: '💬', color: 'purple' },
-  ai_prompt: { label: 'AI Prompt', icon: '🤖', color: 'cyan' },
+const ACTION_TYPE_CONFIG: Record<TriggerActionType, { label: string; icon: string; badge: string; active: string }> = {
+  price_quote: { label: 'Price Quote', icon: '📊', badge: 'bg-green-500/20 text-green-300', active: 'bg-green-500/20 border-green-500/50 text-green-300' },
+  volume_quote: { label: 'Volume Quote', icon: '🧮', badge: 'bg-blue-500/20 text-blue-300', active: 'bg-blue-500/20 border-blue-500/50 text-blue-300' },
+  text_response: { label: 'Text Response', icon: '💬', badge: 'bg-purple-500/20 text-purple-300', active: 'bg-purple-500/20 border-purple-500/50 text-purple-300' },
+  ai_prompt: { label: 'AI Prompt', icon: '🤖', badge: 'bg-cyan-500/20 text-cyan-300', active: 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300' },
 }
 
 // ============================================================================
@@ -85,9 +86,11 @@ const ACTION_TYPE_CONFIG: Record<TriggerActionType, { label: string; icon: strin
 
 interface GroupTriggersEditorProps {
   groupJid: string
+  hideTitle?: boolean
+  onCountChange?: (count: number) => void
 }
 
-export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
+export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: GroupTriggersEditorProps) {
   const [triggers, setTriggers] = useState<GroupTrigger[]>([])
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
@@ -95,6 +98,9 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
   const [form, setForm] = useState<TriggerForm>({ ...DEFAULT_FORM })
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<GroupTrigger | null>(null)
+  const [flashId, setFlashId] = useState<string | null>(null)
+  const [fetchError, setFetchError] = useState(false)
 
   // Tester state
   const [showTester, setShowTester] = useState(false)
@@ -105,6 +111,7 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
   // ---- Data Fetching ----
 
   const fetchTriggers = useCallback(async () => {
+    setFetchError(false)
     try {
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
@@ -118,8 +125,11 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
 
       const data = await response.json()
       setTriggers(data.triggers || [])
-    } catch {
-      // Silent fail on fetch — triggers may not exist yet
+    } catch (e) {
+      // Show error if it's a real failure (timeout, network), not just empty triggers
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        setFetchError(true)
+      }
       setTriggers([])
     } finally {
       setLoading(false)
@@ -129,6 +139,11 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
   useEffect(() => {
     fetchTriggers()
   }, [fetchTriggers])
+
+  // Report count changes to parent
+  useEffect(() => {
+    onCountChange?.(triggers.length)
+  }, [triggers.length, onCountChange])
 
   // ---- Modal Management ----
 
@@ -210,7 +225,7 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
 
       const response = await fetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify({
           triggerPhrase: form.triggerPhrase.trim(),
           patternType: form.patternType,
@@ -226,9 +241,15 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
         throw new Error(errorData.message || errorData.error || `HTTP ${response.status}`)
       }
 
-      showToast({ type: 'success', message: editingTrigger ? 'Trigger updated' : 'Trigger created' })
+      const savedData = await response.json().catch(() => null)
+      const savedId = editingTrigger?.id || savedData?.trigger?.id
+      showToast({ type: 'success', message: editingTrigger ? `Trigger "${form.triggerPhrase.trim()}" updated` : `Trigger "${form.triggerPhrase.trim()}" created` })
       closeModal()
       await fetchTriggers()
+      if (savedId) {
+        setFlashId(savedId)
+        setTimeout(() => setFlashId(null), 1500)
+      }
     } catch (e) {
       showToast({ type: 'error', message: e instanceof Error ? e.message : 'Failed to save trigger' })
     } finally {
@@ -237,12 +258,11 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
   }
 
   const deleteTriggerById = async (triggerId: string) => {
-    if (!confirm('Delete this trigger?')) return
-
     setDeletingId(triggerId)
     try {
       const response = await fetch(API_ENDPOINTS.groupTrigger(groupJid, triggerId), {
         method: 'DELETE',
+        headers: writeHeaders(),
       })
 
       if (!response.ok) {
@@ -250,7 +270,8 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
         throw new Error(errorData.message || errorData.error || `HTTP ${response.status}`)
       }
 
-      showToast({ type: 'success', message: 'Trigger deleted' })
+      const deleted = triggers.find(t => t.id === triggerId)
+      showToast({ type: 'success', message: `Trigger "${deleted?.triggerPhrase || ''}" deleted` })
       await fetchTriggers()
     } catch (e) {
       showToast({ type: 'error', message: e instanceof Error ? e.message : 'Failed to delete trigger' })
@@ -263,12 +284,13 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
     try {
       const response = await fetch(API_ENDPOINTS.groupTrigger(groupJid, trigger.id), {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify({ isActive: !trigger.isActive }),
       })
 
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
+      showToast({ type: 'success', message: `Trigger "${trigger.triggerPhrase}" ${trigger.isActive ? 'disabled' : 'enabled'}` })
       await fetchTriggers()
     } catch {
       showToast({ type: 'error', message: 'Failed to toggle trigger' })
@@ -285,7 +307,7 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
     try {
       const response = await fetch(API_ENDPOINTS.groupTriggerTest(groupJid), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify({ message: testMessage }),
       })
 
@@ -318,12 +340,14 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
       <div className="space-y-3">
         {/* Section Header */}
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-teal-400 flex items-center gap-2">
-            <Zap className="h-4 w-4" />
-            Group Triggers
-            <span className="text-xs text-muted-foreground font-normal">({triggers.length})</span>
-          </h3>
-          <div className="flex items-center gap-2">
+          {!hideTitle && (
+            <h3 className="text-sm font-semibold text-teal-400 flex items-center gap-2">
+              <Zap className="h-4 w-4" />
+              Group Triggers
+              <span className="text-xs text-muted-foreground font-normal">({triggers.length})</span>
+            </h3>
+          )}
+          <div className={`flex items-center gap-2${hideTitle ? ' ml-auto' : ''}`}>
             <button
               onClick={() => setShowTester(!showTester)}
               className="px-2 py-1 text-xs font-mono rounded bg-teal-500/10 border border-teal-500/30 text-teal-300 hover:bg-teal-500/20 transition-colors"
@@ -387,11 +411,19 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
         )}
 
         {/* Triggers List */}
-        {triggers.length === 0 ? (
+        {fetchError ? (
+          <button
+            onClick={() => fetchTriggers()}
+            className="w-full px-4 py-6 text-center text-sm text-muted-foreground bg-red-500/5 border border-red-500/20 rounded-lg hover:bg-red-500/10 transition-colors"
+          >
+            <p>Unable to load triggers</p>
+            <p className="text-xs mt-1 text-red-400">Tap to retry</p>
+          </button>
+        ) : triggers.length === 0 ? (
           <div className="px-4 py-6 text-center text-sm text-muted-foreground bg-teal-500/5 border border-teal-500/10 rounded-lg">
             <Zap className="h-8 w-8 mx-auto mb-2 text-teal-500/30" />
-            <p>No triggers configured for this group</p>
-            <p className="text-xs mt-1">Add triggers to define how the bot responds to specific phrases</p>
+            <p>No triggers configured</p>
+            <p className="text-xs mt-1">Add triggers to define which messages the bot responds to.</p>
           </div>
         ) : (
           <div className="space-y-2">
@@ -400,8 +432,10 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
               return (
                 <div
                   key={trigger.id}
-                  className={`p-3 rounded-lg border transition-all ${
-                    trigger.isActive
+                  className={`p-3 rounded-lg border transition-all duration-500 ${
+                    flashId === trigger.id
+                      ? 'bg-green-500/20 border-green-500/40 ring-1 ring-green-500/30'
+                      : trigger.isActive
                       ? 'bg-teal-500/5 border-teal-500/20'
                       : 'bg-muted/10 border-border/20 opacity-60'
                   }`}
@@ -421,11 +455,14 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
                         }`}>
                           {PATTERN_TYPE_LABELS[trigger.patternType]}
                         </span>
-                        <span className={`px-1.5 py-0.5 text-[10px] font-mono rounded bg-${actionConfig.color}-500/20 text-${actionConfig.color}-300`}>
+                        <span className={`px-1.5 py-0.5 text-[10px] font-mono rounded ${actionConfig.badge}`}>
                           {actionConfig.icon} {actionConfig.label}
                         </span>
                         {trigger.priority > 0 && (
-                          <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-yellow-500/20 text-yellow-300">
+                          <span
+                            className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-yellow-500/20 text-yellow-300 cursor-help"
+                            title="Higher priority wins when multiple triggers match the same message"
+                          >
                             P{trigger.priority}
                           </span>
                         )}
@@ -456,7 +493,7 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
                         <Edit className="h-3.5 w-3.5" />
                       </button>
                       <button
-                        onClick={() => deleteTriggerById(trigger.id)}
+                        onClick={() => setConfirmDelete(trigger)}
                         disabled={deletingId === trigger.id}
                         className="p-1 rounded hover:bg-red-500/20 text-muted-foreground hover:text-red-400 transition-colors disabled:opacity-50"
                         title="Delete"
@@ -551,7 +588,7 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
                       onClick={() => setForm({ ...form, actionType: type, actionParams: {} })}
                       className={`px-3 py-2 text-xs font-mono rounded-lg border transition-all text-left ${
                         form.actionType === type
-                          ? `bg-${config.color}-500/20 border-${config.color}-500/50 text-${config.color}-300`
+                          ? config.active
                           : 'bg-muted/10 border-border/30 text-foreground hover:bg-muted/20'
                       }`}
                     >
@@ -675,6 +712,23 @@ export function GroupTriggersEditor({ groupJid }: GroupTriggersEditorProps) {
           </div>
         </div>
       )}
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        onOpenChange={(open) => { if (!open) setConfirmDelete(null) }}
+        title="Delete trigger"
+        description={`Delete trigger "${confirmDelete?.triggerPhrase}"? The bot will no longer respond to this phrase in this group.`}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        loading={deletingId === confirmDelete?.id}
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteTriggerById(confirmDelete.id)
+            setConfirmDelete(null)
+          }
+        }}
+      />
     </>
   )
 }

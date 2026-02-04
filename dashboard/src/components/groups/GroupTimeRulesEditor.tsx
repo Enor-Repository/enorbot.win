@@ -6,8 +6,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Plus, Trash2, Edit, X, Clock, Calendar, Zap, AlertTriangle, Eye } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { API_ENDPOINTS } from '@/lib/api'
+import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 
 // ============================================================================
 // Types (mirror of ruleService.ts types - kept local to avoid cross-build deps)
@@ -53,6 +54,8 @@ interface TimeRuleForm {
 
 interface GroupTimeRulesEditorProps {
   groupJid: string
+  hideTitle?: boolean
+  onCountChange?: (count: number) => void
 }
 
 // ============================================================================
@@ -90,7 +93,7 @@ const FETCH_TIMEOUT_MS = 10000
 // Component
 // ============================================================================
 
-export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
+export function GroupTimeRulesEditor({ groupJid, hideTitle, onCountChange }: GroupTimeRulesEditorProps) {
   const [rules, setRules] = useState<TimeRule[]>([])
   const [activeRuleId, setActiveRuleId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -99,6 +102,8 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
   const [form, setForm] = useState<TimeRuleForm>({ ...DEFAULT_FORM })
   const [saving, setSaving] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<TimeRule | null>(null)
+  const [flashId, setFlashId] = useState<string | null>(null)
 
   // --------------------------------------------------------------------------
   // Data fetching
@@ -141,6 +146,11 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
     fetchRules()
     fetchActiveRule()
   }, [fetchRules, fetchActiveRule])
+
+  // Report count changes to parent
+  useEffect(() => {
+    onCountChange?.(rules.length)
+  }, [rules.length, onCountChange])
 
   // Escape key to close modal
   useEffect(() => {
@@ -229,7 +239,7 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
 
       const response = await fetch(url, {
         method: editingRule ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify(body),
       })
 
@@ -238,14 +248,20 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
         throw new Error(errorData.message || errorData.error || 'Failed to save rule')
       }
 
+      const savedData = await response.json().catch(() => null)
+      const savedId = editingRule?.id || savedData?.rule?.id
       showToast({
         type: 'success',
-        message: editingRule ? 'Rule updated' : 'Rule created',
+        message: editingRule ? `Rule "${form.name}" updated` : `Rule "${form.name}" created`,
       })
 
       closeModal()
       fetchRules()
       fetchActiveRule()
+      if (savedId) {
+        setFlashId(savedId)
+        setTimeout(() => setFlashId(null), 1500)
+      }
     } catch (error) {
       showToast({
         type: 'error',
@@ -257,12 +273,11 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
   }
 
   const deleteTimeRule = async (ruleId: string) => {
-    if (!confirm('Delete this time-based rule?')) return
-
     setDeletingId(ruleId)
     try {
       const response = await fetch(API_ENDPOINTS.groupTimeRule(groupJid, ruleId), {
         method: 'DELETE',
+        headers: writeHeaders(),
       })
 
       if (!response.ok) {
@@ -270,7 +285,8 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
         throw new Error(errorData.message || errorData.error || 'Failed to delete rule')
       }
 
-      showToast({ type: 'success', message: 'Rule deleted' })
+      const deleted = rules.find(r => r.id === ruleId)
+      showToast({ type: 'success', message: `Rule "${deleted?.name || ''}" deleted` })
       fetchRules()
       fetchActiveRule()
     } catch (error) {
@@ -430,11 +446,13 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
     <>
       <div className="space-y-3">
         {/* Section Header */}
-        <div className="flex items-center justify-between pb-2 border-b border-blue-500/10">
-          <h4 className="text-xs font-mono text-blue-400 uppercase tracking-widest flex items-center gap-2">
-            <span className="h-1 w-1 rounded-full bg-blue-400 animate-pulse"></span>
-            Time-Based Rules
-          </h4>
+        <div className={`flex items-center justify-between${hideTitle ? '' : ' pb-2 border-b border-blue-500/10'}`}>
+          {!hideTitle && (
+            <h4 className="text-xs font-mono text-blue-400 uppercase tracking-widest flex items-center gap-2">
+              <span className="h-1 w-1 rounded-full bg-blue-400 animate-pulse"></span>
+              Time-Based Rules
+            </h4>
+          )}
           <button
             onClick={openAddModal}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 text-xs font-mono transition-all hover:shadow-[0_0_10px_rgba(59,130,246,0.3)]"
@@ -446,12 +464,13 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
 
         {/* Rules List */}
         {rules.length === 0 ? (
-          <div className="text-center py-4 border border-dashed border-blue-500/30 rounded-md">
+          <div className="text-center py-6 border border-dashed border-blue-500/30 rounded-md">
+            <Clock className="h-8 w-8 mx-auto mb-2 text-blue-500/30" />
             <p className="text-muted-foreground text-xs">
               No time-based rules configured
             </p>
             <p className="text-muted-foreground text-[10px] mt-1">
-              Rules control pricing by time of day and day of week
+              Without rules, the bot uses the default pricing configuration above.
             </p>
           </div>
         ) : (
@@ -461,8 +480,10 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
               return (
                 <div
                   key={rule.id}
-                  className={`px-3 py-2 rounded-md bg-background/30 border backdrop-blur-sm transition-all ${
-                    isActive
+                  className={`px-3 py-2 rounded-md bg-background/30 border backdrop-blur-sm transition-all duration-500 ${
+                    flashId === rule.id
+                      ? 'bg-green-500/20 border-green-500/40 ring-1 ring-green-500/30'
+                      : isActive
                       ? 'border-green-500/40 shadow-[0_0_12px_rgba(34,197,94,0.15)]'
                       : 'border-blue-500/10 hover:border-blue-500/30 hover:shadow-[0_0_8px_rgba(59,130,246,0.1)]'
                   }`}
@@ -485,7 +506,10 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
                             OFF
                           </Badge>
                         )}
-                        <Badge className="bg-blue-500/20 text-blue-300 border-blue-500/40 text-[10px] px-1 py-0">
+                        <Badge
+                          className="bg-blue-500/20 text-blue-300 border-blue-500/40 text-[10px] px-1 py-0 cursor-help"
+                          title="Higher priority wins when schedules overlap"
+                        >
                           P{rule.priority}
                         </Badge>
                       </div>
@@ -514,7 +538,7 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
                         <Edit className="h-3.5 w-3.5" />
                       </button>
                       <button
-                        onClick={() => deleteTimeRule(rule.id)}
+                        onClick={() => setConfirmDelete(rule)}
                         disabled={deletingId === rule.id}
                         className={`p-1.5 rounded hover:bg-red-500/20 text-red-400 transition-colors ${
                           deletingId === rule.id ? 'opacity-50 cursor-not-allowed' : ''
@@ -833,6 +857,23 @@ export function GroupTimeRulesEditor({ groupJid }: GroupTimeRulesEditorProps) {
           </div>
         </div>
       )}
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        onOpenChange={(open) => { if (!open) setConfirmDelete(null) }}
+        title="Delete rule"
+        description={`Delete rule "${confirmDelete?.name}"? This cannot be undone. If this rule is currently active, pricing will fall back to the default spread.`}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        loading={deletingId === confirmDelete?.id}
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteTimeRule(confirmDelete.id)
+            setConfirmDelete(null)
+          }
+        }}
+      />
     </>
   )
 }

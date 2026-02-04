@@ -5,6 +5,7 @@
 import { useState, useEffect } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { ChevronDown, ChevronUp, TrendingUp } from 'lucide-react'
+import { API_ENDPOINTS } from '@/lib/api'
 
 interface HeatmapCell {
   hour: number
@@ -167,9 +168,7 @@ export function ActivityHeatmap({ groupId, days = 30, onCellClick }: ActivityHea
     const fetchHeatmap = async () => {
       try {
         setLoading(true)
-        const response = await fetch(
-          `/api/groups/${groupId}/analytics/heatmap?days=${days}`
-        )
+        const response = await fetch(API_ENDPOINTS.analyticsHeatmap(groupId, days))
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`)

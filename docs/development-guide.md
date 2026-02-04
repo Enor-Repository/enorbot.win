@@ -206,11 +206,9 @@ setTrainingMode(false) // Disable
 
 #### New Trigger Word
 
-Edit `src/utils/triggers.ts`:
+System pattern keywords (price, deal cancellation, price lock, deal confirmation) are now stored in the `system_patterns` Supabase table and editable via the dashboard's **System Patterns** section. No code changes needed — Daniel can add/remove keywords directly in the dashboard at `http://181.215.135.75:3004` under Groups & Rules → System Patterns.
 
-```typescript
-export const PRICE_TRIGGER_KEYWORDS = ['preço', 'cotação', 'newtrigger'] as const
-```
+For code-level patterns (volume detection, tronscan, receipt), edit `src/utils/triggers.ts` directly.
 
 #### New Control Command
 
@@ -220,6 +218,57 @@ Edit `src/handlers/control.ts`:
 2. Add parsing in `parseControlCommand()`
 3. Create handler function
 4. Add case in `handleControlMessage()`
+
+## Supabase Migrations
+
+### Applying Migrations to Remote Supabase
+
+The `supabase db push` command often fails because older migrations have schema drift.
+The reliable approach is to use the **Supabase Management API** to execute SQL directly.
+
+**Requirements:**
+- `SUPABASE_ACCESS_TOKEN` — a personal access token from https://supabase.com/dashboard/account/tokens
+- This token is stored on the VPS at `/opt/enorbot/.env` as `SUPABASE_ACCESS_TOKEN`
+- Project ref: `jhkpgltugjurvzqpaunw`
+
+**Run arbitrary SQL via Management API:**
+
+```bash
+SUPABASE_ACCESS_TOKEN="sbp_..."
+PROJECT_REF="jhkpgltugjurvzqpaunw"
+
+# Check if a table exists
+curl -s -X POST "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+  -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "SELECT table_name FROM information_schema.tables WHERE table_schema = '\''public'\'' AND table_name = '\''your_table'\''"}'
+
+# Apply a migration file
+SQL=$(cat supabase/migrations/your_migration.sql)
+curl -s -X POST "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+  -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg q "$SQL" '{query: $q}')"
+```
+
+**Using psql (if available):**
+
+```bash
+# Install psql client (macOS)
+brew install libpq
+/opt/homebrew/opt/libpq/bin/psql "postgresql://postgres.jhkpgltugjurvzqpaunw:PASSWORD@aws-0-us-west-2.pooler.supabase.com:5432/postgres" \
+  -f supabase/migrations/your_migration.sql
+```
+
+Note: The database password is found in Supabase Dashboard → Settings → Database → Connection string. The pooler URL (without password) is stored in `supabase/.temp/pooler-url`.
+
+### Migration File Conventions
+
+- Location: `supabase/migrations/`
+- Naming: `YYYYMMDD_NNN_description.sql` (e.g., `20260207_001_system_patterns.sql`)
+- Always use `CREATE TABLE IF NOT EXISTS` and `ON CONFLICT DO NOTHING` for idempotency
+- Always enable RLS: `ALTER TABLE x ENABLE ROW LEVEL SECURITY`
+- Always add a permissive policy for the service role
 
 ## Testing
 

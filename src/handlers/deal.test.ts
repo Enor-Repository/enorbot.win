@@ -80,6 +80,18 @@ vi.mock('../utils/logger.js', () => ({
   },
 }))
 
+// Mock systemPatternService - return default keywords
+vi.mock('../services/systemPatternService.js', () => ({
+  getKeywordsForPattern: vi.fn((key: string) => {
+    const defaults: Record<string, string[]> = {
+      deal_cancellation: ['cancela', 'cancelar', 'cancel'],
+      price_lock: ['trava', 'lock', 'travar'],
+      deal_confirmation: ['fechado', 'fecha', 'fechar', 'confirma', 'confirmado', 'confirmed'],
+    }
+    return Promise.resolve(defaults[key] || [])
+  }),
+}))
+
 // Import mocked modules
 import { findClientDeal, createDeal, lockDeal, startComputation, completeDeal, cancelDeal, archiveDeal } from '../services/dealFlowService.js'
 import { extractBrlAmount, extractUsdtAmount, computeBrlToUsdt, computeUsdtToBrl } from '../services/dealComputation.js'
@@ -150,75 +162,75 @@ const MOCK_DEAL = {
 // ============================================================================
 
 describe('isPriceLockMessage', () => {
-  it('detects "trava" keyword', () => {
-    expect(isPriceLockMessage('trava')).toBe(true)
-    expect(isPriceLockMessage('trava 5000')).toBe(true)
-    expect(isPriceLockMessage('Trava essa taxa')).toBe(true)
+  it('detects "trava" keyword', async () => {
+    expect(await isPriceLockMessage('trava')).toBe(true)
+    expect(await isPriceLockMessage('trava 5000')).toBe(true)
+    expect(await isPriceLockMessage('Trava essa taxa')).toBe(true)
   })
 
-  it('detects "lock" keyword', () => {
-    expect(isPriceLockMessage('lock')).toBe(true)
-    expect(isPriceLockMessage('lock it')).toBe(true)
+  it('detects "lock" keyword', async () => {
+    expect(await isPriceLockMessage('lock')).toBe(true)
+    expect(await isPriceLockMessage('lock it')).toBe(true)
   })
 
-  it('detects "travar" keyword', () => {
-    expect(isPriceLockMessage('travar')).toBe(true)
-    expect(isPriceLockMessage('quero travar')).toBe(true)
+  it('detects "travar" keyword', async () => {
+    expect(await isPriceLockMessage('travar')).toBe(true)
+    expect(await isPriceLockMessage('quero travar')).toBe(true)
   })
 
-  it('returns false for non-lock messages', () => {
-    expect(isPriceLockMessage('preço')).toBe(false)
-    expect(isPriceLockMessage('compro 10k')).toBe(false)
-    expect(isPriceLockMessage('')).toBe(false)
+  it('returns false for non-lock messages', async () => {
+    expect(await isPriceLockMessage('preço')).toBe(false)
+    expect(await isPriceLockMessage('compro 10k')).toBe(false)
+    expect(await isPriceLockMessage('')).toBe(false)
   })
 })
 
 describe('isConfirmationMessage', () => {
-  it('detects "fechado"', () => {
-    expect(isConfirmationMessage('fechado')).toBe(true)
-    expect(isConfirmationMessage('Fechado!')).toBe(true)
+  it('detects "fechado"', async () => {
+    expect(await isConfirmationMessage('fechado')).toBe(true)
+    expect(await isConfirmationMessage('Fechado!')).toBe(true)
   })
 
-  it('rejects "ok" and "vamos" as too broad', () => {
-    expect(isConfirmationMessage('ok')).toBe(false)
-    expect(isConfirmationMessage('OK vamos')).toBe(false)
-    expect(isConfirmationMessage('vamos')).toBe(false)
+  it('rejects "ok" and "vamos" as too broad', async () => {
+    expect(await isConfirmationMessage('ok')).toBe(false)
+    expect(await isConfirmationMessage('OK vamos')).toBe(false)
+    expect(await isConfirmationMessage('vamos')).toBe(false)
   })
 
-  it('detects "fechar" and "fecha"', () => {
-    expect(isConfirmationMessage('fecha')).toBe(true)
-    expect(isConfirmationMessage('fechar')).toBe(true)
+  it('detects "fechar" and "fecha"', async () => {
+    expect(await isConfirmationMessage('fecha')).toBe(true)
+    expect(await isConfirmationMessage('fechar')).toBe(true)
   })
 
-  it('detects "confirma" variants', () => {
-    expect(isConfirmationMessage('confirma')).toBe(true)
-    expect(isConfirmationMessage('confirmado')).toBe(true)
-    expect(isConfirmationMessage('confirmed')).toBe(true)
+  it('detects "confirma" variants', async () => {
+    expect(await isConfirmationMessage('confirma')).toBe(true)
+    expect(await isConfirmationMessage('confirmado')).toBe(true)
+    expect(await isConfirmationMessage('confirmed')).toBe(true)
   })
 
-  it('returns false for non-confirmation messages', () => {
-    expect(isConfirmationMessage('preço')).toBe(false)
-    expect(isConfirmationMessage('compro 10k')).toBe(false)
+  it('returns false for non-confirmation messages', async () => {
+    expect(await isConfirmationMessage('preço')).toBe(false)
+    expect(await isConfirmationMessage('compro 10k')).toBe(false)
   })
 })
 
 describe('isDealCancellation', () => {
-  it('detects "cancela"', () => {
-    expect(isDealCancellation('cancela')).toBe(true)
-    expect(isDealCancellation('cancela a operação')).toBe(true)
+  it('detects "cancela"', async () => {
+    expect(await isDealCancellation('cancela')).toBe(true)
+    expect(await isDealCancellation('cancela a operação')).toBe(true)
   })
 
-  it('detects "cancelar"', () => {
-    expect(isDealCancellation('cancelar')).toBe(true)
+  it('detects "cancelar"', async () => {
+    expect(await isDealCancellation('cancelar')).toBe(true)
   })
 
-  it('detects "cancel"', () => {
-    expect(isDealCancellation('cancel')).toBe(true)
+  it('detects "cancel"', async () => {
+    expect(await isDealCancellation('cancel')).toBe(true)
   })
 
-  it('returns false for non-cancellation messages', () => {
-    expect(isDealCancellation('preço')).toBe(false)
-    expect(isDealCancellation('')).toBe(false)
+  it('returns false for non-cancellation messages', async () => {
+    expect(await isDealCancellation('preço')).toBe(false)
+    expect(await isDealCancellation('')).toBe(false)
   })
 })
 
@@ -645,24 +657,24 @@ describe('router deal flow integration', () => {
     expect(typeof hasVolumeInfo).toBe('function')
   })
 
-  it('correctly classifies deal flow messages', () => {
+  it('correctly classifies deal flow messages', async () => {
     // Price lock patterns
-    expect(isPriceLockMessage('trava')).toBe(true)
-    expect(isPriceLockMessage('lock')).toBe(true)
-    expect(isPriceLockMessage('travar')).toBe(true)
+    expect(await isPriceLockMessage('trava')).toBe(true)
+    expect(await isPriceLockMessage('lock')).toBe(true)
+    expect(await isPriceLockMessage('travar')).toBe(true)
 
     // Confirmation patterns
-    expect(isConfirmationMessage('fechado')).toBe(true)
-    expect(isConfirmationMessage('confirma')).toBe(true)
-    expect(isConfirmationMessage('ok')).toBe(false)
+    expect(await isConfirmationMessage('fechado')).toBe(true)
+    expect(await isConfirmationMessage('confirma')).toBe(true)
+    expect(await isConfirmationMessage('ok')).toBe(false)
 
     // Cancellation patterns
-    expect(isDealCancellation('cancela')).toBe(true)
-    expect(isDealCancellation('cancelar')).toBe(true)
+    expect(await isDealCancellation('cancela')).toBe(true)
+    expect(await isDealCancellation('cancelar')).toBe(true)
 
     // Non-deal messages
-    expect(isPriceLockMessage('preço')).toBe(false)
-    expect(isConfirmationMessage('preço')).toBe(false)
-    expect(isDealCancellation('preço')).toBe(false)
+    expect(await isPriceLockMessage('preço')).toBe(false)
+    expect(await isConfirmationMessage('preço')).toBe(false)
+    expect(await isDealCancellation('preço')).toBe(false)
   })
 })

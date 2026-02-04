@@ -101,10 +101,13 @@ export function PriceTracker() {
         console.error('Price fetch error:', error)
       }
 
+      // Keep last known values if available, only show error if no data at all
       setPrices((prev) => ({
         ...prev,
         loading: false,
-        error: error instanceof Error ? error.message : 'Failed to fetch prices',
+        error: prev.usdtBrl === null
+          ? (error instanceof Error ? error.message : 'Failed to fetch prices')
+          : null,
       }))
     }
   }, [])
@@ -209,13 +212,13 @@ export function PriceTracker() {
             <>
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-muted-foreground font-mono">Compra</span>
+                  <span className="text-[10px] text-muted-foreground font-mono">Compra / Bid</span>
                   <span className="text-sm font-bold text-blue-300 font-mono tabular-nums">
                     R$ {formatPrice(prices.commercialDollar.bid)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-muted-foreground font-mono">Venda</span>
+                  <span className="text-[10px] text-muted-foreground font-mono">Venda / Ask</span>
                   <span className="text-sm font-bold text-blue-300 font-mono tabular-nums">
                     R$ {formatPrice(prices.commercialDollar.ask)}
                   </span>
