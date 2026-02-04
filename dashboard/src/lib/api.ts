@@ -56,6 +56,9 @@ export const API_ENDPOINTS = {
   /** Test a message against a group's triggers */
   groupTriggerTest: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/triggers/test`,
+  /** Seed default triggers for a group */
+  groupTriggerSeed: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/seed`,
   /** System status */
   status: `${API_BASE_URL}/api/status`,
   /** Current USDT/BRL price */
@@ -84,13 +87,6 @@ export const API_ENDPOINTS = {
   /** Sprint 4: Trigger manual deal sweep */
   groupDealSweep: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/sweep`,
-  /** Sprint 7: Get all system patterns */
-  systemPatterns: `${API_BASE_URL}/api/system-patterns`,
-  /** Sprint 7: Update keywords for a specific system pattern */
-  systemPattern: (patternKey: string): string =>
-    `${API_BASE_URL}/api/system-patterns/${encodeURIComponent(patternKey)}`,
-  /** Sprint 7A.2: Test a message against all system patterns */
-  systemPatternTest: `${API_BASE_URL}/api/system-patterns/test`,
 } as const
 
 /**

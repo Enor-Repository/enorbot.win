@@ -21,11 +21,14 @@ import {
   deleteTrigger,
   isValidPatternType,
   isValidActionType,
+  isValidScope,
   isValidRegex,
   type TriggerInput,
   type TriggerUpdateInput,
   type PatternType,
   type TriggerActionType,
+  type TriggerScope,
+  type GroupTrigger,
 } from '../../services/triggerService.js'
 import { getActiveRule } from '../../services/ruleService.js'
 import { executeAction } from '../../services/actionExecutor.js'
@@ -144,6 +147,8 @@ groupTriggersRouter.post('/', async (req: Request, res: Response) => {
       isActive,
     } = req.body
 
+    const { scope } = req.body
+
     // ---- API boundary validation (Sprint 2 retro lesson) ----
 
     // triggerPhrase: required string
@@ -163,7 +168,7 @@ groupTriggersRouter.post('/', async (req: Request, res: Response) => {
     }
     if (!isValidActionType(actionType)) {
       return res.status(400).json({
-        error: `Invalid actionType: ${actionType}. Must be one of: price_quote, volume_quote, text_response, ai_prompt`,
+        error: `Invalid actionType: ${actionType}. Must be one of: price_quote, volume_quote, text_response, ai_prompt, deal_lock, deal_cancel, deal_confirm, deal_volume, tronscan_process, receipt_process, control_command`,
       })
     }
 
@@ -213,6 +218,18 @@ groupTriggersRouter.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'isActive must be a boolean' })
     }
 
+    // scope: optional, must be valid
+    if (scope !== undefined) {
+      if (typeof scope !== 'string') {
+        return res.status(400).json({ error: 'scope must be a string' })
+      }
+      if (!isValidScope(scope)) {
+        return res.status(400).json({
+          error: `Invalid scope: ${scope}. Must be one of: group, control_only`,
+        })
+      }
+    }
+
     // ---- End API boundary validation ----
 
     const input: TriggerInput = {
@@ -223,6 +240,7 @@ groupTriggersRouter.post('/', async (req: Request, res: Response) => {
       actionParams: actionParams || {},
       priority,
       isActive,
+      scope: scope as TriggerScope | undefined,
     }
 
     const result = await createTrigger(input)
@@ -282,6 +300,7 @@ groupTriggersRouter.put('/:triggerId', async (req: Request, res: Response) => {
       actionParams,
       priority,
       isActive,
+      scope,
     } = req.body
 
     // ---- API boundary validation (Sprint 2 retro lesson) ----
@@ -315,7 +334,7 @@ groupTriggersRouter.put('/:triggerId', async (req: Request, res: Response) => {
       }
       if (!isValidActionType(actionType)) {
         return res.status(400).json({
-          error: `Invalid actionType: ${actionType}. Must be one of: price_quote, volume_quote, text_response, ai_prompt`,
+          error: `Invalid actionType: ${actionType}. Must be one of: price_quote, volume_quote, text_response, ai_prompt, deal_lock, deal_cancel, deal_confirm, deal_volume, tronscan_process, receipt_process, control_command`,
         })
       }
     }
@@ -351,6 +370,18 @@ groupTriggersRouter.put('/:triggerId', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'isActive must be a boolean' })
     }
 
+    // scope: optional, must be valid
+    if (scope !== undefined) {
+      if (typeof scope !== 'string') {
+        return res.status(400).json({ error: 'scope must be a string' })
+      }
+      if (!isValidScope(scope)) {
+        return res.status(400).json({
+          error: `Invalid scope: ${scope}. Must be one of: group, control_only`,
+        })
+      }
+    }
+
     // ---- End API boundary validation ----
 
     const input: TriggerUpdateInput = {}
@@ -361,6 +392,7 @@ groupTriggersRouter.put('/:triggerId', async (req: Request, res: Response) => {
     if (actionParams !== undefined) input.actionParams = actionParams
     if (priority !== undefined) input.priority = priority
     if (isActive !== undefined) input.isActive = isActive
+    if (scope !== undefined) input.scope = scope as TriggerScope
 
     const result = await updateTrigger(triggerId, groupJid, input)
 

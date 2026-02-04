@@ -4,8 +4,9 @@
  * Stories D.11-D.12: Mode Selector & AI Threshold
  */
 import { Router, type Request, type Response } from 'express'
-import { getAllGroupConfigs, setGroupMode } from '../../services/groupConfig.js'
+import { getAllGroupConfigs, setGroupMode, getGroupConfigSync } from '../../services/groupConfig.js'
 import { getSupabase } from '../../services/supabase.js'
+import { seedDefaultTriggers } from '../../services/systemTriggerSeeder.js'
 import { logger } from '../../utils/logger.js'
 
 // Validate group JID format
@@ -57,22 +58,48 @@ groupsRouter.get('/', async (_req: Request, res: Response) => {
       }
     }
 
-    const groups = Array.from(configs.values()).map((config) => {
-      const stats = groupStats.get(config.groupJid)
-      return {
-        id: config.groupJid,
-        jid: config.groupJid, // Frontend needs both id and jid
-        name: config.groupName,
-        mode: config.mode,
-        isControlGroup: config.groupName.includes('CONTROLE'),
-        learningDays: Math.floor((Date.now() - config.learningStartedAt.getTime()) / (1000 * 60 * 60 * 24)),
-        messagesCollected: stats?.messageCount ?? 0,
-        // Note: counts hardcoded trigger_patterns from groups table config,
-        // not dynamic group_triggers entries. TODO (Task 6.5): query group_triggers count.
-        rulesActive: config.triggerPatterns.length,
-        lastActivity: stats?.lastActivity ?? null,
+    // Fetch trigger counts per group from group_triggers
+    const triggerCounts: Map<string, number> = new Map()
+    const { data: triggerData, error: triggerError } = await supabase
+      .from('group_triggers')
+      .select('group_jid')
+      .eq('is_active', true)
+      .limit(5000)
+
+    if (triggerError) {
+      logger.warn('Failed to fetch trigger counts', {
+        event: 'trigger_counts_error',
+        error: triggerError.message,
+      })
+    }
+
+    if (triggerData) {
+      for (const row of triggerData) {
+        triggerCounts.set(row.group_jid, (triggerCounts.get(row.group_jid) || 0) + 1)
       }
-    })
+    }
+
+    const groups = Array.from(configs.values())
+      .map((config) => {
+        const stats = groupStats.get(config.groupJid)
+        return {
+          id: config.groupJid,
+          jid: config.groupJid, // Frontend needs both id and jid
+          name: config.groupName,
+          mode: config.mode,
+          isControlGroup: config.groupName.includes('CONTROLE'),
+          learningDays: Math.floor((Date.now() - config.learningStartedAt.getTime()) / (1000 * 60 * 60 * 24)),
+          messagesCollected: stats?.messageCount ?? 0,
+          rulesActive: triggerCounts.get(config.groupJid) || 0,
+          lastActivity: stats?.lastActivity ?? null,
+        }
+      })
+      .sort((a, b) => {
+        // Control groups first, then alphabetical
+        if (a.isControlGroup && !b.isControlGroup) return -1
+        if (!a.isControlGroup && b.isControlGroup) return 1
+        return a.name.localeCompare(b.name)
+      })
 
     res.json({ groups })
   } catch (error) {
@@ -374,6 +401,44 @@ groupsRouter.get('/:groupJid/players', async (req: Request, res: Response) => {
     })
     res.status(500).json({
       error: 'Failed to get players',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+})
+
+/**
+ * POST /api/groups/:groupJid/seed
+ * Manually trigger system trigger seeding for a group.
+ * Idempotent: safe to call multiple times.
+ */
+groupsRouter.post('/:groupJid/seed', async (req: Request, res: Response) => {
+  try {
+    const groupJid = req.params.groupJid as string
+
+    if (!isValidGroupJid(groupJid)) {
+      return res.status(400).json({ error: 'Invalid group JID format' })
+    }
+
+    // Detect control group from group config
+    const config = getGroupConfigSync(groupJid)
+    const isControlGroup = config ? config.groupName.includes('CONTROLE') : false
+
+    await seedDefaultTriggers(groupJid, isControlGroup)
+
+    logger.info('Default triggers seeded via dashboard', {
+      event: 'manual_seed_dashboard',
+      groupJid,
+      isControlGroup,
+    })
+
+    res.json({ success: true, groupJid })
+  } catch (error) {
+    logger.error('Failed to seed system triggers', {
+      event: 'manual_seed_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({
+      error: 'Failed to seed triggers',
       message: error instanceof Error ? error.message : String(error),
     })
   }

@@ -106,10 +106,6 @@ import {
   handlePriceLock,
   handleConfirmation,
   handleDealCancellation,
-  isPriceLockMessage,
-  isConfirmationMessage,
-  isDealCancellation,
-  hasVolumeInfo,
 } from './deal.js'
 
 // ============================================================================
@@ -156,103 +152,6 @@ const MOCK_DEAL = {
   createdAt: new Date(),
   updatedAt: new Date(),
 }
-
-// ============================================================================
-// Message Classification Bridge Tests
-// ============================================================================
-
-describe('isPriceLockMessage', () => {
-  it('detects "trava" keyword', async () => {
-    expect(await isPriceLockMessage('trava')).toBe(true)
-    expect(await isPriceLockMessage('trava 5000')).toBe(true)
-    expect(await isPriceLockMessage('Trava essa taxa')).toBe(true)
-  })
-
-  it('detects "lock" keyword', async () => {
-    expect(await isPriceLockMessage('lock')).toBe(true)
-    expect(await isPriceLockMessage('lock it')).toBe(true)
-  })
-
-  it('detects "travar" keyword', async () => {
-    expect(await isPriceLockMessage('travar')).toBe(true)
-    expect(await isPriceLockMessage('quero travar')).toBe(true)
-  })
-
-  it('returns false for non-lock messages', async () => {
-    expect(await isPriceLockMessage('preço')).toBe(false)
-    expect(await isPriceLockMessage('compro 10k')).toBe(false)
-    expect(await isPriceLockMessage('')).toBe(false)
-  })
-})
-
-describe('isConfirmationMessage', () => {
-  it('detects "fechado"', async () => {
-    expect(await isConfirmationMessage('fechado')).toBe(true)
-    expect(await isConfirmationMessage('Fechado!')).toBe(true)
-  })
-
-  it('rejects "ok" and "vamos" as too broad', async () => {
-    expect(await isConfirmationMessage('ok')).toBe(false)
-    expect(await isConfirmationMessage('OK vamos')).toBe(false)
-    expect(await isConfirmationMessage('vamos')).toBe(false)
-  })
-
-  it('detects "fechar" and "fecha"', async () => {
-    expect(await isConfirmationMessage('fecha')).toBe(true)
-    expect(await isConfirmationMessage('fechar')).toBe(true)
-  })
-
-  it('detects "confirma" variants', async () => {
-    expect(await isConfirmationMessage('confirma')).toBe(true)
-    expect(await isConfirmationMessage('confirmado')).toBe(true)
-    expect(await isConfirmationMessage('confirmed')).toBe(true)
-  })
-
-  it('returns false for non-confirmation messages', async () => {
-    expect(await isConfirmationMessage('preço')).toBe(false)
-    expect(await isConfirmationMessage('compro 10k')).toBe(false)
-  })
-})
-
-describe('isDealCancellation', () => {
-  it('detects "cancela"', async () => {
-    expect(await isDealCancellation('cancela')).toBe(true)
-    expect(await isDealCancellation('cancela a operação')).toBe(true)
-  })
-
-  it('detects "cancelar"', async () => {
-    expect(await isDealCancellation('cancelar')).toBe(true)
-  })
-
-  it('detects "cancel"', async () => {
-    expect(await isDealCancellation('cancel')).toBe(true)
-  })
-
-  it('returns false for non-cancellation messages', async () => {
-    expect(await isDealCancellation('preço')).toBe(false)
-    expect(await isDealCancellation('')).toBe(false)
-  })
-})
-
-describe('hasVolumeInfo', () => {
-  it('returns true when BRL amount is present', () => {
-    vi.mocked(extractBrlAmount).mockReturnValue(10000)
-    vi.mocked(extractUsdtAmount).mockReturnValue(null)
-    expect(hasVolumeInfo('compro 10k')).toBe(true)
-  })
-
-  it('returns true when USDT amount is present', () => {
-    vi.mocked(extractBrlAmount).mockReturnValue(null)
-    vi.mocked(extractUsdtAmount).mockReturnValue(500)
-    expect(hasVolumeInfo('500 usdt')).toBe(true)
-  })
-
-  it('returns false when no amount detected', () => {
-    vi.mocked(extractBrlAmount).mockReturnValue(null)
-    vi.mocked(extractUsdtAmount).mockReturnValue(null)
-    expect(hasVolumeInfo('preço por favor')).toBe(false)
-  })
-})
 
 // ============================================================================
 // handleVolumeInquiry Tests
@@ -644,37 +543,3 @@ describe('handleDealCancellation', () => {
   })
 })
 
-// ============================================================================
-// Router Integration Tests (routing patterns)
-// ============================================================================
-
-describe('router deal flow integration', () => {
-  it('imports deal detection functions from deal handler', async () => {
-    // These functions are imported by router.ts — verify they exist and work
-    expect(typeof isPriceLockMessage).toBe('function')
-    expect(typeof isConfirmationMessage).toBe('function')
-    expect(typeof isDealCancellation).toBe('function')
-    expect(typeof hasVolumeInfo).toBe('function')
-  })
-
-  it('correctly classifies deal flow messages', async () => {
-    // Price lock patterns
-    expect(await isPriceLockMessage('trava')).toBe(true)
-    expect(await isPriceLockMessage('lock')).toBe(true)
-    expect(await isPriceLockMessage('travar')).toBe(true)
-
-    // Confirmation patterns
-    expect(await isConfirmationMessage('fechado')).toBe(true)
-    expect(await isConfirmationMessage('confirma')).toBe(true)
-    expect(await isConfirmationMessage('ok')).toBe(false)
-
-    // Cancellation patterns
-    expect(await isDealCancellation('cancela')).toBe(true)
-    expect(await isDealCancellation('cancelar')).toBe(true)
-
-    // Non-deal messages
-    expect(await isPriceLockMessage('preço')).toBe(false)
-    expect(await isConfirmationMessage('preço')).toBe(false)
-    expect(await isDealCancellation('preço')).toBe(false)
-  })
-})

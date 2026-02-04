@@ -5,6 +5,8 @@
  */
 import express, { type Request, type Response, type NextFunction } from 'express'
 import cors from 'cors'
+import helmet from 'helmet'
+import rateLimit from 'express-rate-limit'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { logger } from '../utils/logger.js'
@@ -32,6 +34,53 @@ const allowedOrigins = config.ALLOWED_ORIGINS
   ? config.ALLOWED_ORIGINS.split(',').map((o: string) => o.trim())
   : undefined
 app.use(cors(allowedOrigins ? { origin: allowedOrigins } : undefined))
+
+// Security headers — disables X-Powered-By, sets CSP, HSTS, etc.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      formAction: ["'self'"],
+      frameAncestors: ["'self'"],
+      objectSrc: ["'none'"],
+      // No upgradeInsecureRequests — dashboard served over HTTP
+    },
+  },
+  // No HSTS — no TLS on this deployment
+  hsts: false,
+}))
+
+// Rate limiting — 100 requests per minute per IP on API routes
+const apiLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 100,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' },
+})
+app.use('/api', apiLimiter)
+
+// Stricter limit on write operations — 20 per minute per IP
+const writeLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 20,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { error: 'Too many write requests, please try again later' },
+})
+app.use('/api', (req: Request, _res: Response, next: NextFunction) => {
+  if (['POST', 'PUT', 'DELETE'].includes(req.method)) {
+    return writeLimiter(req, _res, next)
+  }
+  next()
+})
+
 app.use(express.json({ limit: '100kb' }))
 
 // Request logging

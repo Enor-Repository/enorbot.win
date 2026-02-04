@@ -9,7 +9,7 @@
  * All classification is rules-based to minimize AI costs.
  */
 
-import { isPriceTriggerSync, extractVolumeBrl, hasTronscanLink } from '../utils/triggers.js'
+import { extractVolumeBrl, hasTronscanLink } from '../utils/triggers.js'
 
 // =============================================================================
 // Constants (Issue fix: Extract magic numbers)
@@ -412,7 +412,7 @@ export function classifyMessage(
   }
 
   // Priority 9: Price trigger keywords (includes new English patterns)
-  if (context.hasPriceTrigger || isPriceTriggerSync(message) || matchesType(message, 'price_request')) {
+  if (context.hasPriceTrigger || matchesType(message, 'price_request')) {
     return {
       messageType: 'price_request',
       triggerPattern: findTriggerPattern(message, 'price_request'),

@@ -426,7 +426,7 @@ describe('Sprint 5, Task 5.2: Response Suppression', () => {
       expect(result.reason).toBeNull()
     })
 
-    it('bot check uses 5-minute lookback window', async () => {
+    it('bot check uses 1-minute lookback window', async () => {
       mockGetRecentGroupMessages.mockResolvedValue({ ok: true, data: [] })
 
       const before = Date.now()
@@ -436,13 +436,13 @@ describe('Sprint 5, Task 5.2: Response Suppression', () => {
         messageContent: 'preço',
       })
 
-      // First call is the bot check (botOnly: true, since: ~5 min ago)
+      // First call is the bot check (botOnly: true, since: ~1 min ago)
       const botCall = mockGetRecentGroupMessages.mock.calls[0]
       expect(botCall[0]).toBe('group@g.us')
       expect(botCall[1]).toBe(5) // limit
       expect(botCall[2]).toHaveProperty('botOnly', true)
       const sinceDateMs = (botCall[2] as { since: Date }).since.getTime()
-      const expectedMs = before - 5 * 60 * 1000
+      const expectedMs = before - 1 * 60 * 1000
       // Allow 1s tolerance for test execution time
       expect(Math.abs(sinceDateMs - expectedMs)).toBeLessThan(1000)
     })

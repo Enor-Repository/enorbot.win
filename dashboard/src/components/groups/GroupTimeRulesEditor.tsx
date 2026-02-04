@@ -464,13 +464,13 @@ export function GroupTimeRulesEditor({ groupJid, hideTitle, onCountChange }: Gro
 
         {/* Rules List */}
         {rules.length === 0 ? (
-          <div className="text-center py-6 border border-dashed border-blue-500/30 rounded-md">
-            <Clock className="h-8 w-8 mx-auto mb-2 text-blue-500/30" />
-            <p className="text-muted-foreground text-xs">
-              No time-based rules configured
+          <div className="text-center py-6 border border-dashed border-amber-500/40 rounded-md bg-amber-500/5">
+            <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-amber-500/60" />
+            <p className="text-amber-300 text-sm font-mono font-semibold">
+              No rules configured
             </p>
-            <p className="text-muted-foreground text-[10px] mt-1">
-              Without rules, the bot uses the default pricing configuration above.
+            <p className="text-amber-400/70 text-xs mt-1">
+              Bot won't respond to price requests until a rule is added
             </p>
           </div>
         ) : (
@@ -826,12 +826,22 @@ export function GroupTimeRulesEditor({ groupJid, hideTitle, onCountChange }: Gro
                         Client SELLS USDT
                         <span className="text-amber-400 ml-1">({getSpreadUnit(form.spreadMode)})</span>
                       </label>
-                      <input
-                        type="number"
-                        value={form.buySpread}
-                        onChange={e => setForm(prev => ({ ...prev, buySpread: parseFloat(e.target.value) || 0 }))}
-                        className="w-full px-3 py-2 bg-background border border-amber-500/30 rounded-md font-mono text-sm focus:outline-none focus:border-amber-500/50"
-                      />
+                      <div className="relative">
+                        <input
+                          type="number"
+                          value={Math.abs(form.buySpread)}
+                          onChange={e => {
+                            const val = Math.abs(parseFloat(e.target.value) || 0)
+                            // Store as negative (discount for client selling USDT)
+                            setForm(prev => ({ ...prev, buySpread: -val }))
+                          }}
+                          className="w-full px-3 py-2 pl-7 bg-background border border-amber-500/30 rounded-md font-mono text-sm focus:outline-none focus:border-amber-500/50"
+                        />
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-red-400 font-mono text-sm">−</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-1">
+                        Stored as <span className="text-red-400">{form.buySpread}</span> (discount for client)
+                      </p>
                     </div>
                   </div>
                 )}

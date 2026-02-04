@@ -11,7 +11,7 @@
  * - Enable/disable toggle
  */
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, Trash2, Edit, X, Zap, Search, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Plus, Trash2, Edit, X, Zap, Search, ToggleLeft, ToggleRight, Shield, Download } from 'lucide-react'
 import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
@@ -21,7 +21,12 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 // ============================================================================
 
 type PatternType = 'exact' | 'contains' | 'regex'
-type TriggerActionType = 'price_quote' | 'volume_quote' | 'text_response' | 'ai_prompt'
+type TriggerActionType =
+  | 'price_quote' | 'volume_quote' | 'text_response' | 'ai_prompt'
+  | 'deal_lock' | 'deal_cancel' | 'deal_confirm' | 'deal_volume'
+  | 'tronscan_process' | 'receipt_process' | 'control_command'
+
+type TriggerScope = 'group' | 'control_only'
 
 interface GroupTrigger {
   id: string
@@ -32,6 +37,8 @@ interface GroupTrigger {
   actionParams: Record<string, unknown>
   priority: number
   isActive: boolean
+  isSystem: boolean
+  scope: TriggerScope
   createdAt: string
   updatedAt: string
 }
@@ -43,6 +50,7 @@ interface TriggerForm {
   actionParams: Record<string, unknown>
   priority: number
   isActive: boolean
+  scope: TriggerScope
 }
 
 interface TestResult {
@@ -63,6 +71,7 @@ const DEFAULT_FORM: TriggerForm = {
   actionParams: {},
   priority: 0,
   isActive: true,
+  scope: 'group',
 }
 
 const FETCH_TIMEOUT_MS = 10000
@@ -78,6 +87,25 @@ const ACTION_TYPE_CONFIG: Record<TriggerActionType, { label: string; icon: strin
   volume_quote: { label: 'Volume Quote', icon: '🧮', badge: 'bg-blue-500/20 text-blue-300', active: 'bg-blue-500/20 border-blue-500/50 text-blue-300' },
   text_response: { label: 'Text Response', icon: '💬', badge: 'bg-purple-500/20 text-purple-300', active: 'bg-purple-500/20 border-purple-500/50 text-purple-300' },
   ai_prompt: { label: 'AI Prompt', icon: '🤖', badge: 'bg-cyan-500/20 text-cyan-300', active: 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300' },
+  deal_lock: { label: 'Price Lock', icon: '🔒', badge: 'bg-blue-500/20 text-blue-300', active: 'bg-blue-500/20 border-blue-500/50 text-blue-300' },
+  deal_cancel: { label: 'Deal Cancel', icon: '❌', badge: 'bg-red-500/20 text-red-300', active: 'bg-red-500/20 border-red-500/50 text-red-300' },
+  deal_confirm: { label: 'Deal Confirm', icon: '✅', badge: 'bg-emerald-500/20 text-emerald-300', active: 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300' },
+  deal_volume: { label: 'Volume Detect', icon: '📦', badge: 'bg-yellow-500/20 text-yellow-300', active: 'bg-yellow-500/20 border-yellow-500/50 text-yellow-300' },
+  tronscan_process: { label: 'Tronscan', icon: '🔗', badge: 'bg-purple-500/20 text-purple-300', active: 'bg-purple-500/20 border-purple-500/50 text-purple-300' },
+  receipt_process: { label: 'Receipt', icon: '🧾', badge: 'bg-amber-500/20 text-amber-300', active: 'bg-amber-500/20 border-amber-500/50 text-amber-300' },
+  control_command: { label: 'Control Cmd', icon: '⚙️', badge: 'bg-slate-500/20 text-slate-300', active: 'bg-slate-500/20 border-slate-500/50 text-slate-300' },
+}
+
+/** All available action types for trigger creation */
+const USER_ACTION_TYPES: TriggerActionType[] = [
+  'price_quote', 'volume_quote', 'text_response', 'ai_prompt',
+  'deal_lock', 'deal_cancel', 'deal_confirm', 'deal_volume',
+  'tronscan_process', 'receipt_process', 'control_command',
+]
+
+const SCOPE_LABELS: Record<TriggerScope, string> = {
+  group: 'This Group',
+  control_only: 'Control Only',
 }
 
 // ============================================================================
@@ -101,6 +129,8 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
   const [confirmDelete, setConfirmDelete] = useState<GroupTrigger | null>(null)
   const [flashId, setFlashId] = useState<string | null>(null)
   const [fetchError, setFetchError] = useState(false)
+
+  const [seeding, setSeeding] = useState(false)
 
   // Tester state
   const [showTester, setShowTester] = useState(false)
@@ -176,6 +206,7 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
       actionParams: { ...trigger.actionParams },
       priority: trigger.priority,
       isActive: trigger.isActive,
+      scope: trigger.scope || 'group',
     })
     setShowModal(true)
   }
@@ -233,6 +264,7 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
           actionParams: form.actionParams,
           priority: form.priority,
           isActive: form.isActive,
+          scope: form.scope,
         }),
       })
 
@@ -319,6 +351,30 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
       showToast({ type: 'error', message: 'Test failed' })
     } finally {
       setTesting(false)
+    }
+  }
+
+  // ---- Seed Defaults ----
+
+  const seedDefaults = async () => {
+    setSeeding(true)
+    try {
+      const response = await fetch(API_ENDPOINTS.groupTriggerSeed(groupJid), {
+        method: 'POST',
+        headers: writeHeaders(),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || errorData.error || `HTTP ${response.status}`)
+      }
+
+      showToast({ type: 'success', message: 'Default triggers seeded' })
+      await fetchTriggers()
+    } catch (e) {
+      showToast({ type: 'error', message: e instanceof Error ? e.message : 'Failed to seed triggers' })
+    } finally {
+      setSeeding(false)
     }
   }
 
@@ -423,18 +479,32 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
           <div className="px-4 py-6 text-center text-sm text-muted-foreground bg-teal-500/5 border border-teal-500/10 rounded-lg">
             <Zap className="h-8 w-8 mx-auto mb-2 text-teal-500/30" />
             <p>No triggers configured</p>
-            <p className="text-xs mt-1">Add triggers to define which messages the bot responds to.</p>
+            <p className="text-xs mt-1 mb-3">Add triggers to define which messages the bot responds to.</p>
+            <button
+              onClick={seedDefaults}
+              disabled={seeding}
+              className="px-4 py-2 text-xs font-mono rounded-lg bg-teal-500/20 border border-teal-500/50 text-teal-300 hover:bg-teal-500/30 disabled:opacity-50 transition-colors"
+            >
+              <Download className="h-3 w-3 inline mr-1" />
+              {seeding ? 'Seeding...' : 'Seed Default Triggers'}
+            </button>
           </div>
         ) : (
           <div className="space-y-2">
-            {triggers.map((trigger) => {
-              const actionConfig = ACTION_TYPE_CONFIG[trigger.actionType]
+            {[...triggers].sort((a, b) => {
+              // System triggers first, then by priority DESC
+              if (a.isSystem !== b.isSystem) return a.isSystem ? -1 : 1
+              return b.priority - a.priority
+            }).map((trigger) => {
+              const actionConfig = ACTION_TYPE_CONFIG[trigger.actionType] || ACTION_TYPE_CONFIG.text_response
               return (
                 <div
                   key={trigger.id}
                   className={`p-3 rounded-lg border transition-all duration-500 ${
                     flashId === trigger.id
                       ? 'bg-green-500/20 border-green-500/40 ring-1 ring-green-500/30'
+                      : trigger.isSystem
+                      ? 'bg-slate-500/5 border-slate-500/20'
                       : trigger.isActive
                       ? 'bg-teal-500/5 border-teal-500/20'
                       : 'bg-muted/10 border-border/20 opacity-60'
@@ -443,9 +513,17 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
                   <div className="flex items-center justify-between">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {trigger.isSystem && (
+                          <Shield className="h-3.5 w-3.5 text-slate-400 flex-shrink-0" />
+                        )}
                         <span className="font-mono text-sm font-semibold text-foreground">
                           "{trigger.triggerPhrase}"
                         </span>
+                        {trigger.isSystem && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-slate-500/20 text-slate-400 border border-slate-500/30">
+                            DEFAULT
+                          </span>
+                        )}
                         <span className={`px-1.5 py-0.5 text-[10px] font-mono rounded ${
                           trigger.patternType === 'exact'
                             ? 'bg-orange-500/20 text-orange-300'
@@ -464,6 +542,11 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
                             title="Higher priority wins when multiple triggers match the same message"
                           >
                             P{trigger.priority}
+                          </span>
+                        )}
+                        {trigger.scope === 'control_only' && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                            Control Only
                           </span>
                         )}
                       </div>
@@ -581,20 +664,23 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
                   Action Type <span className="text-red-400">*</span>
                 </label>
                 <div className="grid grid-cols-2 gap-2">
-                  {(Object.entries(ACTION_TYPE_CONFIG) as [TriggerActionType, typeof ACTION_TYPE_CONFIG[TriggerActionType]][]).map(([type, config]) => (
-                    <button
-                      key={type}
-                      type="button"
-                      onClick={() => setForm({ ...form, actionType: type, actionParams: {} })}
-                      className={`px-3 py-2 text-xs font-mono rounded-lg border transition-all text-left ${
-                        form.actionType === type
-                          ? config.active
-                          : 'bg-muted/10 border-border/30 text-foreground hover:bg-muted/20'
-                      }`}
-                    >
-                      <span className="text-sm">{config.icon}</span> {config.label}
-                    </button>
-                  ))}
+                  {USER_ACTION_TYPES.map((type) => {
+                    const config = ACTION_TYPE_CONFIG[type]
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        onClick={() => setForm({ ...form, actionType: type, actionParams: {} })}
+                        className={`px-3 py-2 text-xs font-mono rounded-lg border transition-all text-left ${
+                          form.actionType === type
+                            ? config.active
+                            : 'bg-muted/10 border-border/30 text-foreground hover:bg-muted/20'
+                        }`}
+                      >
+                        <span className="text-sm">{config.icon}</span> {config.label}
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
 
@@ -678,6 +764,35 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
                 />
                 <p className="text-[10px] text-muted-foreground mt-1">
                   Higher priority triggers match first when multiple could match
+                </p>
+              </div>
+
+              {/* Scope */}
+              <div>
+                <label className="block text-xs font-mono font-semibold text-foreground mb-1">
+                  Scope
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['group', 'control_only'] as TriggerScope[]).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setForm({ ...form, scope: s })}
+                      className={`px-3 py-2 text-xs font-mono rounded-lg border transition-all ${
+                        form.scope === s
+                          ? s === 'control_only'
+                            ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300'
+                            : 'bg-teal-500/20 border-teal-500/50 text-teal-300'
+                          : 'bg-muted/10 border-border/30 text-foreground hover:bg-muted/20'
+                      }`}
+                    >
+                      {SCOPE_LABELS[s]}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  {form.scope === 'group' && 'Fires in this group (normal behavior)'}
+                  {form.scope === 'control_only' && 'Only fires when message is in the control group'}
                 </p>
               </div>
 

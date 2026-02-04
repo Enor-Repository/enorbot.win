@@ -38,7 +38,7 @@ const OPERATOR_LOOKBACK_MINUTES = 3
 /**
  * Maximum lookback window in minutes for "bot already responded" check.
  */
-const BOT_RESPONSE_LOOKBACK_MINUTES = 5
+const BOT_RESPONSE_LOOKBACK_MINUTES = 1
 
 /**
  * Sender JID used for bot messages in message history.

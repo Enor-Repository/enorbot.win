@@ -1,40 +1,28 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { WASocket } from '@whiskeysockets/baileys'
 
-// Mock groupConfig service before importing router
+// ============================================================================
+// Mocks
+// ============================================================================
+
 const mockGetGroupModeSync = vi.hoisted(() => vi.fn())
-const mockGetGroupConfigSync = vi.hoisted(() => vi.fn())
 const mockMatchTrigger = vi.hoisted(() => vi.fn())
 
 vi.mock('../services/groupConfig.js', () => ({
   getGroupModeSync: mockGetGroupModeSync,
-  getGroupConfigSync: mockGetGroupConfigSync,
 }))
 
 vi.mock('../services/triggerService.js', () => ({
   matchTrigger: mockMatchTrigger,
 }))
 
-// Mock systemPatternService so router exercises DB-read code path
-vi.mock('../services/systemPatternService.js', () => ({
-  getKeywordsForPattern: vi.fn((key: string) => {
-    const defaults: Record<string, string[]> = {
-      price_request: ['preço', 'cotação'],
-      deal_cancellation: ['cancela', 'cancelar', 'cancel'],
-      price_lock: ['trava', 'lock', 'travar'],
-      deal_confirmation: ['fechado', 'fecha', 'fechar', 'confirma', 'confirmado', 'confirmed'],
-    }
-    return Promise.resolve(defaults[key] || [])
-  }),
-  getKeywordsForPatternSync: vi.fn((key: string) => {
-    const defaults: Record<string, string[]> = {
-      price_request: ['preço', 'cotação'],
-      deal_cancellation: ['cancela', 'cancelar', 'cancel'],
-      price_lock: ['trava', 'lock', 'travar'],
-      deal_confirmation: ['fechado', 'fecha', 'fechar', 'confirma', 'confirmado', 'confirmed'],
-    }
-    return defaults[key] || []
-  }),
+vi.mock('../utils/logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
 }))
 
 import {
@@ -46,8 +34,33 @@ import {
 } from './router.js'
 import { RECEIPT_MIME_TYPES } from '../types/handlers.js'
 
+// ============================================================================
+// Helpers
+// ============================================================================
+
+function makeTrigger(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'trigger-1',
+    groupJid: '123456789@g.us',
+    triggerPhrase: 'preço',
+    patternType: 'contains',
+    actionType: 'price_quote',
+    actionParams: {},
+    priority: 100,
+    isActive: true,
+    isSystem: false,
+    scope: 'group',
+    createdAt: '2026-01-01',
+    updatedAt: '2026-01-01',
+    ...overrides,
+  }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
 describe('routeMessage', () => {
-  // Mock socket for tests
   const mockSock = {} as WASocket
 
   const baseContext: RouterContext = {
@@ -61,53 +74,105 @@ describe('routeMessage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    // Default: groups are in 'active' mode
     mockGetGroupModeSync.mockReturnValue('active')
-    mockGetGroupConfigSync.mockReturnValue({
-      groupJid: '123456789@g.us',
-      groupName: 'Test Group',
-      mode: 'active',
-      triggerPatterns: [],
-      responseTemplates: {},
-      playerRoles: {},
-      aiThreshold: 50,
-      learningStartedAt: new Date(),
-      activatedAt: new Date(),
-      updatedAt: new Date(),
-      updatedBy: null,
-    })
-    // Default: no trigger match from database
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
   })
 
-  // AC1, AC2: Trigger messages routed to PRICE_HANDLER
+  // ---- Trigger detection routing (via matchTrigger) ----
+
   describe('trigger detection routing', () => {
-    it('routes "preço" message to PRICE_HANDLER', async () => {
+    it('routes price_quote trigger to PRICE_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger() })
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
       expect(result.destination).toBe('PRICE_HANDLER')
+      expect(result.context.hasTrigger).toBe(true)
     })
 
-    it('routes "cotação" message to PRICE_HANDLER', async () => {
-      const context = { ...baseContext, message: 'cotação' }
+    it('routes volume_quote trigger to PRICE_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'volume_quote' }) })
+      const context = { ...baseContext, message: 'compro 10k' }
       const result = await routeMessage(context)
       expect(result.destination).toBe('PRICE_HANDLER')
     })
 
-    it('routes trigger in sentence to PRICE_HANDLER', async () => {
-      const context = { ...baseContext, message: 'qual o preço do USDT?' }
+    it('routes text_response trigger to PRICE_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'text_response' }) })
+      const context = { ...baseContext, message: 'ajuda' }
       const result = await routeMessage(context)
       expect(result.destination).toBe('PRICE_HANDLER')
     })
 
-    it('sets hasTrigger: true for triggered messages', async () => {
+    it('routes ai_prompt trigger to PRICE_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'ai_prompt' }) })
+      const context = { ...baseContext, message: 'pergunta' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('PRICE_HANDLER')
+    })
+
+    it('sets hasTrigger and matchedTrigger on context', async () => {
+      const trigger = makeTrigger()
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: trigger })
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
       expect(result.context.hasTrigger).toBe(true)
+      expect(result.context.matchedTrigger).toBeDefined()
+      expect(result.context.matchedTrigger?.triggerPhrase).toBe('preço')
     })
   })
 
-  // AC4: Non-trigger messages filtered
+  // ---- Delegation actions (deal flow, tronscan) ----
+
+  describe('delegation action routing', () => {
+    it('routes deal_cancel to DEAL_HANDLER with cancellation dealAction', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'deal_cancel' }) })
+      const context = { ...baseContext, message: 'cancela' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('cancellation')
+    })
+
+    it('routes deal_lock to DEAL_HANDLER with price_lock dealAction', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'deal_lock' }) })
+      const context = { ...baseContext, message: 'trava' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('price_lock')
+    })
+
+    it('routes deal_confirm to DEAL_HANDLER with confirmation dealAction', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'deal_confirm' }) })
+      const context = { ...baseContext, message: 'fechado' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('confirmation')
+    })
+
+    it('routes deal_volume to DEAL_HANDLER with volume_inquiry dealAction', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'deal_volume' }) })
+      const context = { ...baseContext, message: '10k' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('volume_inquiry')
+    })
+
+    it('routes tronscan_process to TRONSCAN_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'tronscan_process' }) })
+      const context = { ...baseContext, message: 'https://tronscan.org/#/transaction/abc123' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('TRONSCAN_HANDLER')
+    })
+
+    it('routes receipt_process to RECEIPT_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'receipt_process' }) })
+      const context = { ...baseContext, message: 'comprovante' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('RECEIPT_HANDLER')
+    })
+  })
+
+  // ---- Non-trigger messages ----
+
   describe('non-trigger message handling', () => {
     it('routes non-trigger message to IGNORE', async () => {
       const context = { ...baseContext, message: 'hello world' }
@@ -128,9 +193,11 @@ describe('routeMessage', () => {
     })
   })
 
-  // AC5: Control group routing
+  // ---- Control group routing ----
+
   describe('control group priority', () => {
-    it('routes control group price trigger to PRICE_HANDLER', async () => {
+    it('routes control group trigger to resolved destination', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger() })
       const context = { ...baseContext, message: 'preço', isControlGroup: true }
       const result = await routeMessage(context)
       expect(result.destination).toBe('PRICE_HANDLER')
@@ -144,17 +211,40 @@ describe('routeMessage', () => {
       expect(result.context.hasTrigger).toBe(false)
     })
 
-    it('routes control group cotação to PRICE_HANDLER', async () => {
-      const context = { ...baseContext, message: 'cotação', isControlGroup: true }
+    it('routes control group deal trigger to DEAL_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'deal_cancel' }) })
+      const context = { ...baseContext, message: 'cancela', isControlGroup: true }
       const result = await routeMessage(context)
-      expect(result.destination).toBe('PRICE_HANDLER')
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('cancellation')
+    })
+
+    it('routes control_command trigger to CONTROL_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'control_command', triggerPhrase: 'status' }) })
+      const context = { ...baseContext, message: 'status', isControlGroup: true }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('CONTROL_HANDLER')
       expect(result.context.hasTrigger).toBe(true)
+    })
+
+    it('passes isControlGroup=true to matchTrigger for control groups', async () => {
+      const context = { ...baseContext, message: 'status', isControlGroup: true }
+      await routeMessage(context)
+      expect(mockMatchTrigger).toHaveBeenCalledWith('status', '123456789@g.us', true)
+    })
+
+    it('passes isControlGroup=false to matchTrigger for regular groups', async () => {
+      const context = { ...baseContext, message: 'preço' }
+      await routeMessage(context)
+      expect(mockMatchTrigger).toHaveBeenCalledWith('preço', '123456789@g.us', false)
     })
   })
 
-  // Context preservation
+  // ---- Context preservation ----
+
   describe('context preservation', () => {
     it('preserves original context fields', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger() })
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
       expect(result.context.groupId).toBe('123456789@g.us')
@@ -162,7 +252,12 @@ describe('routeMessage', () => {
       expect(result.context.sender).toBe('user@s.whatsapp.net')
     })
   })
+
 })
+
+// ============================================================================
+// isControlGroupMessage
+// ============================================================================
 
 describe('isControlGroupMessage', () => {
   it('matches exact pattern (case-insensitive)', () => {
@@ -178,10 +273,12 @@ describe('isControlGroupMessage', () => {
   })
 })
 
-// Story 6.1: Receipt Detection Tests
+// ============================================================================
+// detectReceiptType
+// ============================================================================
+
 describe('detectReceiptType', () => {
-  // AC1: PDF detection
-  describe('PDF detection (AC1)', () => {
+  describe('PDF detection', () => {
     it('returns "pdf" for application/pdf MIME type', () => {
       const message: BaileysMessage = {
         documentMessage: { mimetype: RECEIPT_MIME_TYPES.PDF },
@@ -200,8 +297,7 @@ describe('detectReceiptType', () => {
     })
   })
 
-  // AC2: Image detection
-  describe('image detection (AC2)', () => {
+  describe('image detection', () => {
     it('returns "image" for image/jpeg MIME type', () => {
       const message: BaileysMessage = {
         imageMessage: { mimetype: RECEIPT_MIME_TYPES.JPEG },
@@ -249,7 +345,10 @@ describe('detectReceiptType', () => {
   })
 })
 
-// Story 6.1: Receipt Routing Tests
+// ============================================================================
+// Receipt routing
+// ============================================================================
+
 describe('routeMessage receipt routing', () => {
   const mockSock = {} as WASocket
 
@@ -265,146 +364,61 @@ describe('routeMessage receipt routing', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetGroupModeSync.mockReturnValue('active')
-    mockGetGroupConfigSync.mockReturnValue({
-      groupJid: '123456789@g.us',
-      groupName: 'Test Group',
-      mode: 'active',
-      triggerPatterns: [],
-      responseTemplates: {},
-      playerRoles: {},
-      aiThreshold: 50,
-      learningStartedAt: new Date(),
-      activatedAt: new Date(),
-      updatedAt: new Date(),
-      updatedBy: null,
-    })
-    // Default: no trigger match from database
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
   })
 
-  // AC1: PDF routing
-  describe('PDF routing (AC1, AC3)', () => {
-    it('routes PDF document to RECEIPT_HANDLER', async () => {
-      const context = { ...baseContext }
-      const baileysMessage: BaileysMessage = {
-        documentMessage: { mimetype: 'application/pdf' },
-      }
-      const result = await routeMessage(context, baileysMessage)
+  it('routes PDF document to RECEIPT_HANDLER', async () => {
+    const context = { ...baseContext }
+    const baileysMessage: BaileysMessage = {
+      documentMessage: { mimetype: 'application/pdf' },
+    }
+    const result = await routeMessage(context, baileysMessage)
 
-      expect(result.destination).toBe('RECEIPT_HANDLER')
-      expect(result.context.isReceipt).toBe(true)
-      expect(result.context.receiptType).toBe('pdf')
-    })
+    expect(result.destination).toBe('RECEIPT_HANDLER')
+    expect(result.context.isReceipt).toBe(true)
+    expect(result.context.receiptType).toBe('pdf')
   })
 
-  // AC2: Image routing
-  describe('image routing (AC2, AC3)', () => {
-    it('routes JPEG image to RECEIPT_HANDLER', async () => {
-      const context = { ...baseContext }
-      const baileysMessage: BaileysMessage = {
-        imageMessage: { mimetype: 'image/jpeg' },
-      }
-      const result = await routeMessage(context, baileysMessage)
+  it('routes JPEG image to RECEIPT_HANDLER', async () => {
+    const context = { ...baseContext }
+    const baileysMessage: BaileysMessage = {
+      imageMessage: { mimetype: 'image/jpeg' },
+    }
+    const result = await routeMessage(context, baileysMessage)
 
-      expect(result.destination).toBe('RECEIPT_HANDLER')
-      expect(result.context.isReceipt).toBe(true)
-      expect(result.context.receiptType).toBe('image')
-    })
-
-    it('routes PNG image to RECEIPT_HANDLER', async () => {
-      const context = { ...baseContext }
-      const baileysMessage: BaileysMessage = {
-        imageMessage: { mimetype: 'image/png' },
-      }
-      const result = await routeMessage(context, baileysMessage)
-
-      expect(result.destination).toBe('RECEIPT_HANDLER')
-      expect(result.context.isReceipt).toBe(true)
-      expect(result.context.receiptType).toBe('image')
-    })
-
-    it('routes WEBP image to RECEIPT_HANDLER', async () => {
-      const context = { ...baseContext }
-      const baileysMessage: BaileysMessage = {
-        imageMessage: { mimetype: 'image/webp' },
-      }
-      const result = await routeMessage(context, baileysMessage)
-
-      expect(result.destination).toBe('RECEIPT_HANDLER')
-      expect(result.context.isReceipt).toBe(true)
-      expect(result.context.receiptType).toBe('image')
-    })
+    expect(result.destination).toBe('RECEIPT_HANDLER')
+    expect(result.context.isReceipt).toBe(true)
+    expect(result.context.receiptType).toBe('image')
   })
 
-  // AC4: Control group exclusion
-  describe('control group exclusion (AC4)', () => {
-    it('routes control group PDF to CONTROL_HANDLER, NOT receipt handler', async () => {
-      const context = { ...baseContext, isControlGroup: true }
-      const baileysMessage: BaileysMessage = {
-        documentMessage: { mimetype: 'application/pdf' },
-      }
-      const result = await routeMessage(context, baileysMessage)
+  it('routes control group PDF to CONTROL_HANDLER, NOT receipt handler', async () => {
+    const context = { ...baseContext, isControlGroup: true }
+    const baileysMessage: BaileysMessage = {
+      documentMessage: { mimetype: 'application/pdf' },
+    }
+    const result = await routeMessage(context, baileysMessage)
 
-      expect(result.destination).toBe('CONTROL_HANDLER')
-      expect(result.context.isReceipt).toBe(false)
-      expect(result.context.receiptType).toBeNull()
-    })
-
-    it('routes control group image to CONTROL_HANDLER, NOT receipt handler', async () => {
-      const context = { ...baseContext, isControlGroup: true }
-      const baileysMessage: BaileysMessage = {
-        imageMessage: { mimetype: 'image/jpeg' },
-      }
-      const result = await routeMessage(context, baileysMessage)
-
-      expect(result.destination).toBe('CONTROL_HANDLER')
-      expect(result.context.isReceipt).toBe(false)
-      expect(result.context.receiptType).toBeNull()
-    })
+    expect(result.destination).toBe('CONTROL_HANDLER')
+    expect(result.context.isReceipt).toBe(false)
+    expect(result.context.receiptType).toBeNull()
   })
 
-  // Price trigger priority over receipt
-  describe('price trigger priority', () => {
-    it('routes message with both receipt and trigger to PRICE_HANDLER (trigger has priority)', async () => {
-      const context = { ...baseContext, message: 'preço' }
-      const baileysMessage: BaileysMessage = {
-        documentMessage: { mimetype: 'application/pdf' },
-      }
-      const result = await routeMessage(context, baileysMessage)
+  it('routes unsupported document type to IGNORE', async () => {
+    const context = { ...baseContext }
+    const baileysMessage: BaileysMessage = {
+      documentMessage: { mimetype: 'application/msword' },
+    }
+    const result = await routeMessage(context, baileysMessage)
 
-      expect(result.destination).toBe('PRICE_HANDLER')
-      expect(result.context.isReceipt).toBe(true)
-      expect(result.context.hasTrigger).toBe(true)
-    })
-  })
-
-  // Unsupported types fall through
-  describe('unsupported types', () => {
-    it('routes unsupported document type to IGNORE (no trigger)', async () => {
-      const context = { ...baseContext }
-      const baileysMessage: BaileysMessage = {
-        documentMessage: { mimetype: 'application/msword' },
-      }
-      const result = await routeMessage(context, baileysMessage)
-
-      expect(result.destination).toBe('IGNORE')
-      expect(result.context.isReceipt).toBe(false)
-    })
-
-    it('routes unsupported image type to IGNORE (no trigger)', async () => {
-      const context = { ...baseContext }
-      const baileysMessage: BaileysMessage = {
-        imageMessage: { mimetype: 'image/gif' },
-      }
-      const result = await routeMessage(context, baileysMessage)
-
-      expect(result.destination).toBe('IGNORE')
-      expect(result.context.isReceipt).toBe(false)
-    })
+    expect(result.destination).toBe('IGNORE')
+    expect(result.context.isReceipt).toBe(false)
   })
 })
 
-// Per-Group Mode Routing Tests (replaces Training Mode)
+// ============================================================================
+// Per-group mode routing
+// ============================================================================
+
 describe('routeMessage per-group modes', () => {
   const mockSock = {} as WASocket
 
@@ -419,287 +433,126 @@ describe('routeMessage per-group modes', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    // Default: no trigger match from database
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
   })
 
-  describe('PAUSED mode - completely ignored', () => {
+  describe('PAUSED mode', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('paused')
     })
 
-    it('routes price trigger to IGNORE when group is paused', async () => {
+    it('routes any message to IGNORE when paused', async () => {
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
-
       expect(result.destination).toBe('IGNORE')
     })
 
-    it('routes non-trigger to IGNORE when group is paused', async () => {
-      const context = { ...baseContext, message: 'hello' }
-      const result = await routeMessage(context)
-
-      expect(result.destination).toBe('IGNORE')
-    })
-
-    it('routes receipt to IGNORE when group is paused', async () => {
+    it('routes receipt to IGNORE when paused', async () => {
       const context = { ...baseContext }
       const baileysMessage: BaileysMessage = {
         documentMessage: { mimetype: 'application/pdf' },
       }
       const result = await routeMessage(context, baileysMessage)
-
       expect(result.destination).toBe('IGNORE')
     })
   })
 
-  describe('LEARNING mode - observe only', () => {
+  describe('LEARNING mode', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('learning')
     })
 
-    it('routes price trigger to OBSERVE_ONLY when group is learning', async () => {
+    it('routes to OBSERVE_ONLY when learning', async () => {
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
-
       expect(result.destination).toBe('OBSERVE_ONLY')
-      expect(result.context.hasTrigger).toBe(true)
     })
 
-    it('routes non-trigger message to OBSERVE_ONLY when group is learning', async () => {
-      const context = { ...baseContext, message: 'hello world' }
-      const result = await routeMessage(context)
-
-      expect(result.destination).toBe('OBSERVE_ONLY')
-      expect(result.context.hasTrigger).toBe(false)
-    })
-
-    it('routes receipt to OBSERVE_ONLY when group is learning', async () => {
+    it('routes receipt to OBSERVE_ONLY when learning', async () => {
       const context = { ...baseContext }
       const baileysMessage: BaileysMessage = {
         documentMessage: { mimetype: 'application/pdf' },
       }
       const result = await routeMessage(context, baileysMessage)
-
       expect(result.destination).toBe('OBSERVE_ONLY')
-      expect(result.context.isReceipt).toBe(true)
     })
   })
 
-  describe('ASSISTED mode - observe only (future: suggestions)', () => {
+  describe('ASSISTED mode', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('assisted')
     })
 
-    it('routes price trigger to OBSERVE_ONLY when group is assisted', async () => {
+    it('routes to OBSERVE_ONLY when assisted', async () => {
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
-
-      expect(result.destination).toBe('OBSERVE_ONLY')
-    })
-
-    it('routes receipt to OBSERVE_ONLY when group is assisted', async () => {
-      const context = { ...baseContext }
-      const baileysMessage: BaileysMessage = {
-        documentMessage: { mimetype: 'application/pdf' },
-      }
-      const result = await routeMessage(context, baileysMessage)
-
       expect(result.destination).toBe('OBSERVE_ONLY')
     })
   })
 
-  describe('ACTIVE mode - normal routing with database triggers', () => {
+  describe('ACTIVE mode', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('active')
-      mockGetGroupConfigSync.mockReturnValue({
-        groupJid: '123456789@g.us',
-        groupName: 'Test Group',
-        mode: 'active',
-        triggerPatterns: [],
-        responseTemplates: {},
-        playerRoles: {},
-        aiThreshold: 50,
-        learningStartedAt: new Date(),
-        activatedAt: new Date(),
-        updatedAt: new Date(),
-        updatedBy: null,
-      })
-      // Default: no trigger match
-      mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
     })
 
-    it('routes global price trigger to PRICE_HANDLER', async () => {
+    it('routes trigger match to PRICE_HANDLER', async () => {
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger() })
       const context = { ...baseContext, message: 'preço' }
       const result = await routeMessage(context)
-
       expect(result.destination).toBe('PRICE_HANDLER')
     })
 
-    it('routes database trigger match to PRICE_HANDLER', async () => {
-      const trigger = {
-        id: 'trigger-1',
-        groupJid: '123456789@g.us',
-        triggerPhrase: 'compro usdt',
-        patternType: 'contains',
-        actionType: 'price_quote',
-        actionParams: {},
-        priority: 100,
-        isActive: true,
-        createdAt: '2026-01-01',
-        updatedAt: '2026-01-01',
-      }
-
-      mockMatchTrigger.mockResolvedValue({ ok: true, data: trigger })
-
-      const context = { ...baseContext, message: 'quero compro usdt agora' }
-      const result = await routeMessage(context)
-
-      expect(result.destination).toBe('PRICE_HANDLER')
-      expect(result.context.matchedTrigger).toBeDefined()
-      expect(result.context.matchedTrigger?.triggerPhrase).toBe('compro usdt')
-    })
-
-    it('routes non-trigger to IGNORE in active mode', async () => {
+    it('routes non-trigger to IGNORE', async () => {
       const context = { ...baseContext, message: 'hello' }
       const result = await routeMessage(context)
-
       expect(result.destination).toBe('IGNORE')
     })
 
-    it('routes receipt to RECEIPT_HANDLER in active mode', async () => {
+    it('routes receipt to RECEIPT_HANDLER', async () => {
       const context = { ...baseContext }
       const baileysMessage: BaileysMessage = {
         documentMessage: { mimetype: 'application/pdf' },
       }
       const result = await routeMessage(context, baileysMessage)
-
       expect(result.destination).toBe('RECEIPT_HANDLER')
     })
   })
 
-  describe('Control group works normally regardless of group mode', () => {
-    it('routes control group price trigger to PRICE_HANDLER even when groups are paused', async () => {
+  describe('Control group ignores mode', () => {
+    it('routes control group trigger even when paused', async () => {
       mockGetGroupModeSync.mockReturnValue('paused')
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger() })
       const context = { ...baseContext, message: 'preço', isControlGroup: true }
       const result = await routeMessage(context)
-
       expect(result.destination).toBe('PRICE_HANDLER')
-      expect(result.context.hasTrigger).toBe(true)
     })
 
-    it('routes control group non-trigger to CONTROL_HANDLER even when groups are learning', async () => {
+    it('routes control group non-trigger to CONTROL_HANDLER when learning', async () => {
       mockGetGroupModeSync.mockReturnValue('learning')
       const context = { ...baseContext, message: 'status', isControlGroup: true }
       const result = await routeMessage(context)
-
       expect(result.destination).toBe('CONTROL_HANDLER')
-    })
-
-    it('routes control group receipt to CONTROL_HANDLER, not RECEIPT_HANDLER', async () => {
-      mockGetGroupModeSync.mockReturnValue('active')
-      const context = { ...baseContext, isControlGroup: true }
-      const baileysMessage: BaileysMessage = {
-        documentMessage: { mimetype: 'application/pdf' },
-      }
-      const result = await routeMessage(context, baileysMessage)
-
-      expect(result.destination).toBe('CONTROL_HANDLER')
-      expect(result.context.isReceipt).toBe(false)
     })
   })
 
-  describe('Group config sync function called correctly', () => {
-    it('calls getGroupModeSync with groupId', async () => {
-      mockGetGroupModeSync.mockReturnValue('active')
-      mockGetGroupConfigSync.mockReturnValue(null)
+  // ---- Error handling ----
 
-      const context = { ...baseContext, groupId: 'specific-group@g.us', message: 'hello' }
-      await routeMessage(context)
-
-      expect(mockGetGroupModeSync).toHaveBeenCalledWith('specific-group@g.us')
-    })
-
-    it('handles null groupConfig gracefully', async () => {
-      mockGetGroupModeSync.mockReturnValue('active')
-      mockGetGroupConfigSync.mockReturnValue(null)
-
-      const context = { ...baseContext, message: 'compro usdt' }
-      const result = await routeMessage(context)
-
-      // Without group config, only global triggers work
-      expect(result.destination).toBe('IGNORE')
-    })
-  })
-
-  // Trigger service integration tests
-  describe('trigger service integration', () => {
+  describe('matchTrigger error handling', () => {
     beforeEach(() => {
       mockGetGroupModeSync.mockReturnValue('active')
     })
 
-    it('calls matchTrigger for active groups', async () => {
-      const context = { ...baseContext, message: 'hello' }
-      await routeMessage(context)
-
-      expect(mockMatchTrigger).toHaveBeenCalledWith('hello', '123456789@g.us')
-    })
-
-    it('calls matchTrigger for control group', async () => {
-      const context = { ...baseContext, message: 'hello', isControlGroup: true }
-      await routeMessage(context)
-
-      expect(mockMatchTrigger).toHaveBeenCalledWith('hello', '123456789@g.us')
-    })
-
-    it('populates matchedTrigger when trigger matches', async () => {
-      const trigger = {
-        id: 'trigger-1',
-        groupJid: '123456789@g.us',
-        triggerPhrase: 'compro usdt',
-        patternType: 'contains',
-        actionType: 'price_quote',
-        actionParams: {},
-        priority: 100,
-        isActive: true,
-        createdAt: '2026-01-01',
-        updatedAt: '2026-01-01',
-      }
-      mockMatchTrigger.mockResolvedValue({ ok: true, data: trigger })
-
-      const context = { ...baseContext, message: 'compro usdt' }
-      const result = await routeMessage(context)
-
-      expect(result.destination).toBe('PRICE_HANDLER')
-      expect(result.context.matchedTrigger).toBeDefined()
-      expect(result.context.matchedTrigger?.triggerPhrase).toBe('compro usdt')
-    })
-
-    it('falls back gracefully when matchTrigger throws in active mode', async () => {
+    it('routes to OBSERVE_ONLY when matchTrigger throws in active mode', async () => {
       mockMatchTrigger.mockRejectedValue(new Error('DB connection failed'))
-
       const context = { ...baseContext, message: 'hello' }
       const result = await routeMessage(context)
-
-      // Should fall through to IGNORE without crashing
-      expect(result.destination).toBe('IGNORE')
+      expect(result.destination).toBe('OBSERVE_ONLY')
     })
 
-    it('falls back to PRICE_HANDLER via hasTrigger when matchTrigger throws', async () => {
+    it('routes to CONTROL_HANDLER when matchTrigger throws in control group', async () => {
       mockMatchTrigger.mockRejectedValue(new Error('DB connection failed'))
-
-      const context = { ...baseContext, message: 'preço' }
-      const result = await routeMessage(context)
-
-      expect(result.destination).toBe('PRICE_HANDLER')
-    })
-
-    it('falls back gracefully when matchTrigger throws in control group', async () => {
-      mockMatchTrigger.mockRejectedValue(new Error('DB connection failed'))
-
       const context = { ...baseContext, message: 'status', isControlGroup: true }
       const result = await routeMessage(context)
-
       expect(result.destination).toBe('CONTROL_HANDLER')
     })
   })

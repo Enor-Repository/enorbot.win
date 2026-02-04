@@ -57,6 +57,8 @@ function createTestTrigger(overrides: Partial<GroupTrigger> = {}): GroupTrigger 
     actionParams: {},
     priority: 10,
     isActive: true,
+    isSystem: false,
+    scope: 'group',
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -113,6 +115,12 @@ describe('triggerService', () => {
       expect(isValidActionType('volume_quote')).toBe(true)
       expect(isValidActionType('text_response')).toBe(true)
       expect(isValidActionType('ai_prompt')).toBe(true)
+      expect(isValidActionType('deal_lock')).toBe(true)
+      expect(isValidActionType('deal_cancel')).toBe(true)
+      expect(isValidActionType('deal_confirm')).toBe(true)
+      expect(isValidActionType('deal_volume')).toBe(true)
+      expect(isValidActionType('tronscan_process')).toBe(true)
+      expect(isValidActionType('receipt_process')).toBe(true)
     })
 
     it('rejects invalid action types', () => {

@@ -1,23 +1,23 @@
 /**
  * Brazilian Price Formatting Utility
  *
- * Formats prices in Brazilian Real (BRL) style:
- * - Currency symbol: R$ (no space)
+ * Formats prices in Brazilian style:
  * - Decimal separator: comma (,)
  * - Always 4 decimal places
+ * - No currency symbol (just the number)
  * - No thousands separator (not required for typical USDT prices)
  */
 
 /**
- * Format price in Brazilian Real style.
+ * Format price in Brazilian style.
  * Uses comma as decimal separator and 4 decimal places.
  * IMPORTANT: Truncates to 4 decimal places (does NOT round).
  *
- * Financial accuracy: 5.82999 → R$5,8299 (not R$5,8300)
+ * Financial accuracy: 5.82999 → 5,8299 (not 5,8300)
  * This matches eNor's manual quoting behavior.
  *
  * @param price - Number to format (e.g., 5.823456)
- * @returns Formatted string (e.g., "R$5,8234")
+ * @returns Formatted string (e.g., "5,8234")
  * @throws Error if price is NaN or Infinity
  */
 export function formatBrazilianPrice(price: number): string {
@@ -33,7 +33,7 @@ export function formatBrazilianPrice(price: number): string {
   // Format with 4 decimal places
   const formatted = truncated.toFixed(4)
   // Replace period with comma for Brazilian format
-  return `R$${formatted.replace('.', ',')}`
+  return formatted.replace('.', ',')
 }
 
 // =============================================================================

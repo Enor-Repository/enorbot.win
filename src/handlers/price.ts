@@ -2,10 +2,11 @@
  * Price Handler - Story 2.3 + 2.4, extended by Story 3.3
  *
  * Handles price trigger messages by:
- * 1. Fetching current USDT/BRL price from Binance
- * 2. Formatting in Brazilian Real style (R$X,XX)
- * 3. Sending response with anti-detection behavior
- * 4. Graceful degradation with stall message and retry (Story 2.4)
+ * 1. Fetching current USDT/BRL price from Binance or Commercial Dollar (BCB)
+ * 2. Applying spread configuration from active time-based rules
+ * 3. Formatting in Brazilian style (X,XXXX - number only, no currency symbol)
+ * 4. Sending response with anti-detection behavior
+ * 5. Retry logic on fetch failure (Story 2.4)
  *
  * Story 3.3 extension:
  * - Integrates transient error tracking with sliding window
@@ -17,6 +18,7 @@ import { logger } from '../utils/logger.js'
 import { ok, err, type Result } from '../utils/result.js'
 import type { RouterContext } from '../bot/router.js'
 import { fetchPrice } from '../services/binance.js'
+import { fetchCommercialDollar } from '../services/awesomeapi.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { formatBrazilianPrice } from '../utils/format.js'
 import type { PriceHandlerResult } from '../types/handlers.js'
@@ -38,7 +40,7 @@ import { getConfig } from '../config.js'
 // H2 fix: Integrate Sprint 1 group spread service
 import { getSpreadConfig, calculateQuote, type SpreadConfig } from '../services/groupSpreadService.js'
 // Sprint 2: Time-based rule override
-import { getActiveRule } from '../services/ruleService.js'
+import { getActiveRule, type GroupRule } from '../services/ruleService.js'
 // Story 7.4: Bot message logging to Supabase
 import { logBotMessage } from '../services/messageHistory.js'
 // Sprint 5: Record bot response for suppression cooldown
@@ -55,10 +57,6 @@ import type { OTCMessageType } from '../services/messageClassifier.js'
 export const MAX_PRICE_RETRIES = 2
 /** Delay between retry attempts in milliseconds */
 export const RETRY_DELAY_MS = 2000
-/** Instant acknowledgement sent immediately on trigger */
-export const INSTANT_ACK_MESSAGE = 'Puxando o valor pra você, um momento...'
-/** Backwards-compatible alias for tests/logs */
-export const STALL_MESSAGE = INSTANT_ACK_MESSAGE
 
 /**
  * Sleep utility for retry spacing (Task 2).
@@ -105,52 +103,33 @@ export async function handlePriceMessage(
     messageLength: context.message.length,
   })
 
-  // Instant acknowledgement to keep the bot feeling responsive
-  const ackResult = await sendWithAntiDetection(
-    context.sock,
-    context.groupId,
-    INSTANT_ACK_MESSAGE
-  )
+  // Step 0: Resolve active rule (pricing source + spread) — single lookup
+  const { pricingSource, activeRule } = await resolveActiveRulePricing(context.groupId)
 
-  if (!ackResult.ok) {
-    logger.warn('Failed to send instant ack message', {
-      event: 'price_ack_send_failed',
-      error: ackResult.error,
-      groupId: context.groupId,
-    })
-  } else {
-    // Story 7.4 AC2: Log stall message to history
-    logBotMessage({
-      groupJid: context.groupId,
-      content: INSTANT_ACK_MESSAGE,
-      messageType: 'stall',
-      isControlGroup: false,
-    })
-  }
-
-  // Step 1: First attempt to fetch price from Binance
-  const firstResult = await fetchPrice()
+  // Step 1: First attempt to fetch price
+  const firstResult = await fetchBasePrice(pricingSource, context.groupId)
 
   // Happy path - first attempt succeeds
   if (firstResult.ok) {
     // Story 3.3: Record successful operation to reset transient error counter
-    recordSuccessfulOperation('binance')
-    return await sendPriceResponse(context, firstResult.data, undefined, responseStartTime)
+    recordSuccessfulOperation(pricingSource === 'commercial_dollar' ? 'awesomeapi' : 'binance')
+    return await sendPriceResponse(context, firstResult.data, pricingSource, activeRule, undefined, responseStartTime)
   }
 
   // Story 3.1: Track first failure (AC2 - consecutive failure escalation)
-  recordFailure('binance')
+  const errorSource = pricingSource === 'commercial_dollar' ? 'awesomeapi' : 'binance'
+  recordFailure(errorSource)
 
   // Story 3.3: Track transient error in sliding window
   const firstErrorClassification = classifyBinanceError(firstResult.error)
   if (firstErrorClassification === 'transient') {
-    const { shouldEscalate, count } = recordTransientError('binance')
+    const { shouldEscalate, count } = recordTransientError(errorSource)
     if (shouldEscalate) {
       // Escalate transient to critical due to frequency
-      logErrorEscalation('binance', count)
+      logErrorEscalation(errorSource, count)
       triggerAutoPause(
-        `Binance API failures (${count} in 60s)`,
-        { source: 'binance', isTransientEscalation: true, lastError: firstResult.error }
+        `${errorSource} API failures (${count} in 60s)`,
+        { source: errorSource, isTransientEscalation: true, lastError: firstResult.error }
       )
       // Continue with retry anyway, but auto-pause + recovery scheduled
     }
@@ -165,32 +144,33 @@ export async function handlePriceMessage(
       attempt,
       maxRetries: MAX_PRICE_RETRIES,
       groupId: context.groupId,
+      pricingSource,
     })
 
-    const retryResult = await fetchPrice()
+    const retryResult = await fetchBasePrice(pricingSource, context.groupId)
 
     if (retryResult.ok) {
       // Story 3.3: Record successful operation to reset transient error counter
-      recordSuccessfulOperation('binance')
+      recordSuccessfulOperation(errorSource)
       // Recovery success! Send price as follow-up
-      return await sendPriceResponse(context, retryResult.data, {
+      return await sendPriceResponse(context, retryResult.data, pricingSource, activeRule, {
         recovered: true,
         retryCount: attempt,
       }, responseStartTime)
     }
 
     // Log retry failure and track for escalation (Story 3.1 AC2)
-    recordFailure('binance')
+    recordFailure(errorSource)
 
     // Story 3.3: Track transient error in sliding window for retry failures
     const retryErrorClassification = classifyBinanceError(retryResult.error)
     if (retryErrorClassification === 'transient') {
-      const { shouldEscalate, count } = recordTransientError('binance')
+      const { shouldEscalate, count } = recordTransientError(errorSource)
       if (shouldEscalate) {
-        logErrorEscalation('binance', count)
+        logErrorEscalation(errorSource, count)
         triggerAutoPause(
-          `Binance API failures (${count} in 60s)`,
-          { source: 'binance', isTransientEscalation: true, lastError: retryResult.error }
+          `${errorSource} API failures (${count} in 60s)`,
+          { source: errorSource, isTransientEscalation: true, lastError: retryResult.error }
         )
       }
     }
@@ -200,7 +180,8 @@ export async function handlePriceMessage(
       attempt,
       error: retryResult.error,
       groupId: context.groupId,
-      failureCount: getFailureCount('binance'),
+      failureCount: getFailureCount(errorSource),
+      pricingSource,
     })
   }
 
@@ -208,25 +189,25 @@ export async function handlePriceMessage(
   const totalAttempts = 1 + MAX_PRICE_RETRIES
 
   // Story 3.1: Check if escalation threshold reached (failures already tracked above)
-  const failureCount = getFailureCount('binance')
+  const failureCount = getFailureCount(errorSource)
   const shouldEscalate = failureCount >= ESCALATION_THRESHOLD
   const classification = shouldEscalate ? 'critical' : classifyBinanceError('Price unavailable after retries')
 
   if (shouldEscalate) {
-    logErrorEscalation('binance', getFailureCount('binance'))
+    logErrorEscalation(errorSource, getFailureCount(errorSource))
     // Story 3.2: Trigger auto-pause on critical escalation
     triggerAutoPause(
-      `Binance API failures (${failureCount} consecutive)`,
-      { source: 'binance', lastError: 'Price unavailable after retries', groupId: context.groupId }
+      `${errorSource} API failures (${failureCount} consecutive)`,
+      { source: errorSource, lastError: 'Price unavailable after retries', groupId: context.groupId }
     )
   }
 
   logClassifiedError({
     type: 'price_fetch_exhausted',
     classification,
-    source: 'binance',
+    source: errorSource,
     timestamp: new Date().toISOString(),
-    context: { totalAttempts, groupId: context.groupId },
+    context: { totalAttempts, groupId: context.groupId, pricingSource },
   })
 
   logger.error('Price unavailable after retries', {
@@ -235,9 +216,73 @@ export async function handlePriceMessage(
     groupId: context.groupId,
     classification,
     escalated: shouldEscalate,
+    pricingSource,
   })
 
   return err('Price unavailable after retries')
+}
+
+/** Result of resolving the active rule for pricing */
+interface ResolvedPricing {
+  pricingSource: string
+  activeRule: GroupRule | null
+}
+
+/**
+ * Resolve the active rule to get pricing source and spread config.
+ * Called once per request — result is passed to both fetchBasePrice and sendPriceResponse.
+ */
+async function resolveActiveRulePricing(groupJid: string): Promise<ResolvedPricing> {
+  try {
+    const activeRuleResult = await getActiveRule(groupJid)
+    if (activeRuleResult.ok && activeRuleResult.data) {
+      const rule = activeRuleResult.data
+      return {
+        pricingSource: rule.pricingSource || 'usdt_binance',
+        activeRule: rule,
+      }
+    }
+  } catch (error) {
+    logger.warn('Failed to resolve active rule, defaulting to Binance', {
+      event: 'pricing_source_fallback',
+      groupJid,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  return { pricingSource: 'usdt_binance', activeRule: null }
+}
+
+/**
+ * Fetch base price from the configured source.
+ * Commercial dollar uses AwesomeAPI ask rate, falls back to Binance.
+ */
+async function fetchBasePrice(
+  pricingSource: string,
+  groupJid: string
+): Promise<Result<number>> {
+  if (pricingSource === 'commercial_dollar') {
+    const commercialResult = await fetchCommercialDollar()
+    if (commercialResult.ok) {
+      logger.debug('Commercial dollar rate fetched', {
+        event: 'commercial_dollar_fetched',
+        groupJid,
+        rate: commercialResult.data.ask,
+      })
+      return ok(commercialResult.data.ask)
+    }
+    // Fall back to Binance if commercial dollar unavailable
+    logger.warn('Commercial dollar unavailable, falling back to Binance', {
+      event: 'commercial_dollar_fallback',
+      groupJid,
+      error: commercialResult.error,
+    })
+  }
+
+  const binanceResult = await fetchPrice()
+  if (!binanceResult.ok) {
+    return err(binanceResult.error)
+  }
+  return ok(binanceResult.data)
 }
 
 /**
@@ -248,18 +293,22 @@ export async function handlePriceMessage(
  * Sprint 1 (H2 fix): Applies group-specific spread before formatting.
  *
  * @param context - Router context
- * @param price - Raw price from Binance
+ * @param price - Raw base price from the configured pricing source
+ * @param pricingSource - The pricing source used ('commercial_dollar' or 'usdt_binance')
+ * @param activeRule - The resolved active rule (already looked up in handlePriceMessage)
  * @param recoveryMeta - Optional recovery metadata (for retry success)
  * @param responseStartTime - Start time for response time calculation
  */
 async function sendPriceResponse(
   context: RouterContext,
   price: number,
+  pricingSource: string,
+  activeRule: ResolvedPricing['activeRule'],
   recoveryMeta?: { recovered: true; retryCount: number },
   responseStartTime?: number
 ): Promise<Result<PriceHandlerResult>> {
-  // H2 fix: Apply group-specific spread configuration
-  // Sprint 2: Active time-based rule overrides default spread
+  // Apply group-specific spread configuration
+  // Active time-based rule overrides default spread
   let finalPrice = price
   let spreadConfig: SpreadConfig | null = null
   let activeRuleName: string | null = null
@@ -270,62 +319,49 @@ async function sendPriceResponse(
       spreadConfig = configResult.data
     }
   } catch (error) {
-    logger.warn('Failed to get spread config, using raw Binance rate', {
+    logger.warn('Failed to get spread config, using raw base rate', {
       event: 'spread_config_fallback',
       groupId: context.groupId,
+      pricingSource,
       error: error instanceof Error ? error.message : String(error),
     })
   }
 
-  // Sprint 2: Check for active time-based rule override
-  // Note: getActiveRule uses in-memory cache (1-min TTL) so this is fast for repeated calls
-  try {
-    const activeRuleResult = await getActiveRule(context.groupId)
-    if (activeRuleResult.ok && activeRuleResult.data) {
-      const rule = activeRuleResult.data
-      activeRuleName = rule.name
+  // Apply active rule's spread override (rule already resolved)
+  if (activeRule) {
+    activeRuleName = activeRule.name
 
-      // Build effective config: start from default spread config (for side, currency, language, TTL),
-      // then override spread/pricing fields from the active rule
-      const now = new Date()
-      const baseConfig = spreadConfig ?? {
-        groupJid: context.groupId,
-        spreadMode: 'bps' as const,
-        sellSpread: 0,
-        buySpread: 0,
-        quoteTtlSeconds: 180,
-        defaultSide: 'client_buys_usdt' as const,
-        defaultCurrency: 'BRL' as const,
-        language: 'pt-BR' as const,
-        createdAt: now,
-        updatedAt: now,
-      }
-
-      spreadConfig = {
-        ...baseConfig,
-        spreadMode: rule.spreadMode,
-        sellSpread: rule.sellSpread,
-        buySpread: rule.buySpread,
-      }
-
-      logger.info('Active time rule overriding spread config', {
-        event: 'time_rule_override',
-        groupId: context.groupId,
-        ruleName: rule.name,
-        ruleId: rule.id,
-        pricingSource: rule.pricingSource,
-        spreadMode: rule.spreadMode,
-        sellSpread: rule.sellSpread,
-        buySpread: rule.buySpread,
-        priority: rule.priority,
-      })
+    const now = new Date()
+    const baseConfig = spreadConfig ?? {
+      groupJid: context.groupId,
+      spreadMode: 'bps' as const,
+      sellSpread: 0,
+      buySpread: 0,
+      quoteTtlSeconds: 180,
+      defaultSide: 'client_buys_usdt' as const,
+      defaultCurrency: 'BRL' as const,
+      language: 'pt-BR' as const,
+      createdAt: now,
+      updatedAt: now,
     }
-  } catch (error) {
-    // Non-fatal: if rule lookup fails, continue with default spread config
-    logger.warn('Failed to check active rule, using default spread', {
-      event: 'time_rule_lookup_fallback',
+
+    spreadConfig = {
+      ...baseConfig,
+      spreadMode: activeRule.spreadMode,
+      sellSpread: activeRule.sellSpread,
+      buySpread: activeRule.buySpread,
+    }
+
+    logger.info('Active time rule overriding spread config', {
+      event: 'time_rule_override',
       groupId: context.groupId,
-      error: error instanceof Error ? error.message : String(error),
+      ruleName: activeRule.name,
+      ruleId: activeRule.id,
+      pricingSource,
+      spreadMode: activeRule.spreadMode,
+      sellSpread: activeRule.sellSpread,
+      buySpread: activeRule.buySpread,
+      priority: activeRule.priority,
     })
   }
 
@@ -336,8 +372,9 @@ async function sendPriceResponse(
     logger.debug('Applied spread to price', {
       event: 'price_spread_applied',
       groupId: context.groupId,
-      binanceRate: price,
+      baseRate: price,
       finalRate: finalPrice,
+      pricingSource,
       spreadMode: spreadConfig.spreadMode,
       defaultSide: spreadConfig.defaultSide,
       spreadApplied: spreadConfig.defaultSide === 'client_buys_usdt'
@@ -373,16 +410,16 @@ async function sendPriceResponse(
 
   const timestamp = new Date().toISOString()
 
-  // Story 7.4 AC1: Log price response to history
-  // H2 fix: Include spread info in metadata
+  // Log price response to history
   logBotMessage({
     groupJid: context.groupId,
     content: formattedPrice,
     messageType: 'price_response',
     isControlGroup: false,
     metadata: {
-      binanceRate: price,
+      baseRate: price,
       finalRate: finalPrice,
+      pricingSource,
       spreadApplied: spreadConfig ? (spreadConfig.defaultSide === 'client_buys_usdt'
         ? spreadConfig.sellSpread
         : spreadConfig.buySpread) : 0,
@@ -392,32 +429,27 @@ async function sendPriceResponse(
     },
   })
 
-  // Sprint 5: Record bot response for suppression cooldown tracking
+  // Record bot response for suppression cooldown tracking
   recordBotResponse(context.groupId)
 
-  // Story 8.7: Log bot response to observations (fire-and-forget)
+  // Log bot response to observations (fire-and-forget)
   logBotResponseObservation({
     context,
     responseContent: formattedPrice,
     responseStartTime,
     messageType: 'price_response',
-    aiUsed: false, // Price responses don't use AI
+    aiUsed: false,
   })
 
   if (recoveryMeta) {
-    // Story 4.3: Record activity for status command
     recordMessageSent(context.groupId)
-
-    // Story 5.2: Log to Excel (fire-and-forget)
-    // H2 fix: Log the final price with spread applied
     logToExcel(context, finalPrice)
 
-    // Recovery success logging (AC3)
-    // H2 fix: Include spread info in logs
     logger.info('Recovered after retry', {
       event: 'price_recovered_after_retry',
-      binanceRate: price,
+      baseRate: price,
       finalRate: finalPrice,
+      pricingSource,
       spreadApplied: spreadConfig ? (spreadConfig.defaultSide === 'client_buys_usdt'
         ? spreadConfig.sellSpread
         : spreadConfig.buySpread) : 0,
@@ -429,7 +461,7 @@ async function sendPriceResponse(
     })
 
     return ok({
-      price: finalPrice, // Return the final price with spread
+      price: finalPrice,
       groupId: context.groupId,
       timestamp,
       recovered: true,
@@ -438,19 +470,14 @@ async function sendPriceResponse(
     })
   }
 
-  // Story 4.3: Record activity for status command
   recordMessageSent(context.groupId)
-
-  // Story 5.2: Log to Excel (fire-and-forget)
-  // H2 fix: Log the final price with spread applied
   logToExcel(context, finalPrice)
 
-  // Normal success logging (Story 2.3)
-  // H2 fix: Include spread info in logs
   logger.info('Price response sent', {
     event: 'price_response_sent',
-    binanceRate: price,
+    baseRate: price,
     finalRate: finalPrice,
+    pricingSource,
     spreadApplied: spreadConfig ? (spreadConfig.defaultSide === 'client_buys_usdt'
       ? spreadConfig.sellSpread
       : spreadConfig.buySpread) : 0,
@@ -461,7 +488,7 @@ async function sendPriceResponse(
   })
 
   return ok({
-    price: finalPrice, // Return the final price with spread
+    price: finalPrice,
     groupId: context.groupId,
     timestamp,
     ...(activeRuleName && { activeRuleName }),

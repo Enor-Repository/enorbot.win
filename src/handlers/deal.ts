@@ -25,7 +25,6 @@ import type { RouterContext } from '../bot/router.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { logBotMessage } from '../services/messageHistory.js'
 import { recordMessageSent } from '../bot/state.js'
-import { getKeywordsForPattern } from '../services/systemPatternService.js'
 import {
   findClientDeal,
   createDeal,
@@ -769,49 +768,3 @@ export function stopDealSweepTimer(): void {
   }
 }
 
-// ============================================================================
-// Message Classification Bridge
-// ============================================================================
-
-/**
- * Check if a message is a deal cancellation request.
- * Keywords loaded from database (editable via dashboard).
- */
-export async function isDealCancellation(message: string): Promise<boolean> {
-  const lower = message.toLowerCase().trim()
-  const keywords = await getKeywordsForPattern('deal_cancellation')
-  const pattern = new RegExp(`\\b(${keywords.map(k => k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`)
-  return pattern.test(lower)
-}
-
-/**
- * Check if a message is a price lock request.
- * Keywords loaded from database (editable via dashboard).
- */
-export async function isPriceLockMessage(message: string): Promise<boolean> {
-  const lower = message.toLowerCase().trim()
-  const keywords = await getKeywordsForPattern('price_lock')
-  const pattern = new RegExp(`\\b(${keywords.map(k => k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`)
-  return pattern.test(lower)
-}
-
-/**
- * Check if a message is a deal confirmation.
- * Keywords loaded from database (editable via dashboard).
- */
-export async function isConfirmationMessage(message: string): Promise<boolean> {
-  const lower = message.toLowerCase().trim()
-  const keywords = await getKeywordsForPattern('deal_confirmation')
-  const pattern = new RegExp(`\\b(${keywords.map(k => k.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`)
-  return pattern.test(lower)
-}
-
-/**
- * Check if a message contains volume/amount information
- * that could initiate a deal.
- */
-export function hasVolumeInfo(message: string): boolean {
-  const brl = extractBrlAmount(message)
-  const usdt = extractUsdtAmount(message)
-  return brl !== null || usdt !== null
-}

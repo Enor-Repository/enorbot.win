@@ -53,6 +53,8 @@ function createTestTrigger(overrides: Partial<GroupTrigger> = {}): GroupTrigger 
     actionParams: {},
     priority: 10,
     isActive: true,
+    isSystem: false,
+    scope: 'group',
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -428,6 +430,51 @@ describe('actionExecutor', () => {
       expect(result.ok).toBe(true)
       if (result.ok) {
         expect(result.data.metadata.senderName).toBe('João')
+      }
+    })
+  })
+
+  // =========================================================================
+  // Delegation actions (Sprint 7B)
+  // =========================================================================
+
+  describe('delegation actions', () => {
+    const delegationCases: Array<{
+      actionType: string
+      expectedHandler: string
+    }> = [
+      { actionType: 'deal_lock', expectedHandler: 'DEAL_HANDLER' },
+      { actionType: 'deal_cancel', expectedHandler: 'DEAL_HANDLER' },
+      { actionType: 'deal_confirm', expectedHandler: 'DEAL_HANDLER' },
+      { actionType: 'deal_volume', expectedHandler: 'DEAL_HANDLER' },
+      { actionType: 'tronscan_process', expectedHandler: 'TRONSCAN_HANDLER' },
+      { actionType: 'receipt_process', expectedHandler: 'RECEIPT_HANDLER' },
+    ]
+
+    for (const { actionType, expectedHandler } of delegationCases) {
+      it(`${actionType} delegates to ${expectedHandler}`, async () => {
+        const trigger = createTestTrigger({ actionType: actionType as any })
+        const result = await executeAction(trigger, null, createTestContext())
+
+        expect(result.ok).toBe(true)
+        if (result.ok) {
+          expect(result.data.actionType).toBe(actionType)
+          expect(result.data.message).toBe(`__DELEGATE__:${expectedHandler}`)
+          expect(result.data.metadata.isDelegation).toBe(true)
+          expect(result.data.metadata.delegateTo).toBe(expectedHandler)
+          expect(result.data.metadata.actionType).toBe(actionType)
+        }
+      })
+    }
+
+    it('delegation actions ignore active rule', async () => {
+      const rule = createTestRule()
+      const trigger = createTestTrigger({ actionType: 'deal_lock' as any })
+      const result = await executeAction(trigger, rule, createTestContext())
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.ruleApplied).toBe(false)
       }
     })
   })

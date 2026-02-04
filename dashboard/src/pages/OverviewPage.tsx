@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Activity, TrendingUp, Settings } from 'lucide-react'
 import { ActivityHeatmap } from '@/components/analytics/ActivityHeatmap'
 import { PriceTracker } from '@/components/shared/PriceTracker'
-import { API_ENDPOINTS } from '@/lib/api'
+import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 
 // Constants (no magic numbers)
@@ -80,7 +80,7 @@ export function OverviewPage() {
     try {
       const response = await fetch(API_ENDPOINTS.groupMode(groupJid), {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: writeHeaders(),
         body: JSON.stringify({ mode: newMode }),
       })
 

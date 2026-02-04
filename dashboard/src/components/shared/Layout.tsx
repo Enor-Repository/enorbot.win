@@ -61,7 +61,7 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Footer */}
         <div className="p-4 border-t border-border text-xs text-muted-foreground">
-          <p>v2.0.0 • Sprint 6</p>
+          <p>v2.1.0 • Sprint 7B</p>
         </div>
       </aside>
 

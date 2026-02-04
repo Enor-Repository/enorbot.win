@@ -393,18 +393,16 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       // Determine if control group by pattern matching
       const isControlGroup = isControlGroupMessage(groupName, config.CONTROL_GROUP_PATTERN)
 
-      // Auto-register non-control groups with groupConfig service
-      // This enables per-group mode management and fuzzy matching
-      if (!isControlGroup) {
-        // Fire-and-forget - don't block message processing
-        ensureGroupRegistered(groupId, groupName, sender).catch((e) => {
-          logger.warn('Group registration failed', {
-            event: 'group_registration_failed',
-            groupId,
-            error: e instanceof Error ? e.message : String(e),
-          })
+      // Auto-register groups (including control group) with groupConfig service
+      // This enables per-group mode management and dashboard visibility
+      // Fire-and-forget - don't block message processing
+      ensureGroupRegistered(groupId, groupName, sender).catch((e) => {
+        logger.warn('Group registration failed', {
+          event: 'group_registration_failed',
+          groupId,
+          error: e instanceof Error ? e.message : String(e),
         })
-      }
+      })
 
       const context: RouterContext = {
         groupId,

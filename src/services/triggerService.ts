@@ -21,13 +21,34 @@ import { ok, err, type Result } from '../utils/result.js'
 export type PatternType = 'exact' | 'contains' | 'regex'
 
 /** Action to execute when a trigger matches */
-export type TriggerActionType = 'price_quote' | 'volume_quote' | 'text_response' | 'ai_prompt'
+export type TriggerActionType =
+  | 'price_quote'
+  | 'volume_quote'
+  | 'text_response'
+  | 'ai_prompt'
+  | 'deal_lock'
+  | 'deal_cancel'
+  | 'deal_confirm'
+  | 'deal_volume'
+  | 'tronscan_process'
+  | 'receipt_process'
+  | 'control_command'
+
+/** Trigger scope: 'group' (normal) or 'control_only' (only fires in control groups) */
+export type TriggerScope = 'group' | 'control_only'
+
+/** All valid scope values */
+const VALID_SCOPES: TriggerScope[] = ['group', 'control_only']
 
 /** All valid pattern types */
 const VALID_PATTERN_TYPES: PatternType[] = ['exact', 'contains', 'regex']
 
 /** All valid action types */
-const VALID_ACTION_TYPES: TriggerActionType[] = ['price_quote', 'volume_quote', 'text_response', 'ai_prompt']
+const VALID_ACTION_TYPES: TriggerActionType[] = [
+  'price_quote', 'volume_quote', 'text_response', 'ai_prompt',
+  'deal_lock', 'deal_cancel', 'deal_confirm', 'deal_volume',
+  'tronscan_process', 'receipt_process', 'control_command',
+]
 
 /** Trigger configuration */
 export interface GroupTrigger {
@@ -39,6 +60,8 @@ export interface GroupTrigger {
   actionParams: Record<string, unknown>
   priority: number
   isActive: boolean
+  isSystem: boolean
+  scope: TriggerScope
   createdAt: Date
   updatedAt: Date
 }
@@ -53,6 +76,8 @@ interface GroupTriggerRow {
   action_params: Record<string, unknown>
   priority: number
   is_active: boolean
+  is_system: boolean
+  scope: string
   created_at: string
   updated_at: string
 }
@@ -66,6 +91,7 @@ export interface TriggerInput {
   actionParams?: Record<string, unknown>
   priority?: number
   isActive?: boolean
+  scope?: TriggerScope
 }
 
 /** Input for updating a trigger (all fields optional) */
@@ -76,6 +102,7 @@ export interface TriggerUpdateInput {
   actionParams?: Record<string, unknown>
   priority?: number
   isActive?: boolean
+  scope?: TriggerScope
 }
 
 // ============================================================================
@@ -143,6 +170,8 @@ function rowToTrigger(row: GroupTriggerRow): GroupTrigger {
     actionParams: row.action_params || {},
     priority: row.priority,
     isActive: row.is_active,
+    isSystem: row.is_system ?? false,
+    scope: (row.scope as TriggerScope) || 'group',
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   }
@@ -158,6 +187,7 @@ function inputToRow(input: TriggerInput): Record<string, unknown> {
     action_params: input.actionParams || {},
     priority: input.priority ?? 0,
     is_active: input.isActive ?? true,
+    scope: input.scope || 'group',
   }
 }
 
@@ -171,6 +201,7 @@ function updateToRow(input: TriggerUpdateInput): Record<string, unknown> {
   if (input.actionParams !== undefined) row.action_params = input.actionParams
   if (input.priority !== undefined) row.priority = input.priority
   if (input.isActive !== undefined) row.is_active = input.isActive
+  if (input.scope !== undefined) row.scope = input.scope
 
   return row
 }
@@ -187,6 +218,11 @@ export function isValidPatternType(type: string): type is PatternType {
 /** Validate action type */
 export function isValidActionType(type: string): type is TriggerActionType {
   return VALID_ACTION_TYPES.includes(type as TriggerActionType)
+}
+
+/** Validate scope */
+export function isValidScope(scope: string): scope is TriggerScope {
+  return VALID_SCOPES.includes(scope as TriggerScope)
 }
 
 /** Maximum allowed regex pattern length to mitigate ReDoS */
@@ -233,6 +269,10 @@ export function validateTriggerInput(input: TriggerInput): string | null {
 
   if (input.priority !== undefined && (input.priority < 0 || input.priority > MAX_PRIORITY)) {
     return `Priority must be between 0 and ${MAX_PRIORITY}`
+  }
+
+  if (input.scope !== undefined && !isValidScope(input.scope)) {
+    return `Invalid scope: ${input.scope}. Must be one of: ${VALID_SCOPES.join(', ')}`
   }
 
   // Validate action params based on action type
@@ -299,13 +339,19 @@ export function matchesPattern(message: string, trigger: GroupTrigger): boolean 
  * Find the first matching trigger for a message in a group.
  * Triggers are sorted by priority DESC; first match wins.
  *
+ * Scope filtering:
+ * - In control groups (isControlGroup=true): all triggers match (both 'group' and 'control_only')
+ * - In regular groups (isControlGroup=false): only 'group' scope triggers match
+ *
  * @param message - The incoming message text
  * @param groupJid - The group to check triggers for
+ * @param isControlGroup - Whether the message is from a control group
  * @returns The matching trigger or null
  */
 export async function matchTrigger(
   message: string,
-  groupJid: string
+  groupJid: string,
+  isControlGroup = false
 ): Promise<Result<GroupTrigger | null>> {
   const triggersResult = await getTriggersForGroup(groupJid)
   if (!triggersResult.ok) return triggersResult as Result<GroupTrigger | null>
@@ -314,6 +360,9 @@ export async function matchTrigger(
   if (triggers.length === 0) return ok(null)
 
   for (const trigger of triggers) {
+    // Scope filtering: control_only triggers only fire in control groups
+    if (!isControlGroup && trigger.scope === 'control_only') continue
+
     if (matchesPattern(message, trigger)) {
       logger.debug('Trigger matched', {
         event: 'trigger_matched',
@@ -323,6 +372,7 @@ export async function matchTrigger(
         patternType: trigger.patternType,
         actionType: trigger.actionType,
         priority: trigger.priority,
+        scope: trigger.scope,
       })
       return ok(trigger)
     }

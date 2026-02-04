@@ -14,6 +14,7 @@
 import { logger } from '../utils/logger.js'
 import { ok, err, type Result } from '../utils/result.js'
 import { fetchPrice } from './binance.js'
+import { fetchCommercialDollar } from './awesomeapi.js'
 import { formatBrazilianPrice } from '../utils/format.js'
 import { extractVolumeBrl } from '../utils/triggers.js'
 import {
@@ -52,6 +53,42 @@ export interface ActionContext {
   groupJid: string
   /** The sender's name (for personalized responses) */
   senderName?: string
+}
+
+// ============================================================================
+// Shared: Fetch base rate from pricing source
+// ============================================================================
+
+/**
+ * Fetch the base exchange rate from the configured pricing source.
+ * Falls back to Binance if commercial dollar API is unavailable.
+ */
+async function fetchBaseRate(
+  pricingSource: string,
+  groupJid: string
+): Promise<Result<number>> {
+  if (pricingSource === 'commercial_dollar') {
+    const commercialResult = await fetchCommercialDollar()
+    if (!commercialResult.ok) {
+      logger.warn('Commercial dollar unavailable, falling back to Binance', {
+        event: 'commercial_dollar_fallback',
+        groupJid,
+        error: commercialResult.error,
+      })
+      const binanceResult = await fetchPrice()
+      if (!binanceResult.ok) {
+        return err(`Price unavailable: ${binanceResult.error}`)
+      }
+      return ok(binanceResult.data)
+    }
+    return ok(commercialResult.data.ask)
+  }
+
+  const priceResult = await fetchPrice()
+  if (!priceResult.ok) {
+    return err(`Price unavailable: ${priceResult.error}`)
+  }
+  return ok(priceResult.data)
 }
 
 // ============================================================================
@@ -103,19 +140,17 @@ async function executePriceQuote(
     }
   }
 
-  // Fetch price from Binance (always USDT/BRL for now)
-  const priceResult = await fetchPrice()
-  if (!priceResult.ok) {
-    return err(`Price unavailable: ${priceResult.error}`)
-  }
-
-  const baseRate = priceResult.data
+  // Fetch price based on pricing source
+  const pricingSource = activeRule?.pricingSource || 'usdt_binance'
+  const rateResult = await fetchBaseRate(pricingSource, context.groupJid)
+  if (!rateResult.ok) return rateResult as Result<ActionResult>
+  const baseRate = rateResult.data
 
   // Apply spread if we have config
   let message: string
   const metadata: Record<string, unknown> = {
     baseRate,
-    pricingSource: activeRule?.pricingSource || 'usdt_binance',
+    pricingSource,
   }
 
   if (spreadConfig && (spreadConfig.sellSpread !== 0 || spreadConfig.buySpread !== 0)) {
@@ -202,13 +237,11 @@ async function executeVolumeQuote(
     }
   }
 
-  // Fetch price from Binance
-  const priceResult = await fetchPrice()
-  if (!priceResult.ok) {
-    return err(`Price unavailable: ${priceResult.error}`)
-  }
-
-  const baseRate = priceResult.data
+  // Fetch price based on pricing source
+  const pricingSource = activeRule?.pricingSource || 'usdt_binance'
+  const rateResult = await fetchBaseRate(pricingSource, context.groupJid)
+  if (!rateResult.ok) return rateResult as Result<ActionResult>
+  const baseRate = rateResult.data
 
   // Calculate with spread
   let effectiveRate = baseRate
@@ -237,7 +270,7 @@ async function executeVolumeQuote(
     usdtAmount,
     effectiveRate,
     baseRate,
-    pricingSource: activeRule?.pricingSource || 'usdt_binance',
+    pricingSource,
   }
 
   if (spreadConfig) {
@@ -354,6 +387,63 @@ function executeAiPrompt(
 }
 
 // ============================================================================
+// Deal Flow / Handler Delegation Actions (Sprint 7B)
+// ============================================================================
+
+/**
+ * Handler-delegation actions return a signal message prefixed with __DELEGATE__
+ * so the router knows to forward to the appropriate handler instead of
+ * sending the message directly to WhatsApp.
+ *
+ * These actions don't generate user-facing responses — the actual handlers
+ * (deal handler, tronscan handler, receipt handler) do that.
+ */
+
+type DelegationAction = 'deal_lock' | 'deal_cancel' | 'deal_confirm' | 'deal_volume' | 'tronscan_process' | 'receipt_process' | 'control_command'
+
+/** Map action type to the RouteDestination the router should delegate to */
+const DELEGATION_MAP: Record<DelegationAction, string> = {
+  deal_lock: 'DEAL_HANDLER',
+  deal_cancel: 'DEAL_HANDLER',
+  deal_confirm: 'DEAL_HANDLER',
+  deal_volume: 'DEAL_HANDLER',
+  tronscan_process: 'TRONSCAN_HANDLER',
+  receipt_process: 'RECEIPT_HANDLER',
+  control_command: 'CONTROL_HANDLER',
+}
+
+function executeDelegation(
+  trigger: GroupTrigger,
+  _activeRule: GroupRule | null,
+  context: ActionContext
+): Result<ActionResult> {
+  const actionType = trigger.actionType as DelegationAction
+  const handler = DELEGATION_MAP[actionType]
+
+  if (!handler) {
+    return err(`No delegation handler for action type: ${actionType}`)
+  }
+
+  logger.info('Delegation action prepared', {
+    event: `action_${actionType}`,
+    triggerId: trigger.id,
+    groupJid: context.groupJid,
+    delegateTo: handler,
+  })
+
+  return ok({
+    message: `__DELEGATE__:${handler}`,
+    actionType: trigger.actionType,
+    ruleApplied: false,
+    metadata: {
+      isDelegation: true,
+      delegateTo: handler,
+      actionType,
+    },
+  })
+}
+
+// ============================================================================
 // Main Executor
 // ============================================================================
 
@@ -392,6 +482,15 @@ export async function executeAction(
 
       case 'ai_prompt':
         return executeAiPrompt(trigger, activeRule, context)
+
+      case 'deal_lock':
+      case 'deal_cancel':
+      case 'deal_confirm':
+      case 'deal_volume':
+      case 'tronscan_process':
+      case 'receipt_process':
+      case 'control_command':
+        return executeDelegation(trigger, activeRule, context)
 
       default:
         return err(`Unknown action type: ${trigger.actionType}`)

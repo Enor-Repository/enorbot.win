@@ -2,16 +2,16 @@ import { describe, it, expect } from 'vitest'
 import { formatBrazilianPrice, formatDuration, formatRelativeTime } from './format.js'
 
 describe('formatBrazilianPrice', () => {
-  // AC1: Brazilian Currency Formatting
-  describe('AC1: Brazilian Currency Formatting', () => {
-    it('formats 5.82 as "R$5,8200" (comma as decimal separator)', () => {
-      expect(formatBrazilianPrice(5.82)).toBe('R$5,8200')
+  // AC1: Brazilian Number Formatting
+  describe('AC1: Brazilian Number Formatting', () => {
+    it('formats 5.82 as "5,8200" (comma as decimal separator)', () => {
+      expect(formatBrazilianPrice(5.82)).toBe('5,8200')
     })
 
-    it('prepends R$ currency symbol without space', () => {
+    it('returns just the number without currency symbol', () => {
       const result = formatBrazilianPrice(10.5)
-      expect(result).toMatch(/^R\$/)
-      expect(result).toBe('R$10,5000')
+      expect(result).not.toContain('R$')
+      expect(result).toBe('10,5000')
     })
 
     it('uses comma as decimal separator', () => {
@@ -23,54 +23,54 @@ describe('formatBrazilianPrice', () => {
 
   // AC2: Decimal Truncation
   describe('AC2: Decimal Truncation', () => {
-    it('truncates 5.823456 to "R$5,8234" (not rounded)', () => {
-      expect(formatBrazilianPrice(5.823456)).toBe('R$5,8234')
+    it('truncates 5.823456 to "5,8234" (not rounded)', () => {
+      expect(formatBrazilianPrice(5.823456)).toBe('5,8234')
     })
 
-    it('truncates 5.82349 to "R$5,8234" (verify truncation behavior)', () => {
+    it('truncates 5.82349 to "5,8234" (verify truncation behavior)', () => {
       // 5.82349 would round to 5.8235 if rounding, but should truncate to 5.8234
-      expect(formatBrazilianPrice(5.82349)).toBe('R$5,8234')
+      expect(formatBrazilianPrice(5.82349)).toBe('5,8234')
     })
 
-    it('truncates 5.82999 to "R$5,8299" (financial accuracy)', () => {
+    it('truncates 5.82999 to "5,8299" (financial accuracy)', () => {
       // 5.82999 would round to 5.8300 if rounding, but should truncate to 5.8299
-      expect(formatBrazilianPrice(5.82999)).toBe('R$5,8299')
+      expect(formatBrazilianPrice(5.82999)).toBe('5,8299')
     })
 
-    it('truncates 1234.56789 to "R$1234,5678"', () => {
-      expect(formatBrazilianPrice(1234.56789)).toBe('R$1234,5678')
+    it('truncates 1234.56789 to "1234,5678"', () => {
+      expect(formatBrazilianPrice(1234.56789)).toBe('1234,5678')
     })
   })
 
   // Edge cases
   describe('Edge Cases', () => {
-    it('formats 0 as "R$0,0000"', () => {
-      expect(formatBrazilianPrice(0)).toBe('R$0,0000')
+    it('formats 0 as "0,0000"', () => {
+      expect(formatBrazilianPrice(0)).toBe('0,0000')
     })
 
-    it('formats 100 as "R$100,0000" (whole number)', () => {
-      expect(formatBrazilianPrice(100)).toBe('R$100,0000')
+    it('formats 100 as "100,0000" (whole number)', () => {
+      expect(formatBrazilianPrice(100)).toBe('100,0000')
     })
 
-    it('formats 0.01 as "R$0,0100" (very small number)', () => {
-      expect(formatBrazilianPrice(0.01)).toBe('R$0,0100')
+    it('formats 0.01 as "0,0100" (very small number)', () => {
+      expect(formatBrazilianPrice(0.01)).toBe('0,0100')
     })
 
     it('formats very large number without thousands separator', () => {
-      expect(formatBrazilianPrice(99999.99)).toBe('R$99999,9900')
+      expect(formatBrazilianPrice(99999.99)).toBe('99999,9900')
     })
 
     it('handles negative numbers by truncating towards zero', () => {
       // -5.82999 truncates towards zero to -5.8299
-      expect(formatBrazilianPrice(-5.82999)).toBe('R$-5,8299')
+      expect(formatBrazilianPrice(-5.82999)).toBe('-5,8299')
     })
 
     it('handles single decimal place by padding with zeros', () => {
-      expect(formatBrazilianPrice(5.8)).toBe('R$5,8000')
+      expect(formatBrazilianPrice(5.8)).toBe('5,8000')
     })
 
     it('handles integer input', () => {
-      expect(formatBrazilianPrice(42)).toBe('R$42,0000')
+      expect(formatBrazilianPrice(42)).toBe('42,0000')
     })
   })
 
