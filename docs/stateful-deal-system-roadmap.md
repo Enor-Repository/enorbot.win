@@ -3,7 +3,7 @@
 > **Document Purpose**: Living roadmap for transforming eNorBOT into Daniel's automated CIO desk with full control via dashboard.
 >
 > **Last Updated**: 2026-02-04
-> **Status**: Sprint 1-6 Complete, Sprint 7A (Editable System Keywords) & 7B (Trigger Engine Consolidation) Planned
+> **Status**: Sprint 1-6 + 7A Complete, Sprint 7B (Trigger Engine Consolidation) In Progress
 > **Architecture**: Triggers + Rules (separated concerns)
 
 ---
@@ -257,7 +257,7 @@ This ensures the bot always has a valid pricing configuration.
 | **4** | Deal Flow Engine | ✅ COMPLETE | ✅ Approved |
 | **5** | Message Lookback & Polish | ✅ COMPLETE | ✅ Approved |
 | **6** | Demo Hardening & Production Readiness | ✅ COMPLETE | ✅ Approved |
-| **7A** | Editable System Keywords | 🔵 PLANNED | — |
+| **7A** | Editable System Keywords | ✅ COMPLETE | ✅ Approved (13 findings, 11 fixed) |
 | **7B** | Trigger Engine Consolidation | 🔵 PLANNED | — |
 
 ---
@@ -950,7 +950,7 @@ From Sprints 1-5:
 
 ---
 
-## 12. Sprint 7A: Editable System Keywords (PLANNED)
+## 12. Sprint 7A: Editable System Keywords (COMPLETE)
 
 ### Goal
 Give Daniel the ability to edit the global system pattern keywords that control how the bot detects deal flow messages, price requests, and transaction links — **without touching the router or risking live group behavior.** This is the highest-value, lowest-risk improvement we can ship.
@@ -1092,13 +1092,37 @@ The router already reads keywords from `systemPatternService` for deal detection
 - [ ] All existing tests pass + new tests for auth + tester endpoint
 - [ ] Production deployed and verified
 
-### Sprint 7A Retrospective Lessons (Carry Forward)
-From Sprints 1-6:
+### Sprint 7A Acceptance Criteria Status
+- [x] Dashboard auth blocks unauthenticated writes (401)
+- [x] Auth allows reads without header (GET → 200)
+- [x] Pattern tester matches same keywords as bot (shared regex)
+- [x] Debounced UI with color-coded results
+- [x] All 14 frontend write calls send X-Dashboard-Key
+- [x] Dev mode works when DASHBOARD_SECRET not set
+- [x] Production deployed and verified on VPS
+
+### Sprint 7A Retrospective
+**What went well:**
+- Party-mode planning prevented scope creep — 4 tasks, clear dependencies
+- Existing systemPatternService + API from Sprint 6 made 7A.2 fast
+- Adversarial review caught real issues (timing attack, CORS, trim inconsistency)
+
+**What to improve:**
+- Deployment target was `/root/eNorBOT/` but PM2 runs from `/opt/enorbot/` — lost time debugging
+- Backend TypeScript must be compiled with `npx tsc` (not just `--noEmit`) before deploying dist/
+
+**Deferred to Sprint 7B (from adversarial review):**
+- F4: Add rate limiting (requires `express-rate-limit` dependency)
+- F11: Add security headers via `helmet` middleware
+- F2: VITE_DASHBOARD_SECRET is visible in JS bundle — replace with session-based auth
+
+**Carry-forward lessons from Sprints 1-6:**
 1. API ROUTE TESTS ARE MANDATORY — ship with code, not as follow-up
 2. VALIDATE AT API BOUNDARY — all POST/PUT/DELETE endpoints validate input
 3. STATIC TAILWIND CLASSES ONLY — no dynamic template literals
 4. AUTH BEFORE FEATURES — don't ship writable endpoints without protection
 5. TEST IN PRODUCTION — curl verification on VPS, not just local
+6. DEPLOY TO CORRECT PATH — verify PM2 `exec_cwd` matches rsync target
 
 ---
 
@@ -1334,4 +1358,10 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 | 2026-02-04 | Decision: Prioritize Daniel's experience — editable keywords first (7A), router consolidation second (7B) | BMAD Agents |
 | 2026-02-04 | Decision: Add dashboard API auth (shared secret) as Sprint 7A.0 blocker | BMAD Agents (Winston, John) |
 | 2026-02-04 | Decision: Add inline pattern tester for confidence before saving keywords | BMAD Agents (Sally) |
+| 2026-02-04 | Sprint 7A.0 complete: Dashboard auth middleware (timing-safe, IP logging, startup warning) | System |
+| 2026-02-04 | Sprint 7A.1 complete: writeHeaders() wired into all 14 frontend write calls | System |
+| 2026-02-04 | Sprint 7A.2 complete: POST /test endpoint + debounced UI with color-coded matches | System |
+| 2026-02-04 | Sprint 7A.3 complete: Built, deployed, validated auth + tester on VPS | System |
+| 2026-02-04 | Sprint 7A adversarial review: 13 findings (1C, 3H, 5M, 4L), 11 fixed, 2 deferred to 7B | System |
+| 2026-02-04 | Sprint 7A marked complete — 48 test files, 1,572 tests, deployed to production | System |
 
