@@ -1,13 +1,20 @@
 /**
  * Dashboard API: Price endpoints
  * Proxies external price APIs to avoid CORS issues
+ * + SSE endpoint for real-time price streaming
  */
 import { config as loadEnv } from 'dotenv'
 import { Router, type Request, type Response } from 'express'
 import { logger } from '../../utils/logger.js'
+import { onPriceUpdate, getCurrentPrice, getConnectionStatus } from '../../services/binanceWebSocket.js'
 
 // Ensure .env is loaded for AWESOMEAPI_TOKEN
 loadEnv()
+
+// SSE connection management
+const MAX_SSE_CONNECTIONS = 10
+let activeConnections = 0
+const BROADCAST_INTERVAL_MS = 200 // Throttle to ~5 updates/second
 
 export const pricesRouter = Router()
 
@@ -177,4 +184,114 @@ pricesRouter.get('/commercial-dollar', async (req: Request, res: Response) => {
       error: error instanceof Error ? error.message : String(error),
     })
   }
+})
+
+/**
+ * GET /api/prices/stream
+ * Server-Sent Events endpoint for real-time USDT/BRL prices
+ * Throttled to ~5 updates/second to reduce bandwidth
+ */
+pricesRouter.get('/stream', (req: Request, res: Response) => {
+  // Rate limiting - prevent too many concurrent connections
+  if (activeConnections >= MAX_SSE_CONNECTIONS) {
+    logger.warn('SSE connection rejected - max connections reached', {
+      event: 'sse_connection_rejected',
+      activeConnections,
+      maxConnections: MAX_SSE_CONNECTIONS,
+    })
+    res.status(503).json({ error: 'Too many connections' })
+    return
+  }
+
+  activeConnections++
+  logger.info('SSE connection opened', {
+    event: 'sse_connection_opened',
+    activeConnections,
+  })
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no') // Disable nginx buffering
+  res.flushHeaders()
+
+  // Send initial connection status
+  const initialPrice = getCurrentPrice()
+  const connectionStatus = getConnectionStatus()
+  res.write(`data: ${JSON.stringify({
+    price: initialPrice,
+    timestamp: Date.now(),
+    connectionStatus,
+    type: 'initial',
+  })}\n\n`)
+
+  // Throttle tracking
+  let lastBroadcast = 0
+
+  // Subscribe to price updates
+  const unsubscribe = onPriceUpdate((price) => {
+    const now = Date.now()
+    if (now - lastBroadcast >= BROADCAST_INTERVAL_MS) {
+      lastBroadcast = now
+      try {
+        res.write(`data: ${JSON.stringify({
+          price,
+          timestamp: now,
+          connectionStatus: getConnectionStatus(),
+          type: 'update',
+        })}\n\n`)
+      } catch (e) {
+        // Connection may have closed
+        logger.debug('SSE write failed', {
+          event: 'sse_write_error',
+          error: e instanceof Error ? e.message : String(e),
+        })
+      }
+    }
+  })
+
+  // Heartbeat every 30 seconds to keep connection alive
+  const heartbeatInterval = setInterval(() => {
+    try {
+      res.write(`: heartbeat\n\n`)
+    } catch {
+      // Connection closed
+    }
+  }, 30000)
+
+  // Cleanup handler for connection termination
+  const cleanup = () => {
+    activeConnections--
+    unsubscribe()
+    clearInterval(heartbeatInterval)
+    logger.info('SSE connection closed', {
+      event: 'sse_connection_closed',
+      activeConnections,
+    })
+  }
+
+  // Handle both close and error events to prevent connection leaks
+  req.on('close', cleanup)
+  req.on('error', (error) => {
+    logger.warn('SSE connection error', {
+      event: 'sse_connection_error',
+      error: error.message,
+    })
+    cleanup()
+  })
+})
+
+/**
+ * GET /api/prices/stream/status
+ * Returns current SSE status without opening a stream
+ */
+pricesRouter.get('/stream/status', (_req: Request, res: Response) => {
+  res.json({
+    activeConnections,
+    maxConnections: MAX_SSE_CONNECTIONS,
+    currentPrice: getCurrentPrice(),
+    connectionStatus: getConnectionStatus(),
+    available: activeConnections < MAX_SSE_CONNECTIONS,
+  })
 })

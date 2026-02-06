@@ -7,6 +7,8 @@ import {
 import { getGroupModeSync } from '../services/groupConfig.js'
 import { matchTrigger, type GroupTrigger } from '../services/triggerService.js'
 import { logger } from '../utils/logger.js'
+// Volatility Protection: Close active quotes on deal acceptance
+import { getActiveQuote, forceAccept } from '../services/activeQuotes.js'
 
 /**
  * Route destinations for message handling.
@@ -126,6 +128,23 @@ function resolveTriggeredRoute(
 ): RouteResult {
   enrichedContext.matchedTrigger = trigger
   enrichedContext.hasTrigger = true
+
+  // Volatility Protection: Check for deal acceptance (confirmation trigger)
+  // If there's an active simple quote (not full deal flow), close it
+  // CRITICAL: Accept even during 'repricing' status - customer acceptance ALWAYS wins
+  if (trigger.actionType === 'deal_confirm') {
+    const activeQuote = getActiveQuote(enrichedContext.groupId)
+    if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+      forceAccept(enrichedContext.groupId)
+      logger.info('Active quote accepted via confirmation trigger', {
+        event: 'quote_accepted_via_trigger',
+        groupId: enrichedContext.groupId,
+        quoteId: activeQuote.id,
+        quotedPrice: activeQuote.quotedPrice,
+        wasRepricing: activeQuote.status === 'repricing',
+      })
+    }
+  }
 
   // Delegation actions: route to the appropriate handler
   const destination = ACTION_TO_DESTINATION[trigger.actionType]

@@ -21,6 +21,9 @@ import { groupRulesRouter } from './api/groupRules.js'
 import { groupTriggersRouter } from './api/triggers.js'
 import { dealsRouter } from './api/deals.js'
 import { systemPatternsRouter } from './api/systemPatterns.js'
+import { volatilityRouter } from './api/volatility.js'
+import { escalationsRouter } from './api/escalations.js'
+import { quotesRouter, allQuotesRouter } from './api/quotes.js'
 import { dashboardAuth } from './middleware/auth.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -106,6 +109,10 @@ app.use('/api/spreads', spreadsRouter)
 app.use('/api/groups/:groupJid/rules', groupRulesRouter)
 app.use('/api/groups/:groupJid/triggers', groupTriggersRouter)
 app.use('/api/groups/:groupJid/deals', dealsRouter)
+app.use('/api/groups/:groupJid/volatility', volatilityRouter)
+app.use('/api/groups/:groupJid/escalations', escalationsRouter)
+app.use('/api/groups/:groupJid/quote', quotesRouter)
+app.use('/api/quotes', allQuotesRouter)
 app.use('/api/system-patterns', systemPatternsRouter)
 
 // Health check

@@ -51,6 +51,8 @@ import { addToThread } from '../services/conversationTracker.js'
 import { queueObservationEntry } from '../services/logQueue.js'
 import { isObservationLoggingConfigured } from '../types/config.js'
 import type { OTCMessageType } from '../services/messageClassifier.js'
+// Volatility Protection: Track active quotes for threshold monitoring
+import { createQuote } from '../services/activeQuotes.js'
 
 // Story 2.4: Retry Constants (Task 1)
 /** Maximum number of retry attempts after initial failure */
@@ -431,6 +433,13 @@ async function sendPriceResponse(
 
   // Record bot response for suppression cooldown tracking
   recordBotResponse(context.groupId)
+
+  // Volatility Protection: Create active quote for threshold monitoring
+  // Pass price source and base price so volatility monitor checks the correct API
+  createQuote(context.groupId, finalPrice, {
+    priceSource: pricingSource === 'commercial_dollar' ? 'commercial_dollar' : 'usdt_brl',
+    basePrice: price, // Raw price before spread
+  })
 
   // Log bot response to observations (fire-and-forget)
   logBotResponseObservation({

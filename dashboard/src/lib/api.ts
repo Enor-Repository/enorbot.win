@@ -63,6 +63,24 @@ export const API_ENDPOINTS = {
   status: `${API_BASE_URL}/api/status`,
   /** Current USDT/BRL price */
   priceUsdtBrl: `${API_BASE_URL}/api/prices/usdt-brl`,
+  /** SSE stream for real-time USDT/BRL prices */
+  priceStream: `${API_BASE_URL}/api/prices/stream`,
+  /** SSE stream status */
+  priceStreamStatus: `${API_BASE_URL}/api/prices/stream/status`,
+  /** Get/Update volatility config for specific group */
+  groupVolatility: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/volatility`,
+  /** Get active escalations for a group */
+  groupEscalations: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/escalations`,
+  /** Dismiss an escalation */
+  groupEscalationDismiss: (groupJid: string, escalationId: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/escalations/${escalationId}/dismiss`,
+  /** Get active quote for a group (for threshold line baseline) */
+  groupQuote: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/quote`,
+  /** Get all active quotes */
+  quotes: `${API_BASE_URL}/api/quotes`,
   /** Activity heatmap for a group */
   analyticsHeatmap: (groupId: string, days?: number): string =>
     `${API_BASE_URL}/api/groups/${groupId}/analytics/heatmap${days ? `?days=${days}` : ''}`,

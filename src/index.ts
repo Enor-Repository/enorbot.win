@@ -6,8 +6,16 @@ import { initGroupConfigs } from './services/groupConfig.js'
 import { checkBackupPermissions } from './services/authBackup.js'
 import { createConnection, getSocket } from './bot/connection.js'
 import { startDealSweepTimer, stopDealSweepTimer } from './handlers/deal.js'
+// Volatility Protection: WebSocket and monitoring services
+import { startWebSocket, stopWebSocket } from './services/binanceWebSocket.js'
+import { startMonitoring, stopMonitoring } from './services/volatilityMonitor.js'
+import { expireOldQuotes } from './services/activeQuotes.js'
 
 let healthServer: Server | null = null
+let quoteCleanupInterval: NodeJS.Timeout | null = null
+
+// Quote cleanup interval (60 seconds)
+const QUOTE_CLEANUP_INTERVAL_MS = 60 * 1000
 
 /**
  * Entry point for eNorBOT.
@@ -73,6 +81,23 @@ async function main(): Promise<void> {
   // Sprint 4: Start periodic deal TTL sweep (every 30s)
   startDealSweepTimer()
 
+  // Volatility Protection: Start Binance WebSocket IMMEDIATELY
+  // Price streaming is independent of WhatsApp connection
+  startWebSocket()
+
+  // Volatility Protection: Start monitoring (subscribes to price updates)
+  startMonitoring()
+
+  // Volatility Protection: Periodic cleanup of expired quotes (every 60s)
+  quoteCleanupInterval = setInterval(() => {
+    expireOldQuotes()
+  }, QUOTE_CLEANUP_INTERVAL_MS)
+
+  logger.info('Volatility protection services started', {
+    event: 'volatility_protection_started',
+    cleanupIntervalMs: QUOTE_CLEANUP_INTERVAL_MS,
+  })
+
   // Initialize WhatsApp connection
   await createConnection(config)
 }
@@ -85,6 +110,14 @@ function shutdown(signal: string): void {
 
   // Stop deal sweep timer
   stopDealSweepTimer()
+
+  // Stop volatility protection services
+  if (quoteCleanupInterval) {
+    clearInterval(quoteCleanupInterval)
+    quoteCleanupInterval = null
+  }
+  stopMonitoring()
+  stopWebSocket()
 
   // Close health server
   if (healthServer) {

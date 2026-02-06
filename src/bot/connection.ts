@@ -52,6 +52,8 @@ import { shouldSuppressResponse } from '../services/responseSuppression.js'
 import { classifyMessage, inferPlayerRole } from '../services/messageClassifier.js'
 import { resolveThreadId } from '../services/conversationTracker.js'
 import { logObservation, createObservationEntry, appendObservationRowDirect } from '../services/excelObservation.js'
+// Volatility Protection: Initialize monitor with socket when connected
+import { initializeVolatilityMonitor } from '../services/volatilityMonitor.js'
 
 let sock: WASocket | null = null
 
@@ -312,6 +314,10 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       // Initialize message history logging to Supabase
       initMessageHistory(config)
       logger.info('Message history service initialized', { event: 'message_history_init' })
+
+      // Volatility Protection: Initialize monitor with WhatsApp socket for repricing
+      initializeVolatilityMonitor(currentSock)
+      logger.info('Volatility monitor socket initialized', { event: 'volatility_monitor_init' })
 
       if (wasReconnecting) {
         logger.info('Reconnected to WhatsApp', {
