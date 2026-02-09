@@ -55,6 +55,7 @@ function createTestTrigger(overrides: Partial<GroupTrigger> = {}): GroupTrigger 
     isActive: true,
     isSystem: false,
     scope: 'group',
+    displayName: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,

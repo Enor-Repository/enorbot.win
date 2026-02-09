@@ -25,6 +25,7 @@ interface DefaultTriggerTemplate {
   actionType: string
   priority: number
   scope?: 'group' | 'control_only'
+  displayName?: string
 }
 
 interface DynamicKeywordGroup {
@@ -53,12 +54,14 @@ const FIXED_REGEX_TEMPLATES: DefaultTriggerTemplate[] = [
     patternType: 'regex',
     actionType: 'tronscan_process',
     priority: 95,
+    displayName: 'Tronscan Link',
   },
   {
     triggerPhrase: '\\d+(?:[.,]\\d+)?\\s*(?:k|mil)\\b|\\d{1,3}(?:[.,]\\d{3})+',
     patternType: 'regex',
     actionType: 'deal_volume',
     priority: 80,
+    displayName: 'Volume Pattern',
   },
 ]
 
@@ -191,7 +194,7 @@ async function buildDefaultTriggerRows(groupJid: string, isControlGroup: boolean
 
   // Fixed regex triggers (tronscan, volume)
   for (const template of FIXED_REGEX_TEMPLATES) {
-    rows.push({
+    const row: Record<string, unknown> = {
       group_jid: groupJid,
       trigger_phrase: template.triggerPhrase,
       pattern_type: template.patternType,
@@ -201,7 +204,9 @@ async function buildDefaultTriggerRows(groupJid: string, isControlGroup: boolean
       is_active: true,
       is_system: true,
       scope: template.scope || 'group',
-    })
+    }
+    if (template.displayName) row.display_name = template.displayName
+    rows.push(row)
   }
 
   // Control command triggers — only seeded for control groups

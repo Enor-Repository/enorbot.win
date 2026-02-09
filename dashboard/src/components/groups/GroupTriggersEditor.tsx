@@ -39,6 +39,7 @@ interface GroupTrigger {
   isActive: boolean
   isSystem: boolean
   scope: TriggerScope
+  displayName: string | null
   createdAt: string
   updatedAt: string
 }
@@ -517,7 +518,7 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
                           <Shield className="h-3.5 w-3.5 text-slate-400 flex-shrink-0" />
                         )}
                         <span className="font-mono text-sm font-semibold text-foreground">
-                          "{trigger.triggerPhrase}"
+                          {trigger.displayName || `"${trigger.triggerPhrase}"`}
                         </span>
                         {trigger.isSystem && (
                           <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-slate-500/20 text-slate-400 border border-slate-500/30">
@@ -550,6 +551,11 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
                           </span>
                         )}
                       </div>
+                      {trigger.displayName && (
+                        <p className="text-[11px] text-muted-foreground mt-1 font-mono truncate max-w-[400px]">
+                          {trigger.triggerPhrase}
+                        </p>
+                      )}
                       {trigger.actionType === 'text_response' && typeof trigger.actionParams?.text === 'string' && (
                         <p className="text-xs text-muted-foreground mt-1 truncate max-w-[300px]">
                           {trigger.actionParams.text}

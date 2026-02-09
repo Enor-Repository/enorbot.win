@@ -145,6 +145,7 @@ groupTriggersRouter.post('/', async (req: Request, res: Response) => {
       actionParams,
       priority,
       isActive,
+      displayName,
     } = req.body
 
     const { scope } = req.body
@@ -230,6 +231,16 @@ groupTriggersRouter.post('/', async (req: Request, res: Response) => {
       }
     }
 
+    // displayName: optional, must be string, max 100 chars
+    if (displayName !== undefined) {
+      if (typeof displayName !== 'string') {
+        return res.status(400).json({ error: 'displayName must be a string' })
+      }
+      if (displayName.length > 100) {
+        return res.status(400).json({ error: 'displayName must be 100 characters or less' })
+      }
+    }
+
     // ---- End API boundary validation ----
 
     const input: TriggerInput = {
@@ -241,6 +252,7 @@ groupTriggersRouter.post('/', async (req: Request, res: Response) => {
       priority,
       isActive,
       scope: scope as TriggerScope | undefined,
+      displayName,
     }
 
     const result = await createTrigger(input)
@@ -301,6 +313,7 @@ groupTriggersRouter.put('/:triggerId', async (req: Request, res: Response) => {
       priority,
       isActive,
       scope,
+      displayName,
     } = req.body
 
     // ---- API boundary validation (Sprint 2 retro lesson) ----
@@ -382,6 +395,16 @@ groupTriggersRouter.put('/:triggerId', async (req: Request, res: Response) => {
       }
     }
 
+    // displayName: optional, must be string, max 100 chars
+    if (displayName !== undefined) {
+      if (typeof displayName !== 'string') {
+        return res.status(400).json({ error: 'displayName must be a string' })
+      }
+      if (displayName.length > 100) {
+        return res.status(400).json({ error: 'displayName must be 100 characters or less' })
+      }
+    }
+
     // ---- End API boundary validation ----
 
     const input: TriggerUpdateInput = {}
@@ -393,6 +416,7 @@ groupTriggersRouter.put('/:triggerId', async (req: Request, res: Response) => {
     if (priority !== undefined) input.priority = priority
     if (isActive !== undefined) input.isActive = isActive
     if (scope !== undefined) input.scope = scope as TriggerScope
+    if (displayName !== undefined) input.displayName = displayName
 
     const result = await updateTrigger(triggerId, groupJid, input)
 

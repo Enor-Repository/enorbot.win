@@ -62,6 +62,7 @@ export interface GroupTrigger {
   isActive: boolean
   isSystem: boolean
   scope: TriggerScope
+  displayName: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -78,6 +79,7 @@ interface GroupTriggerRow {
   is_active: boolean
   is_system: boolean
   scope: string
+  display_name: string | null
   created_at: string
   updated_at: string
 }
@@ -92,6 +94,7 @@ export interface TriggerInput {
   priority?: number
   isActive?: boolean
   scope?: TriggerScope
+  displayName?: string
 }
 
 /** Input for updating a trigger (all fields optional) */
@@ -103,6 +106,7 @@ export interface TriggerUpdateInput {
   priority?: number
   isActive?: boolean
   scope?: TriggerScope
+  displayName?: string
 }
 
 // ============================================================================
@@ -172,6 +176,7 @@ function rowToTrigger(row: GroupTriggerRow): GroupTrigger {
     isActive: row.is_active,
     isSystem: row.is_system ?? false,
     scope: (row.scope as TriggerScope) || 'group',
+    displayName: row.display_name ?? null,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   }
@@ -179,7 +184,7 @@ function rowToTrigger(row: GroupTriggerRow): GroupTrigger {
 
 /** Convert TriggerInput to database row format for INSERT */
 function inputToRow(input: TriggerInput): Record<string, unknown> {
-  return {
+  const row: Record<string, unknown> = {
     group_jid: input.groupJid,
     trigger_phrase: input.triggerPhrase.trim(),
     pattern_type: input.patternType || 'contains',
@@ -189,6 +194,8 @@ function inputToRow(input: TriggerInput): Record<string, unknown> {
     is_active: input.isActive ?? true,
     scope: input.scope || 'group',
   }
+  if (input.displayName !== undefined) row.display_name = input.displayName
+  return row
 }
 
 /** Convert TriggerUpdateInput to database row format for UPDATE */
@@ -202,6 +209,7 @@ function updateToRow(input: TriggerUpdateInput): Record<string, unknown> {
   if (input.priority !== undefined) row.priority = input.priority
   if (input.isActive !== undefined) row.is_active = input.isActive
   if (input.scope !== undefined) row.scope = input.scope
+  if (input.displayName !== undefined) row.display_name = input.displayName
 
   return row
 }
