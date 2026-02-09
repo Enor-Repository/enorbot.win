@@ -21,8 +21,8 @@ export const API_ENDPOINTS = {
   groupThreshold: (jid: string): string => `${API_BASE_URL}/api/groups/${jid}/threshold`,
   /** Get players for specific group */
   groupPlayers: (groupJid: string): string => `${API_BASE_URL}/api/groups/${groupJid}/players`,
-  /** Update player role — backend route NOT YET IMPLEMENTED (no Express handler exists) */
-  playerRole: (groupJid: string, playerJid: string): string => `${API_BASE_URL}/api/groups/${groupJid}/players/${playerJid}/role`,
+  /** Update player role */
+  playerRole: (groupJid: string, playerJid: string): string => `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/players/${encodeURIComponent(playerJid)}/role`,
   /** Cost summary (period=day|week|month) */
   costSummary: (period?: string): string =>
     `${API_BASE_URL}/api/costs/summary${period ? `?period=${period}` : ''}`,
