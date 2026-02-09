@@ -26,6 +26,9 @@ jobs:
       - name: Build bot (TypeScript)
         run: npx tsc
 
+      - name: Install dashboard dependencies
+        run: cd dashboard && npm ci
+
       - name: Build dashboard (Vite)
         run: |
           cd dashboard
