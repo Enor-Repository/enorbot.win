@@ -284,6 +284,66 @@ For `off off`:
 | `src/handlers/control.test.ts` | 5 new parser tests (bare off, off + group, off off, @mention stripping, no training off conflict) |
 | `src/services/systemTriggerSeeder.test.ts` | Updated expected trigger count 6→7, added 'off' to expected phrases |
 
-### Test results
+### Test results (initial)
+- `npx tsc --noEmit` — 0 errors
+- `npx vitest run` — **1714 passed**, 0 failed (54 test files)
+
+---
+
+## Round 3 Live Test — ~17:48–18:00 BRT (2026-02-09)
+
+### What happened
+
+Daniel sent `off off` from CONTROLE_eNorBOT. The command parsed correctly (`commandType: "off", args: ["off"]`), but:
+
+1. **"off off" found no active deals** — the test deal had already completed/archived. The bot replied "Nenhum deal ativo em nenhum grupo" but did NOT send "off" to any trading group. Daniel expected it to always broadcast the off signal.
+2. **Anti-detection delay (8–15 seconds)** on control group responses made it feel broken/unresponsive. The CIO thought the bot wasn't working.
+
+### Fixes applied (Round 3b)
+
+#### Fix 1 — Instant control group responses (no anti-detection)
+
+**Before:** `sendControlResponse` used `sendWithAntiDetection`, adding 3–15s typing + chaotic delay to every control group reply.
+
+**After:** `sendControlResponse` now uses `context.sock.sendMessage()` directly — zero delay. Anti-detection is only needed for client-facing trading groups, not the CIO's private control channel.
+
+**Impact:** All control commands (status, pause, resume, mode, modes, config, off) now respond instantly.
+
+#### Fix 2 — "off off" broadcasts to ALL non-paused groups
+
+**Before:** "off off" only iterated groups that had active deals. No deals → no groups → "Nenhum deal ativo em nenhum grupo" → no off signals sent.
+
+**After:** "off off" now iterates ALL registered groups where `mode !== 'paused'`. It cancels any active deals found along the way, but always sends "off @operator" to every non-paused group regardless of deal state.
+
+- Groups with active deals: deals cancelled + off signal sent
+- Groups with no deals: off signal still sent (operator awareness)
+- Paused groups: skipped (already inactive)
+- No non-paused groups: "Nenhum grupo ativo encontrado."
+
+#### Fix 3 — Reply-first pattern for CIO feedback
+
+**Before:** Control reply came AFTER all trading group messages were sent (sequentially). With 3+ groups, the CIO waited 30+ seconds before getting any feedback.
+
+**After:** Both "off off" and "off <group>" now send the control group reply FIRST (instant via Fix 1), THEN fire off the trading group "off @operator" messages sequentially (with anti-detection for those).
+
+Flow: CIO sends "off off" → instant reply "off enviado para 3 grupo(s): A, B, C. 2 deal(s) cancelados." → THEN bot sends "off @operator" to each group.
+
+#### Fix 4 — Better logging
+
+Added structured logging to `handleOffCommand`:
+- `off_command_parsed` — initial parse
+- `off_all_processed` — "off off" completion with groupCount + totalCancelled
+- `off_group_processed` — "off <group>" completion with groupName + dealsCancelled
+- `off_group_sent` — each trading group off signal sent
+- `control_response_error` — if sock.sendMessage fails for control reply
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/handlers/control.ts` | `sendControlResponse` uses `sock.sendMessage` directly; "off off" iterates all non-paused groups; reply-first pattern; better logging |
+| `src/handlers/control.test.ts` | Updated 17 test assertions from `mockSendWithAntiDetection` to `mockSock.sendMessage` for control responses |
+
+### Test results (Round 3b)
 - `npx tsc --noEmit` — 0 errors
 - `npx vitest run` — **1714 passed**, 0 failed (54 test files)

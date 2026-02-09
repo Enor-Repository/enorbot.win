@@ -325,19 +325,26 @@ export function findMatchingGroup(searchTerm: string): GroupMatchResult {
 
 /**
  * Send a control response message and log it to history.
+ * Uses direct sock.sendMessage (no anti-detection delay) because
+ * control group is CIO-only — no spam risk, instant feedback needed.
  */
 async function sendControlResponse(
   context: RouterContext,
   message: string
 ): Promise<void> {
-  const result = await sendWithAntiDetection(context.sock, context.groupId, message)
-
-  if (result.ok) {
+  try {
+    await context.sock.sendMessage(context.groupId, { text: message })
     logBotMessage({
       groupJid: context.groupId,
       content: message,
       messageType: 'status',
       isControlGroup: true,
+    })
+  } catch (e) {
+    logger.error('Failed to send control response', {
+      event: 'control_response_error',
+      groupId: context.groupId,
+      error: e instanceof Error ? e.message : String(e),
     })
   }
 }
@@ -1060,8 +1067,11 @@ async function sendOffToGroup(
 /**
  * Handle off command.
  * "off" (bare) → usage hint
- * "off <group>" → send off to that group + cancel active deals
- * "off off" → off ALL groups with active deals
+ * "off <group>" → cancel deals + instant reply + send off to group
+ * "off off" → cancel deals + instant reply + broadcast off to ALL non-paused groups
+ *
+ * Reply-first pattern: CONTROLE gets instant feedback, trading group
+ * messages follow sequentially with anti-detection delays.
  *
  * @param context - Router context
  * @param args - Command arguments
@@ -1076,55 +1086,52 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
     return
   }
 
-  // "off off" → off ALL groups
+  // "off off" → broadcast off to ALL non-paused groups
   if (args[0].toLowerCase() === 'off') {
     const configs = await getAllGroupConfigs()
-    const groupsWithDeals: Array<{ groupJid: string; groupName: string; dealCount: number }> = []
+    const targetGroups: Array<{ groupJid: string; groupName: string }> = []
     let totalCancelled = 0
 
+    // Collect all non-paused groups and cancel any active deals
     for (const config of configs.values()) {
-      const dealsResult = await getActiveDeals(config.groupJid)
-      if (!dealsResult.ok) continue
+      if (config.mode === 'paused') continue
 
-      const deals = dealsResult.data
-      if (deals.length > 0) {
-        // Cancel all deals
-        for (const deal of deals) {
+      targetGroups.push({ groupJid: config.groupJid, groupName: config.groupName })
+
+      // Cancel active deals if any
+      const dealsResult = await getActiveDeals(config.groupJid)
+      if (dealsResult.ok) {
+        for (const deal of dealsResult.data) {
           const cancelResult = await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator')
           if (cancelResult.ok) {
             totalCancelled++
-            // Archive fire-and-forget
             archiveDeal(deal.id, config.groupJid).catch(() => {})
           }
         }
-
-        groupsWithDeals.push({
-          groupJid: config.groupJid,
-          groupName: config.groupName,
-          dealCount: deals.length,
-        })
       }
     }
 
-    if (groupsWithDeals.length === 0) {
-      await sendControlResponse(context, 'Nenhum deal ativo em nenhum grupo.')
+    if (targetGroups.length === 0) {
+      await sendControlResponse(context, 'Nenhum grupo ativo encontrado.')
       return
     }
 
-    // Send "off" to each group with deals
-    for (const group of groupsWithDeals) {
+    // Reply to CONTROLE first (instant feedback)
+    const groupNames = targetGroups.map(g => g.groupName).join(', ')
+    const dealMsg = totalCancelled > 0 ? ` ${totalCancelled} deal(s) cancelados.` : ''
+    await sendControlResponse(
+      context,
+      `off enviado para ${targetGroups.length} grupo(s): ${groupNames}.${dealMsg}`
+    )
+
+    // Then send "off @operator" to each trading group sequentially (with anti-detection)
+    for (const group of targetGroups) {
       await sendOffToGroup(context.sock, group.groupJid, group.groupName)
     }
 
-    const groupNames = groupsWithDeals.map(g => g.groupName).join(', ')
-    await sendControlResponse(
-      context,
-      `off enviado para ${groupsWithDeals.length} grupo(s): ${groupNames}. ${totalCancelled} deal(s) cancelados.`
-    )
-
     logger.info('Off all command processed', {
       event: 'off_all_processed',
-      groupCount: groupsWithDeals.length,
+      groupCount: targetGroups.length,
       totalCancelled,
       triggeredBy: context.sender,
     })
@@ -1143,7 +1150,7 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
     return
   }
 
-  // Get and cancel active deals
+  // Cancel active deals if any
   const dealsResult = await getActiveDeals(match.groupId)
   let cancelledCount = 0
 
@@ -1152,20 +1159,19 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
       const cancelResult = await cancelDeal(deal.id, match.groupId, 'cancelled_by_operator')
       if (cancelResult.ok) {
         cancelledCount++
-        // Archive fire-and-forget
         archiveDeal(deal.id, match.groupId).catch(() => {})
       }
     }
   }
 
-  // Send "off" to the target group (even if no active deals)
-  await sendOffToGroup(context.sock, match.groupId, match.groupName!)
-
-  // Reply in control group
+  // Reply to CONTROLE first (instant feedback)
   const dealMsg = cancelledCount > 0
     ? `${cancelledCount} deal(s) cancelados.`
     : 'Nenhum deal ativo.'
   await sendControlResponse(context, `off enviado para ${match.groupName}. ${dealMsg}`)
+
+  // Then send "off @operator" to the target group (with anti-detection)
+  await sendOffToGroup(context.sock, match.groupId, match.groupName!)
 
   logger.info('Off command processed', {
     event: 'off_command_processed',

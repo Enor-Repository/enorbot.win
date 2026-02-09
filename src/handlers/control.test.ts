@@ -115,7 +115,7 @@ const mockGroupConfigs = new Map([
 ])
 
 describe('Control Handler - Epic 4 + Group Modes', () => {
-  const mockSock = {} as WASocket
+  const mockSock = { sendMessage: vi.fn().mockResolvedValue(undefined) } as unknown as WASocket
 
   const baseContext: RouterContext = {
     groupId: 'control-group@g.us',
@@ -322,10 +322,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       await handleControlMessage(context)
 
       expect(mockSetGroupMode).toHaveBeenCalledWith('binance@g.us', 'active', 'daniel@s.whatsapp.net')
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Binance VIP Trading set to ACTIVE mode')
+        { text: expect.stringContaining('Binance VIP Trading set to ACTIVE mode') }
       )
     })
 
@@ -335,10 +334,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       await handleControlMessage(context)
 
       expect(mockSetGroupMode).not.toHaveBeenCalled()
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Invalid mode')
+        { text: expect.stringContaining('Invalid mode') }
       )
     })
 
@@ -349,10 +347,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       await handleControlMessage(context)
 
       expect(mockSetGroupMode).not.toHaveBeenCalled()
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('No group matching')
+        { text: expect.stringContaining('No group matching') }
       )
     })
 
@@ -361,10 +358,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       await handleControlMessage(context)
 
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Usage:')
+        { text: expect.stringContaining('Usage:') }
       )
     })
   })
@@ -378,15 +374,13 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       await handleControlMessage(context)
 
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('📋 Group Modes')
+        { text: expect.stringContaining('📋 Group Modes') }
       )
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('🔵 Learning: 1')
+        { text: expect.stringContaining('🔵 Learning: 1') }
       )
     })
 
@@ -396,10 +390,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       await handleControlMessage(context)
 
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        '📋 No groups registered yet'
+        { text: '📋 No groups registered yet' }
       )
     })
   })
@@ -413,15 +406,13 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       await handleControlMessage(context)
 
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('📊 Config: Binance VIP Trading')
+        { text: expect.stringContaining('📊 Config: Binance VIP Trading') }
       )
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Mode: 🔵 LEARNING')
+        { text: expect.stringContaining('Mode: 🔵 LEARNING') }
       )
     })
 
@@ -431,10 +422,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       await handleControlMessage(context)
 
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('No group matching')
+        { text: expect.stringContaining('No group matching') }
       )
     })
   })
@@ -449,10 +439,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       await handleControlMessage(context)
 
       expect(mockSetGroupMode).toHaveBeenCalledWith('binance@g.us', 'paused', 'daniel@s.whatsapp.net')
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Paused: Binance VIP Trading')
+        { text: expect.stringContaining('Paused: Binance VIP Trading') }
       )
     })
 
@@ -463,10 +452,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       // Should call setGroupMode for each non-paused group
       expect(mockSetGroupMode).toHaveBeenCalled()
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('All groups paused')
+        { text: expect.stringContaining('All groups paused') }
       )
     })
 
@@ -476,10 +464,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       await handleControlMessage(context)
 
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('No group matching')
+        { text: expect.stringContaining('No group matching') }
       )
     })
   })
@@ -494,10 +481,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       await handleControlMessage(context)
 
       expect(mockSetGroupMode).toHaveBeenCalledWith('binance@g.us', 'active', 'daniel@s.whatsapp.net')
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Resumed: Binance VIP Trading')
+        { text: expect.stringContaining('Resumed: Binance VIP Trading') }
       )
     })
 
@@ -530,10 +516,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       await handleControlMessage(context)
 
       expect(mockSetGroupMode).toHaveBeenCalled()
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Training Mode ON')
+        { text: expect.stringContaining('Training Mode ON') }
       )
     })
 
@@ -543,15 +528,13 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       await handleControlMessage(context)
 
       // Should show numbered list instead of immediately activating
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('Which group would you like to activate?')
+        { text: expect.stringContaining('Which group would you like to activate?') }
       )
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('1. ')
+        { text: expect.stringContaining('1. ') }
       )
     })
 
@@ -563,6 +546,7 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       // Reset mocks for clarity
       mockSetGroupMode.mockClear()
       mockSendWithAntiDetection.mockClear()
+      ;(mockSock.sendMessage as ReturnType<typeof vi.fn>).mockClear()
 
       // Now send a number selection
       const selectContext = { ...baseContext, message: '1' }
@@ -574,10 +558,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
         'active',
         expect.any(String)
       )
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('is now ACTIVE!')
+        { text: expect.stringContaining('is now ACTIVE!') }
       )
     })
 
@@ -596,10 +579,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       const context = { ...baseContext, message: 'training off' }
       await handleControlMessage(context)
 
-      expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-        mockSock,
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        expect.stringContaining('All 1 groups are already active!')
+        { text: expect.stringContaining('All 1 groups are already active!') }
       )
 
       // Restore mock
@@ -682,10 +664,9 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
         await handleControlMessage(context)
 
-        expect(mockSendWithAntiDetection).toHaveBeenCalledWith(
-          mockSock,
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(
           'control-group@g.us',
-          expect.stringContaining('📊 eNorBOT Status')
+          { text: expect.stringContaining('📊 eNorBOT Status') }
         )
       })
 
