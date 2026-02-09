@@ -60,7 +60,7 @@ export interface RouterContext {
   /** Matched trigger from triggerService (populated when a group trigger matches) */
   matchedTrigger?: GroupTrigger
   /** Deal flow action type for DEAL_HANDLER routing */
-  dealAction?: 'volume_inquiry' | 'price_lock' | 'confirmation' | 'cancellation' | 'rejection' | 'volume_input' | 'direct_amount'
+  dealAction?: 'volume_inquiry' | 'price_lock' | 'confirmation' | 'cancellation' | 'rejection' | 'volume_input' | 'direct_amount' | 'unrecognized_input'
 }
 
 /**
@@ -171,10 +171,11 @@ async function trySimpleModeIntercept(
   // 2. Check if sender has an active deal
   const dealResult = await getActiveDealForSender(enrichedContext.groupId, enrichedContext.sender)
   if (!dealResult.ok || !dealResult.data) {
-    // No active deal — check if there's an active quote and message is a bare USDT amount
-    // Sprint 9.1: This bridges the price response → deal handler flow
+    // No active deal — check if there's an active quote
+    // Sprint 9.1: Bridges the price response → deal handler flow
     const activeQuote = getActiveQuote(enrichedContext.groupId)
-    if (activeQuote && activeQuote.status === 'pending') {
+    if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+      // Bare USDT amount → direct_amount (creates + completes deal in one shot)
       const parsed = parseBrazilianNumber(enrichedContext.message.trim())
       if (parsed !== null && parsed >= 100) {
         logger.info('Simple mode intercept: direct_amount (active quote, no deal)', {
@@ -188,6 +189,23 @@ async function trySimpleModeIntercept(
         return {
           destination: 'DEAL_HANDLER',
           context: { ...enrichedContext, dealAction: 'direct_amount' },
+        }
+      }
+
+      // Lock keyword (trava, lock, etc.) → price_lock (creates deal from quote + locks)
+      // Handles "trava" (bare) and "trava 5000" (with inline amount)
+      const lockKeywords = [...getKeywordsForPatternSync('price_lock'), ...EXTRA_LOCK_KEYWORDS]
+      if (matchesKeyword(enrichedContext.message, lockKeywords)) {
+        logger.info('Simple mode intercept: price_lock (active quote, no deal)', {
+          event: 'simple_mode_intercept',
+          action: 'price_lock',
+          groupId: enrichedContext.groupId,
+          sender: enrichedContext.sender,
+          quoteId: activeQuote.id,
+        })
+        return {
+          destination: 'DEAL_HANDLER',
+          context: { ...enrichedContext, dealAction: 'price_lock' },
         }
       }
     }
@@ -229,6 +247,23 @@ async function trySimpleModeIntercept(
         context: { ...enrichedContext, dealAction: 'price_lock' },
       }
     }
+
+    // QUOTED + bare number ≥ 100 → auto-lock with amount (simple mode shortcut)
+    const quotedParsed = parseBrazilianNumber(message.trim())
+    if (quotedParsed !== null && quotedParsed >= 100) {
+      logger.info('Simple mode intercept: price_lock with amount (quoted + number)', {
+        event: 'simple_mode_intercept',
+        action: 'price_lock',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+        parsedAmount: quotedParsed,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'price_lock' },
+      }
+    }
   }
 
   if (deal.state === 'awaiting_amount') {
@@ -262,6 +297,19 @@ async function trySimpleModeIntercept(
         destination: 'DEAL_HANDLER',
         context: { ...enrichedContext, dealAction: 'volume_input' },
       }
+    }
+
+    // AWAITING_AMOUNT: message not recognized → send contextual feedback
+    logger.info('Simple mode intercept: unrecognized input in awaiting_amount', {
+      event: 'simple_mode_intercept',
+      action: 'unrecognized_input',
+      groupId: enrichedContext.groupId,
+      sender: enrichedContext.sender,
+      dealId: deal.id,
+    })
+    return {
+      destination: 'DEAL_HANDLER',
+      context: { ...enrichedContext, dealAction: 'unrecognized_input' },
     }
   }
 

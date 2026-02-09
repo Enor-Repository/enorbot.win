@@ -87,7 +87,7 @@ export interface SweepNotification {
 // Message Templates (pt-BR)
 // ============================================================================
 
-function buildQuoteMessage(deal: ActiveDeal, amountBrl: number | null, amountUsdt: number | null): string {
+function buildQuoteMessage(deal: ActiveDeal, amountBrl: number | null, amountUsdt: number | null, simpleMode = false): string {
   const lines: string[] = []
   lines.push('📊 *Cotação*')
   lines.push('')
@@ -98,7 +98,11 @@ function buildQuoteMessage(deal: ActiveDeal, amountBrl: number | null, amountUsd
   }
 
   lines.push('')
-  lines.push('Responda *trava* para travar essa taxa.')
+  if (simpleMode) {
+    lines.push('Responda *trava* ou envie o valor em USDT.')
+  } else {
+    lines.push('Responda *trava* para travar essa taxa.')
+  }
 
   const ttlMinutes = Math.ceil((deal.ttlExpiresAt.getTime() - Date.now()) / 60000)
   if (ttlMinutes > 0) {
@@ -291,6 +295,7 @@ export async function handleDealRouted(context: RouterContext): Promise<void> {
     case 'rejection':      await handleRejection(context); break
     case 'volume_input':   await handleVolumeInput(context); break
     case 'direct_amount':  await handleDirectAmount(context); break
+    case 'unrecognized_input': await handleUnrecognizedInput(context); break
     default:
       logger.warn('Unknown dealAction in DEAL_HANDLER route', {
         event: 'deal_handler_unknown_action',
@@ -415,8 +420,9 @@ export async function handleVolumeInquiry(
 
   const deal = dealResult.data
 
-  // Send quote message
-  const quoteMsg = buildQuoteMessage(deal, computedBrl, computedUsdt)
+  // Send quote message (simple mode shows streamlined guidance)
+  const isSimpleModeForQuote = spreadConfig?.dealFlowMode === 'simple'
+  const quoteMsg = buildQuoteMessage(deal, computedBrl, computedUsdt, isSimpleModeForQuote)
   await sendDealMessage(context, quoteMsg, 'deal_quote')
 
   logger.info('Deal quoted', {
@@ -463,20 +469,66 @@ export async function handlePriceLock(
     return err(`Failed to find deal: ${existingResult.error}`)
   }
 
-  const deal = existingResult.data
+  let deal = existingResult.data
   if (deal === null) {
-    // No active deal — suggest creating one
-    await sendDealMessage(
-      context,
-      'Você não tem cotação ativa. Envie o valor desejado para receber uma cotação.',
-      'deal_no_active'
-    )
-    return ok({
-      action: 'no_action',
-      groupId,
-      clientJid: sender,
-      message: 'No active deal to lock',
-    })
+    // No deal — check for active quote bridge (price response → trava flow)
+    const activeQuote = getActiveQuote(groupId)
+    if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+      // Bridge: create deal from active quote, then lock it
+      forceAccept(groupId) // Close volatility monitoring
+
+      const bridgeConfig = await getSpreadConfig(groupId)
+      const side = bridgeConfig.ok ? bridgeConfig.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
+      const ttlSeconds = bridgeConfig.ok ? bridgeConfig.data.quoteTtlSeconds ?? 180 : 180
+
+      const dealResult = await createDeal({
+        groupJid: groupId,
+        clientJid: sender,
+        side,
+        quotedRate: activeQuote.quotedPrice,
+        baseRate: activeQuote.basePrice,
+        ttlSeconds,
+        spreadConfig: bridgeConfig.ok ? bridgeConfig.data : undefined,
+        metadata: {
+          senderName: context.senderName ?? null,
+          originalMessage: message.substring(0, 200),
+          flow: 'quote_lock',
+        },
+      })
+
+      if (!dealResult.ok) {
+        logger.error('Failed to create deal from active quote', {
+          event: 'deal_quote_bridge_failed',
+          groupId,
+          sender,
+          error: dealResult.error,
+        })
+        return err(dealResult.error)
+      }
+
+      deal = dealResult.data
+
+      logger.info('Deal created from active quote for lock', {
+        event: 'deal_created_from_quote',
+        dealId: deal.id,
+        groupId,
+        sender,
+        quotedRate: activeQuote.quotedPrice,
+      })
+    } else {
+      // No active deal or quote — suggest creating one
+      await sendDealMessage(
+        context,
+        'Você não tem cotação ativa. Envie o valor desejado para receber uma cotação.',
+        'deal_no_active'
+      )
+      return ok({
+        action: 'no_action',
+        groupId,
+        clientJid: sender,
+        message: 'No active deal to lock',
+      })
+    }
   }
 
   if (deal.state !== 'quoted') {
@@ -1222,6 +1274,49 @@ export async function handleDirectAmount(
     clientJid: sender,
     message: calcMsg,
   })
+}
+
+// ============================================================================
+// Unrecognized Input Feedback (Issue 5)
+// ============================================================================
+
+/**
+ * Handle unrecognized input during an active deal in simple mode.
+ * Sends contextual feedback based on the deal state so the client
+ * knows what the bot expects instead of silent drops.
+ */
+async function handleUnrecognizedInput(
+  context: RouterContext
+): Promise<Result<DealHandlerResult>> {
+  const { groupId, sender } = context
+
+  const existingResult = await findClientDeal(groupId, sender)
+  if (!existingResult.ok || !existingResult.data) {
+    return ok({ action: 'no_action', groupId, clientJid: sender, message: 'No active deal' })
+  }
+
+  const deal = existingResult.data
+
+  if (deal.state === 'awaiting_amount') {
+    const configResult = await getSpreadConfig(groupId)
+    const language = configResult.ok ? configResult.data.groupLanguage : 'pt'
+    const rate = deal.lockedRate ?? deal.quotedRate
+    const msg = language === 'en'
+      ? `Send the USDT amount (e.g., 500, 10k) or "cancel". Rate: ${formatRate(rate)}.`
+      : `Envie o valor em USDT (ex: 500, 10k) ou "cancela". Taxa: ${formatRate(rate)}.`
+    await sendDealMessage(context, msg, 'deal_awaiting_amount')
+
+    return ok({
+      action: 'no_action',
+      dealId: deal.id,
+      groupId,
+      clientJid: sender,
+      message: 'Sent awaiting_amount feedback for unrecognized input',
+    })
+  }
+
+  // For other states, no feedback needed — fall through silently
+  return ok({ action: 'no_action', groupId, clientJid: sender, message: 'Unrecognized input, no feedback needed' })
 }
 
 // ============================================================================

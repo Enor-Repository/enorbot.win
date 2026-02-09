@@ -50,7 +50,7 @@ let cache: CacheEntry | null = null
 // ============================================================================
 
 const FALLBACK_KEYWORDS: Record<PatternKey, string[]> = {
-  price_request: ['preço', 'cotação'],
+  price_request: ['preço', 'cotação', 'taxa'],
   deal_cancellation: ['cancela', 'cancelar', 'cancel'],
   price_lock: ['trava', 'lock', 'travar'],
   deal_confirmation: ['fechado', 'fecha', 'fechar', 'confirma', 'confirmado', 'confirmed'],

@@ -175,7 +175,7 @@ describe('systemPatternService', () => {
       invalidateCache()
 
       const keywords = await getKeywordsForPattern('price_request')
-      expect(keywords).toEqual(['preço', 'cotação'])
+      expect(keywords).toEqual(['preço', 'cotação', 'taxa'])
     })
 
     it('falls back for deal_confirmation (not in DB mock)', async () => {
@@ -195,7 +195,7 @@ describe('systemPatternService', () => {
     it('returns fallback keywords when cache is empty', () => {
       invalidateCache()
       const keywords = getKeywordsForPatternSync('price_request')
-      expect(keywords).toEqual(['preço', 'cotação'])
+      expect(keywords).toEqual(['preço', 'cotação', 'taxa'])
     })
 
     it('returns cached keywords after async load', async () => {

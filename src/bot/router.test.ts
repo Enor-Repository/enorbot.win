@@ -712,12 +712,13 @@ describe('routeMessage simple mode intercept', () => {
       expect(result.context.dealAction).toBeUndefined()
     })
 
-    it('does not intercept a number (QUOTED state, not awaiting_amount)', async () => {
+    it('intercepts a number ≥ 100 in QUOTED state → price_lock (auto-lock shortcut)', async () => {
       mockParseBrazilianNumber.mockReturnValue(5000)
       const context = { ...baseContext, message: '5000' }
       const result = await routeMessage(context)
-      // QUOTED state does not handle numbers — falls through
-      expect(result.destination).toBe('IGNORE')
+      // Simple mode: bare number in QUOTED state auto-locks with amount
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('price_lock')
     })
   })
 
@@ -756,10 +757,12 @@ describe('routeMessage simple mode intercept', () => {
       expect(result.context.dealAction).toBe('cancellation')
     })
 
-    it('does not intercept non-number, non-cancel message → falls through', async () => {
+    it('intercepts non-number, non-cancel message → unrecognized_input feedback', async () => {
       const context = { ...baseContext, message: 'hello' }
       const result = await routeMessage(context)
-      expect(result.destination).toBe('IGNORE')
+      // Simple mode: unrecognized input during AWAITING_AMOUNT gets feedback
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('unrecognized_input')
     })
   })
 
