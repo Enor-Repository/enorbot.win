@@ -70,6 +70,18 @@ fi
 # ============================================================================
 if [[ "$MODE" == "full" || "$MODE" == "dash" ]]; then
   info "Building dashboard (vite)..."
+  # Source backend .env to get DASHBOARD_SECRET for the Vite build
+  if [[ -f "$LOCAL_DIR/.env" ]]; then
+    DASH_SECRET=$(grep '^DASHBOARD_SECRET=' "$LOCAL_DIR/.env" | cut -d= -f2-)
+    if [[ -n "$DASH_SECRET" ]]; then
+      export VITE_DASHBOARD_SECRET="$DASH_SECRET"
+      info "Injected VITE_DASHBOARD_SECRET from .env"
+    else
+      fail "DASHBOARD_SECRET not set in .env — dashboard auth will fail in production"
+    fi
+  else
+    fail ".env file not found — cannot inject DASHBOARD_SECRET"
+  fi
   cd "$LOCAL_DIR/dashboard"
   npx vite build --outDir ../dist/dashboard 2>&1 | tail -3
   if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
@@ -113,8 +125,8 @@ ok "Sync complete"
 # ============================================================================
 # Step 6: Install dependencies on VPS (if package.json changed)
 # ============================================================================
-info "Checking VPS dependencies..."
-$SSH $VPS_HOST "cd $VPS_PATH && npm ci --omit=dev --ignore-scripts 2>&1 | tail -3"
+info "Installing VPS dependencies..."
+$SSH $VPS_HOST "cd $VPS_PATH && npm ci --omit=dev --ignore-scripts" || fail "npm ci failed on VPS — node_modules may be wiped. Check git SSH access."
 ok "Dependencies up to date"
 
 # ============================================================================
@@ -123,7 +135,7 @@ ok "Dependencies up to date"
 info "Restarting PM2..."
 $SSH $VPS_HOST "
   pm2 delete $PM2_NAME 2>/dev/null || true
-  cd $VPS_PATH && pm2 start dist/index.js --name $PM2_NAME -i 1 --cwd $VPS_PATH
+  cd $VPS_PATH && pm2 start dist/index.js --name $PM2_NAME --cwd $VPS_PATH
   pm2 save
 " 2>&1 | grep -E 'Done|online|saved'
 ok "PM2 restarted"

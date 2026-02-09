@@ -347,3 +347,58 @@ Added structured logging to `handleOffCommand`:
 ### Test results (Round 3b)
 - `npx tsc --noEmit` — 0 errors
 - `npx vitest run` — **1714 passed**, 0 failed (54 test files)
+
+---
+
+## Round 3c Live Test — 18:00–18:16 BRT (2026-02-09)
+
+### What happened
+
+Daniel sent "preço" → bot sent price "5,2178" → Daniel sent "100k" → **no response**. The bot appeared completely non-functional.
+
+### Root cause: Deploy double-restart killed bot mid-conversation
+
+The deploy at ~18:16 caused **two PM2 restarts** because `deploy.sh` used cluster mode (`pm2 start -i 1`):
+
+1. `pm2 delete` killed the old instance (11)
+2. `pm2 start -i 1` launched instance 12 in cluster mode
+3. Instance 12 connected, received Daniel's buffered "preço", sent price at 18:16:30
+4. **PM2 cluster rotation sent SIGINT to instance 12 at 18:16:36** (only 6 seconds after sending price!)
+5. Instance 13 started at 18:16:38 and connected at 18:16:41
+6. Daniel sent "100k" → message was lost during the ~5-second restart gap
+7. Instance 13 was online but had **zero active quotes** (in-memory state lost with instance 12)
+8. Even if "100k" arrived at instance 13, there was no active quote to match → silently dropped
+
+**Timeline from logs (UTC = BRT + 3h):**
+```
+21:16:13  Instance 12 starts (PID 193325)
+21:16:17  Instance 12 connects to WhatsApp
+21:16:18  Instance 12 receives Daniel's "preço" (buffered offline message)
+21:16:30  Instance 12 sends price "5,2178" (8.3s anti-detection delay)
+21:16:36  Instance 12 receives SIGINT (PM2 cluster rotation) — DEAD
+21:16:38  Instance 13 starts (PID 193834)
+21:16:41  Instance 13 connects to WhatsApp
+21:16:41+ Daniel sends "100k" → LOST (no active quote in instance 13)
+```
+
+### Fix applied (Round 3c)
+
+#### Fix 5 — Deploy script: fork mode instead of cluster mode
+
+**Before:** `pm2 start dist/index.js --name enorbot -i 1 --cwd /opt/enorbot`
+
+The `-i 1` flag enables cluster mode with 1 worker. PM2 cluster mode creates a master process that manages workers. Even with just 1 worker, the master can rotate (SIGINT + new fork) during startup, causing a double-restart.
+
+**After:** `pm2 start dist/index.js --name enorbot --cwd /opt/enorbot`
+
+Without `-i 1`, PM2 uses fork mode (default). Fork mode runs the process directly — no cluster master, no worker rotation, no double-restart. Single clean startup.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `deploy.sh` | Removed `-i 1` from PM2 start command (fork mode instead of cluster) |
+
+### Note on in-memory state
+
+Active quotes (`activeQuotes` map) live only in process memory. When PM2 restarts, they're lost. This is acceptable for now (quotes have a 3-minute TTL anyway), but it means deploys during active conversations will lose quote context. Future improvement: persist quotes to Supabase.
