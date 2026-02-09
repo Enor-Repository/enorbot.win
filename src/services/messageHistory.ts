@@ -35,6 +35,7 @@ export type BotMessageType = 'price_response' | 'stall' | 'notification' | 'stat
   | 'deal_reminder' | 'deal_expired' | 'deal_expiration' | 'deal_no_active'
   | 'deal_state_reminder' | 'deal_state_hint' | 'deal_amount_needed'
   | 'deal_rejected' | 'deal_awaiting_amount' | 'deal_volume_computed'
+  | 'control_off'
 
 /**
  * All supported message types

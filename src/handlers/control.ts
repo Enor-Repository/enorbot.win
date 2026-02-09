@@ -13,7 +13,8 @@
 import { logger } from '../utils/logger.js'
 import { ok, type Result } from '../utils/result.js'
 import type { RouterContext } from '../bot/router.js'
-import { sendWithAntiDetection } from '../utils/messaging.js'
+import { sendWithAntiDetection, formatMention } from '../utils/messaging.js'
+import { getActiveDeals, cancelDeal, archiveDeal } from '../services/dealFlowService.js'
 // Story 7.4: Bot message logging to Supabase
 import { logBotMessage } from '../services/messageHistory.js'
 import {
@@ -42,6 +43,7 @@ import {
   addTriggerPattern,
   removeTriggerPattern,
   setPlayerRole,
+  resolveOperatorJid,
   type GroupConfig,
 } from '../services/groupConfig.js'
 import { getClassificationMetrics } from '../services/classificationEngine.js'
@@ -144,6 +146,7 @@ export type ControlCommandType =
   | 'resume'
   | 'status'
   | 'training'
+  | 'off'       // off [group] - cancel active deals and send off to group
   | 'mode'      // mode <group> learning|assisted|active|paused
   | 'modes'     // List all groups with modes
   | 'config'    // config <group> - show group config
@@ -167,7 +170,9 @@ export interface ControlCommand {
  * @returns Parsed control command
  */
 export function parseControlCommand(message: string): ControlCommand {
-  const lower = message.toLowerCase().trim()
+  // Strip leading bot @mention (e.g., "@5511999999999 off OTC")
+  const stripped = message.replace(/^@[\d]+\s*/g, '').trim()
+  const lower = stripped.toLowerCase().trim()
 
   // Mode command: "mode <group> <mode>"
   if (lower.startsWith('mode ')) {
@@ -224,6 +229,13 @@ export function parseControlCommand(message: string): ControlCommand {
   }
   if (lower === 'training off') {
     return { type: 'training', args: ['off'] }
+  }
+
+  // Off command: "off", "off <group>", "off off"
+  // Must come AFTER "training off" check (exact match) to avoid conflict
+  if (lower === 'off' || lower.startsWith('off ')) {
+    const rest = stripped.replace(/^off\s*/i, '').trim()
+    return { type: 'off', args: rest ? [rest] : [] }
   }
 
   // Number selection (1-99) for interactive group selection
@@ -1002,6 +1014,169 @@ async function handleSelectCommand(context: RouterContext, args: string[]): Prom
 }
 
 /**
+ * Send "off @operator" to a target group.
+ * Resolves operator JID, builds mention, sends via anti-detection.
+ */
+async function sendOffToGroup(
+  sock: RouterContext['sock'],
+  groupJid: string,
+  groupName: string
+): Promise<void> {
+  const operatorJid = resolveOperatorJid(groupJid)
+
+  if (operatorJid) {
+    const mention = formatMention(operatorJid)
+    const message = `off ${mention.textSegment}`
+    const result = await sendWithAntiDetection(sock, groupJid, message, [mention.jid])
+
+    if (result.ok) {
+      logBotMessage({
+        groupJid,
+        content: message,
+        messageType: 'control_off',
+      })
+    }
+  } else {
+    // No operator assigned — send plain "off"
+    const result = await sendWithAntiDetection(sock, groupJid, 'off')
+
+    if (result.ok) {
+      logBotMessage({
+        groupJid,
+        content: 'off',
+        messageType: 'control_off',
+      })
+    }
+  }
+
+  logger.info('Off message sent to group', {
+    event: 'off_sent_to_group',
+    groupJid,
+    groupName,
+    hasOperator: !!operatorJid,
+  })
+}
+
+/**
+ * Handle off command.
+ * "off" (bare) → usage hint
+ * "off <group>" → send off to that group + cancel active deals
+ * "off off" → off ALL groups with active deals
+ *
+ * @param context - Router context
+ * @param args - Command arguments
+ */
+async function handleOffCommand(context: RouterContext, args: string[]): Promise<void> {
+  // No args → usage hint
+  if (args.length === 0) {
+    await sendControlResponse(
+      context,
+      'Envie *off [nome do grupo]* para encerrar deals ativos, ou *off off* para encerrar todos.'
+    )
+    return
+  }
+
+  // "off off" → off ALL groups
+  if (args[0].toLowerCase() === 'off') {
+    const configs = await getAllGroupConfigs()
+    const groupsWithDeals: Array<{ groupJid: string; groupName: string; dealCount: number }> = []
+    let totalCancelled = 0
+
+    for (const config of configs.values()) {
+      const dealsResult = await getActiveDeals(config.groupJid)
+      if (!dealsResult.ok) continue
+
+      const deals = dealsResult.data
+      if (deals.length > 0) {
+        // Cancel all deals
+        for (const deal of deals) {
+          const cancelResult = await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator')
+          if (cancelResult.ok) {
+            totalCancelled++
+            // Archive fire-and-forget
+            archiveDeal(deal.id, config.groupJid).catch(() => {})
+          }
+        }
+
+        groupsWithDeals.push({
+          groupJid: config.groupJid,
+          groupName: config.groupName,
+          dealCount: deals.length,
+        })
+      }
+    }
+
+    if (groupsWithDeals.length === 0) {
+      await sendControlResponse(context, 'Nenhum deal ativo em nenhum grupo.')
+      return
+    }
+
+    // Send "off" to each group with deals
+    for (const group of groupsWithDeals) {
+      await sendOffToGroup(context.sock, group.groupJid, group.groupName)
+    }
+
+    const groupNames = groupsWithDeals.map(g => g.groupName).join(', ')
+    await sendControlResponse(
+      context,
+      `off enviado para ${groupsWithDeals.length} grupo(s): ${groupNames}. ${totalCancelled} deal(s) cancelados.`
+    )
+
+    logger.info('Off all command processed', {
+      event: 'off_all_processed',
+      groupCount: groupsWithDeals.length,
+      totalCancelled,
+      triggeredBy: context.sender,
+    })
+    return
+  }
+
+  // "off <group>" → off specific group
+  const groupSearch = args.join(' ')
+  const match = findMatchingGroup(groupSearch)
+
+  if (!match.found || !match.groupId) {
+    await sendControlResponse(
+      context,
+      `Grupo não encontrado. Envie *off [nome do grupo]* ou *off off* para encerrar todos os deals ativos.`
+    )
+    return
+  }
+
+  // Get and cancel active deals
+  const dealsResult = await getActiveDeals(match.groupId)
+  let cancelledCount = 0
+
+  if (dealsResult.ok) {
+    for (const deal of dealsResult.data) {
+      const cancelResult = await cancelDeal(deal.id, match.groupId, 'cancelled_by_operator')
+      if (cancelResult.ok) {
+        cancelledCount++
+        // Archive fire-and-forget
+        archiveDeal(deal.id, match.groupId).catch(() => {})
+      }
+    }
+  }
+
+  // Send "off" to the target group (even if no active deals)
+  await sendOffToGroup(context.sock, match.groupId, match.groupName!)
+
+  // Reply in control group
+  const dealMsg = cancelledCount > 0
+    ? `${cancelledCount} deal(s) cancelados.`
+    : 'Nenhum deal ativo.'
+  await sendControlResponse(context, `off enviado para ${match.groupName}. ${dealMsg}`)
+
+  logger.info('Off command processed', {
+    event: 'off_command_processed',
+    groupId: match.groupId,
+    groupName: match.groupName,
+    cancelledCount,
+    triggeredBy: context.sender,
+  })
+}
+
+/**
  * Build status message for the CIO.
  * Updated to show per-group mode information.
  */
@@ -1201,6 +1376,10 @@ export async function handleControlMessage(context: RouterContext): Promise<Resu
 
     case 'training':
       await handleTrainingCommand(context, command.args)
+      break
+
+    case 'off':
+      await handleOffCommand(context, command.args)
       break
 
     case 'select':

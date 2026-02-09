@@ -234,3 +234,56 @@ Now matches: "usdt 500", "Usdt 100 k quanto consegue?", "USDT 10k", "usd 5000"
 | 96f6319e | Daniel | direct_amount (100k) | **Completed** | 5.2053 | 100,000 | 520,530 | ✅ |
 | c70b723b | Daniel | direct_amount (10000) | **Completed** | 5.2048 | 10,000 | 52,048 | ✅ |
 | 33a5cfc5 | Daniel | volume_inquiry (Usdt 100k) | **Completed** | 5.2078 | 100,000 | 520,780 | #7 (quote wrong) |
+
+---
+---
+
+# Round 3 — `off [group]` Remote Control Command (2026-02-09)
+
+## Feature: Remote deal cancellation from control group
+
+**Context:** The CIO needed to remotely reject/cancel all active deals in any trading group from the control group (CONTROLE_eNorBOT). Previously, "off" only worked within a trading group when a client rejects a quoted deal. There was no way for operators to "off" a group remotely.
+
+### New commands (control group only)
+
+| Command | Behavior |
+|---------|----------|
+| `off` | Usage hint: "Envie *off [nome do grupo]* para encerrar deals ativos, ou *off off* para encerrar todos." |
+| `off <group name>` | Sends "off @operator" to that group + cancels all active deals |
+| `off off` | Same, but for ALL groups with active deals |
+
+### How it works
+
+1. CIO sends `off OTC Test` in the control group
+2. Bot resolves the group by fuzzy name match (same as `pause`, `mode`, etc.)
+3. Bot fetches all active deals for that group via `getActiveDeals()`
+4. Each deal is cancelled via `cancelDeal(id, jid, 'cancelled_by_operator')` and archived
+5. Bot sends "off @operator" (with WhatsApp mention) to the target group via `sendWithAntiDetection`
+6. Bot replies in control group: "off enviado para OTC Test. N deal(s) cancelados."
+
+For `off off`:
+- Iterates all registered groups, finds those with active deals
+- Cancels all deals across all groups, sends "off" to each
+- Reply: "off enviado para N grupo(s): Group1, Group2. M deal(s) cancelados."
+
+### Edge cases handled
+
+- **Bot @mention prefix stripped:** `@5511999999999 off OTC` works (strips leading `@digits`)
+- **"training off" vs "off":** No conflict — `training off` is an exact match checked earlier in parser
+- **No active deals:** Still sends "off" to the group (operator signal), replies "Nenhum deal ativo."
+- **"off off" with no deals anywhere:** Reply: "Nenhum deal ativo em nenhum grupo."
+- **Group not found:** Reply with guidance on correct usage
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/handlers/control.ts` | Added `'off'` to `ControlCommandType`, bot @mention stripping in parser, `off` command parsing, `handleOffCommand()` + `sendOffToGroup()` helpers, `case 'off'` in switch |
+| `src/services/systemTriggerSeeder.ts` | Added `off` to `CONTROL_COMMAND_TEMPLATES` (exact, control_only, displayName: 'Off Command') |
+| `src/services/messageHistory.ts` | Added `'control_off'` to `BotMessageType` union |
+| `src/handlers/control.test.ts` | 5 new parser tests (bare off, off + group, off off, @mention stripping, no training off conflict) |
+| `src/services/systemTriggerSeeder.test.ts` | Updated expected trigger count 6→7, added 'off' to expected phrases |
+
+### Test results
+- `npx tsc --noEmit` — 0 errors
+- `npx vitest run` — **1714 passed**, 0 failed (54 test files)

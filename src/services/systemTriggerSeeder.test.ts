@@ -155,7 +155,7 @@ describe('seedDefaultTriggers', () => {
     expect(actionTypes).toContain('control_command')
 
     const controlTriggers = rows.filter(r => r.action_type === 'control_command')
-    expect(controlTriggers.length).toBe(6)
+    expect(controlTriggers.length).toBe(7)
     for (const t of controlTriggers) {
       expect(t.pattern_type).toBe('exact')
       expect(t.scope).toBe('control_only')
@@ -167,6 +167,7 @@ describe('seedDefaultTriggers', () => {
     expect(controlPhrases).toContain('modes')
     expect(controlPhrases).toContain('training on')
     expect(controlPhrases).toContain('training off')
+    expect(controlPhrases).toContain('off')
 
     // Non-control triggers should have 'group' scope
     const groupTriggers = rows.filter(r => r.action_type !== 'control_command')

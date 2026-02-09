@@ -246,6 +246,38 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
       })
     })
 
+    describe('off command', () => {
+      it('parses "off" as bare off (no args)', () => {
+        const result = parseControlCommand('off')
+        expect(result.type).toBe('off')
+        expect(result.args).toEqual([])
+      })
+
+      it('parses "off OTC Test" with group name', () => {
+        const result = parseControlCommand('off OTC Test')
+        expect(result.type).toBe('off')
+        expect(result.args).toEqual(['OTC Test'])
+      })
+
+      it('parses "off off" for all groups', () => {
+        const result = parseControlCommand('off off')
+        expect(result.type).toBe('off')
+        expect(result.args).toEqual(['off'])
+      })
+
+      it('strips @mention prefix: "@5511999999999 off OTC"', () => {
+        const result = parseControlCommand('@5511999999999 off OTC')
+        expect(result.type).toBe('off')
+        expect(result.args).toEqual(['OTC'])
+      })
+
+      it('does not conflict with "training off"', () => {
+        const result = parseControlCommand('training off')
+        expect(result.type).toBe('training')
+        expect(result.args).toEqual(['off'])
+      })
+    })
+
     describe('unknown commands', () => {
       it('returns unknown for unrecognized commands', () => {
         const result = parseControlCommand('hello world')

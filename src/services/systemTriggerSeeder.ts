@@ -78,6 +78,7 @@ const CONTROL_COMMAND_TEMPLATES: DefaultTriggerTemplate[] = [
   { triggerPhrase: 'modes', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
   { triggerPhrase: 'training on', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
   { triggerPhrase: 'training off', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
+  { triggerPhrase: 'off', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only', displayName: 'Off Command' },
 ]
 
 // ============================================================================
