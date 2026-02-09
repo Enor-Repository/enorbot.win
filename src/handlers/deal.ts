@@ -57,6 +57,10 @@ import {
 import { fetchPrice } from '../services/binance.js'
 import { getSpreadConfig, calculateQuote, type SpreadConfig } from '../services/groupSpreadService.js'
 import { getActiveRule, type GroupRule } from '../services/ruleService.js'
+// Sprint 9.1: Active quote bridge + operator resolution + Excel logging
+import { getActiveQuote, forceAccept } from '../services/activeQuotes.js'
+import { resolveOperatorJid } from '../services/groupConfig.js'
+import { logPriceQuote, type LogEntry } from '../services/excel.js'
 
 // ============================================================================
 // Types
@@ -268,6 +272,33 @@ async function sendDealMessage(
   }
 
   return result
+}
+
+// ============================================================================
+// Sprint 9.1: Dispatcher for connection.ts DEAL_HANDLER routing
+// ============================================================================
+
+/**
+ * Dispatch a DEAL_HANDLER-routed message to the appropriate sub-handler
+ * based on the dealAction set by the router.
+ */
+export async function handleDealRouted(context: RouterContext): Promise<void> {
+  switch (context.dealAction) {
+    case 'volume_inquiry': await handleVolumeInquiry(context); break
+    case 'price_lock':     await handlePriceLock(context); break
+    case 'confirmation':   await handleConfirmation(context); break
+    case 'cancellation':   await handleDealCancellation(context); break
+    case 'rejection':      await handleRejection(context); break
+    case 'volume_input':   await handleVolumeInput(context); break
+    case 'direct_amount':  await handleDirectAmount(context); break
+    default:
+      logger.warn('Unknown dealAction in DEAL_HANDLER route', {
+        event: 'deal_handler_unknown_action',
+        dealAction: context.dealAction,
+        groupId: context.groupId,
+        sender: context.sender,
+      })
+  }
 }
 
 // ============================================================================
@@ -532,7 +563,8 @@ export async function handlePriceLock(
       if (!completeResult.ok) return err(completeResult.error)
 
       // Send formatted calculation + @mention
-      const operatorJid = configResult.ok ? configResult.data.operatorJid : null
+      const operatorJid = resolveOperatorJid(groupId)
+        ?? (configResult.ok ? configResult.data.operatorJid : null)
       const mentions = operatorJid ? [operatorJid] : []
       const calcLine = `${formatUsdt(simpleAmount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
       const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
@@ -546,6 +578,16 @@ export async function handlePriceLock(
 
       // Archive (fire-and-forget)
       archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+      // Sprint 9.1: Log to Excel (fire-and-forget)
+      logDealToExcel({
+        groupId,
+        groupName: context.groupName,
+        clientIdentifier: context.senderName ?? sender,
+        volumeBrl: comp.data.amountBrl,
+        quote: rate,
+        acquiredUsdt: simpleAmount,
+      })
 
       logger.info('Simple mode lock+compute completed', {
         event: 'deal_simple_lock_complete',
@@ -881,7 +923,8 @@ export async function handleRejection(
 
   // Send "off" to group with @mention of operator
   const configResult = await getSpreadConfig(groupId)
-  const operatorJid = configResult.ok ? configResult.data.operatorJid : null
+  const operatorJid = resolveOperatorJid(groupId)
+    ?? (configResult.ok ? configResult.data.operatorJid : null)
   const mentions = operatorJid ? [operatorJid] : []
   const offMessage = operatorJid ? `off @${operatorJid.replace(/@.*/, '')}` : 'off'
 
@@ -997,7 +1040,8 @@ export async function handleVolumeInput(
 
   // Send formatted calculation + @mention
   const configResult = await getSpreadConfig(groupId)
-  const operatorJid = configResult.ok ? configResult.data.operatorJid : null
+  const operatorJid = resolveOperatorJid(groupId)
+    ?? (configResult.ok ? configResult.data.operatorJid : null)
   const mentions = operatorJid ? [operatorJid] : []
   const calcLine = `${formatUsdt(amount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
   const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
@@ -1011,6 +1055,16 @@ export async function handleVolumeInput(
 
   // Archive (fire-and-forget)
   archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+  // Sprint 9.1: Log to Excel (fire-and-forget)
+  logDealToExcel({
+    groupId,
+    groupName: context.groupName,
+    clientIdentifier: context.senderName ?? sender,
+    volumeBrl: comp.data.amountBrl,
+    quote: rate,
+    acquiredUsdt: amount,
+  })
 
   logger.info('Volume input completed deal', {
     event: 'deal_volume_input_completed',
@@ -1028,6 +1082,180 @@ export async function handleVolumeInput(
     groupId,
     clientJid: sender,
     message: calcMsg,
+  })
+}
+
+// ============================================================================
+// Sprint 9.1: CIO's Ideal Deal Flow — Direct Amount Handler
+// ============================================================================
+
+/**
+ * Sprint 9.1: Handle direct USDT amount when an active quote exists but no deal.
+ * This is the CIO's ideal flow:
+ *   1. Client asks "price" → Bot sends rate (handled by price handler)
+ *   2. Client sends USDT amount → This function handles it:
+ *      - Computes USDT × rate = BRL
+ *      - @mentions operator
+ *      - Creates + archives deal for audit trail
+ *      - Logs to Excel
+ */
+export async function handleDirectAmount(
+  context: RouterContext
+): Promise<Result<DealHandlerResult>> {
+  const { groupId, sender, message } = context
+
+  logger.info('Direct amount detected (CIO flow)', {
+    event: 'deal_direct_amount',
+    groupId,
+    sender,
+    messageLength: message.length,
+  })
+
+  // 1. Get active quote (has rate from price response)
+  const activeQuote = getActiveQuote(groupId)
+  if (!activeQuote || activeQuote.status !== 'pending') {
+    logger.warn('Direct amount: no active quote found', {
+      event: 'deal_direct_amount_no_quote',
+      groupId,
+      sender,
+    })
+    return ok({
+      action: 'no_action',
+      groupId,
+      clientJid: sender,
+      message: 'No active quote for direct amount',
+    })
+  }
+
+  // 2. Parse USDT amount
+  const amount = parseBrazilianNumber(message.trim())
+  if (amount === null || amount < 100) {
+    return ok({
+      action: 'no_action',
+      groupId,
+      clientJid: sender,
+      message: 'Amount parse failed or below minimum',
+    })
+  }
+
+  // 3. Compute USDT × quotedPrice = BRL
+  const rate = activeQuote.quotedPrice
+  const comp = computeUsdtToBrl(amount, rate)
+  if (!comp.ok) {
+    return err(`Computation failed: ${comp.error}`)
+  }
+
+  // 4. Resolve operator: playerRoles first, then spreadConfig fallback
+  const configResult = await getSpreadConfig(groupId)
+  const operatorJid = resolveOperatorJid(groupId)
+    ?? (configResult.ok ? configResult.data.operatorJid : null)
+  const mentions = operatorJid ? [operatorJid] : []
+
+  // 5. Send terse calculation message: "5.000,00 USDT x 5,2234 = R$ 26.117,00 @operator"
+  const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
+  const calcMsg = `${formatUsdt(amount)} x ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}${mentionSuffix}`
+
+  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+  if (sendResult.ok) {
+    logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
+    recordMessageSent(groupId)
+  }
+
+  // 6. Accept the quote (closes volatility monitoring)
+  forceAccept(groupId)
+
+  // 7. Create deal → compute → complete → archive (audit trail)
+  const side = configResult.ok ? configResult.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
+  const ttlSeconds = configResult.ok ? configResult.data.quoteTtlSeconds ?? 180 : 180
+
+  const dealResult = await createDeal({
+    groupJid: groupId,
+    clientJid: sender,
+    side,
+    quotedRate: rate,
+    baseRate: activeQuote.basePrice,
+    ttlSeconds,
+    spreadConfig: configResult.ok ? configResult.data : undefined,
+    amountUsdt: amount,
+    amountBrl: comp.data.amountBrl,
+    metadata: {
+      senderName: context.senderName ?? null,
+      originalMessage: message.substring(0, 200),
+      flow: 'direct_amount',
+    },
+  })
+
+  if (dealResult.ok) {
+    const deal = dealResult.data
+    // Fast-track: lock → compute → complete → archive
+    await lockDeal(deal.id, groupId, { lockedRate: rate, amountUsdt: amount, amountBrl: comp.data.amountBrl })
+    await startComputation(deal.id, groupId)
+    await completeDeal(deal.id, groupId, { amountBrl: comp.data.amountBrl, amountUsdt: amount })
+    archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+  }
+
+  // 8. Log to Excel (fire-and-forget)
+  logDealToExcel({
+    groupId,
+    groupName: context.groupName,
+    clientIdentifier: context.senderName ?? sender,
+    volumeBrl: comp.data.amountBrl,
+    quote: rate,
+    acquiredUsdt: amount,
+  })
+
+  logger.info('Direct amount deal completed (CIO flow)', {
+    event: 'deal_direct_amount_completed',
+    dealId: dealResult.ok ? dealResult.data.id : null,
+    groupId,
+    sender,
+    rate,
+    amountUsdt: amount,
+    amountBrl: comp.data.amountBrl,
+    operatorMentioned: !!operatorJid,
+  })
+
+  return ok({
+    action: 'deal_computed',
+    dealId: dealResult.ok ? dealResult.data.id : undefined,
+    groupId,
+    clientJid: sender,
+    message: calcMsg,
+  })
+}
+
+// ============================================================================
+// Sprint 9.1: Excel Logging Helper
+// ============================================================================
+
+/**
+ * Log a completed deal to the Excel spreadsheet (fire-and-forget).
+ */
+function logDealToExcel(params: {
+  groupId: string
+  groupName: string
+  clientIdentifier: string
+  volumeBrl: number
+  quote: number
+  acquiredUsdt: number
+}): void {
+  const entry: LogEntry = {
+    timestamp: new Date(),
+    groupName: params.groupName,
+    groupId: params.groupId,
+    clientIdentifier: params.clientIdentifier,
+    volumeBrl: params.volumeBrl,
+    quote: params.quote,
+    acquiredUsdt: params.acquiredUsdt,
+    onchainTx: null,
+  }
+
+  logPriceQuote(entry).catch((e) => {
+    logger.warn('Failed to log deal to Excel', {
+      event: 'deal_excel_log_failed',
+      groupId: params.groupId,
+      error: e instanceof Error ? e.message : String(e),
+    })
   })
 }
 

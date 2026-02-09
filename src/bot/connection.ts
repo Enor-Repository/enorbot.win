@@ -497,6 +497,10 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       } else if (route.destination === 'TRONSCAN_HANDLER') {
         // Handle Tronscan transaction links - update Excel row with tx hash
         await handleTronscanMessage(context)
+      } else if (route.destination === 'DEAL_HANDLER') {
+        // Sprint 9.1: Handle deal flow messages (volume inquiry, price lock, confirmation, etc.)
+        const { handleDealRouted } = await import('../handlers/deal.js')
+        await handleDealRouted(route.context)
       } else if (route.destination === 'OBSERVE_ONLY') {
         // Training mode: Message was logged above, but no response sent
         logger.debug('Training mode: message observed', {

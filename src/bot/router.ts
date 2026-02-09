@@ -60,7 +60,7 @@ export interface RouterContext {
   /** Matched trigger from triggerService (populated when a group trigger matches) */
   matchedTrigger?: GroupTrigger
   /** Deal flow action type for DEAL_HANDLER routing */
-  dealAction?: 'volume_inquiry' | 'price_lock' | 'confirmation' | 'cancellation' | 'rejection' | 'volume_input'
+  dealAction?: 'volume_inquiry' | 'price_lock' | 'confirmation' | 'cancellation' | 'rejection' | 'volume_input' | 'direct_amount'
 }
 
 /**
@@ -171,7 +171,27 @@ async function trySimpleModeIntercept(
   // 2. Check if sender has an active deal
   const dealResult = await getActiveDealForSender(enrichedContext.groupId, enrichedContext.sender)
   if (!dealResult.ok || !dealResult.data) {
-    return null // No active deal → fall through to normal routing
+    // No active deal — check if there's an active quote and message is a bare USDT amount
+    // Sprint 9.1: This bridges the price response → deal handler flow
+    const activeQuote = getActiveQuote(enrichedContext.groupId)
+    if (activeQuote && activeQuote.status === 'pending') {
+      const parsed = parseBrazilianNumber(enrichedContext.message.trim())
+      if (parsed !== null && parsed >= 100) {
+        logger.info('Simple mode intercept: direct_amount (active quote, no deal)', {
+          event: 'simple_mode_intercept',
+          action: 'direct_amount',
+          groupId: enrichedContext.groupId,
+          sender: enrichedContext.sender,
+          parsedAmount: parsed,
+          quoteId: activeQuote.id,
+        })
+        return {
+          destination: 'DEAL_HANDLER',
+          context: { ...enrichedContext, dealAction: 'direct_amount' },
+        }
+      }
+    }
+    return null // No active deal and no matching quote → fall through to normal routing
   }
 
   const deal = dealResult.data
