@@ -616,7 +616,6 @@ export async function handlePriceLock(
 
       // Send formatted calculation + @mention
       const operatorJid = resolveOperatorJid(groupId)
-        ?? (configResult.ok ? configResult.data.operatorJid : null)
       const mentions = operatorJid ? [operatorJid] : []
       const calcLine = `${formatUsdt(simpleAmount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
       const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
@@ -974,9 +973,7 @@ export async function handleRejection(
   }
 
   // Send "off" to group with @mention of operator
-  const configResult = await getSpreadConfig(groupId)
   const operatorJid = resolveOperatorJid(groupId)
-    ?? (configResult.ok ? configResult.data.operatorJid : null)
   const mentions = operatorJid ? [operatorJid] : []
   const offMessage = operatorJid ? `off @${operatorJid.replace(/@.*/, '')}` : 'off'
 
@@ -1091,9 +1088,7 @@ export async function handleVolumeInput(
   if (!completeResult.ok) return err(completeResult.error)
 
   // Send formatted calculation + @mention
-  const configResult = await getSpreadConfig(groupId)
   const operatorJid = resolveOperatorJid(groupId)
-    ?? (configResult.ok ? configResult.data.operatorJid : null)
   const mentions = operatorJid ? [operatorJid] : []
   const calcLine = `${formatUsdt(amount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
   const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
@@ -1197,10 +1192,9 @@ export async function handleDirectAmount(
     return err(`Computation failed: ${comp.error}`)
   }
 
-  // 4. Resolve operator: playerRoles first, then spreadConfig fallback
+  // 4. Resolve operator from playerRoles (set via `role` command)
   const configResult = await getSpreadConfig(groupId)
   const operatorJid = resolveOperatorJid(groupId)
-    ?? (configResult.ok ? configResult.data.operatorJid : null)
   const mentions = operatorJid ? [operatorJid] : []
 
   // 5. Send terse calculation message: "5.000,00 USDT x 5,2234 = R$ 26.117,00 @operator"

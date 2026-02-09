@@ -636,7 +636,7 @@ async function handleRoleCommand(context: RouterContext, args: string[]): Promis
   if (args.length < 3) {
     await sendControlResponse(
       context,
-      '⚠️ Usage: role <group> <player_phone> <operator|client|cio>\nExample: role OTC 5511999999999 operator'
+      '⚠️ Usage: role <group> <player_phone> <operator|client|cio>\nThe operator role controls who gets @tagged by the bot in deal messages.\nExample: role OTC 5511999999999 operator'
     )
     return
   }

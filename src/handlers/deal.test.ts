@@ -60,6 +60,11 @@ vi.mock('../services/groupSpreadService.js', () => ({
   calculateQuote: vi.fn((baseRate: number) => baseRate),
 }))
 
+// Mock groupConfig - resolveOperatorJid is the sole source for operator tagging
+vi.mock('../services/groupConfig.js', () => ({
+  resolveOperatorJid: vi.fn().mockReturnValue(null),
+}))
+
 // Mock ruleService
 vi.mock('../services/ruleService.js', () => ({
   getActiveRule: vi.fn(),
@@ -107,6 +112,7 @@ import { findClientDeal, createDeal, lockDeal, startComputation, completeDeal, c
 import { extractBrlAmount, extractUsdtAmount, parseBrazilianNumber, computeBrlToUsdt, computeUsdtToBrl } from '../services/dealComputation.js'
 import { fetchPrice } from '../services/binance.js'
 import { getSpreadConfig } from '../services/groupSpreadService.js'
+import { resolveOperatorJid } from '../services/groupConfig.js'
 import { getActiveRule } from '../services/ruleService.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 
@@ -570,10 +576,7 @@ describe('handleRejection', () => {
   it('rejects a QUOTED deal, sends "off" with @mention, and archives', async () => {
     vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'quoted' } })
     vi.mocked(rejectDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'rejected' } })
-    vi.mocked(getSpreadConfig).mockResolvedValue({
-      ok: true,
-      data: { operatorJid: '5511888888888@s.whatsapp.net' } as never,
-    })
+    vi.mocked(resolveOperatorJid).mockReturnValue('5511888888888@s.whatsapp.net')
 
     const context = createTestContext({ message: 'off' })
     const result = await handleRejection(context)
@@ -595,10 +598,7 @@ describe('handleRejection', () => {
   it('sends "off" without mention when no operator configured', async () => {
     vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'quoted' } })
     vi.mocked(rejectDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'rejected' } })
-    vi.mocked(getSpreadConfig).mockResolvedValue({
-      ok: true,
-      data: { operatorJid: null } as never,
-    })
+    vi.mocked(resolveOperatorJid).mockReturnValue(null)
 
     const context = createTestContext({ message: 'off' })
     const result = await handleRejection(context)
@@ -670,8 +670,9 @@ describe('handlePriceLock simple mode', () => {
   it('simple mode with inline amount: locks, computes, completes, sends calc + @mention', async () => {
     vi.mocked(getSpreadConfig).mockResolvedValue({
       ok: true,
-      data: { dealFlowMode: 'simple', operatorJid: '5511888888888@s.whatsapp.net', groupLanguage: 'pt' } as never,
+      data: { dealFlowMode: 'simple', groupLanguage: 'pt' } as never,
     })
+    vi.mocked(resolveOperatorJid).mockReturnValue('5511888888888@s.whatsapp.net')
     vi.mocked(parseBrazilianNumber).mockImplementation((input: string) => {
       if (input === '5000') return 5000
       return null
@@ -703,7 +704,7 @@ describe('handlePriceLock simple mode', () => {
   it('simple mode without amount: locks, transitions to awaiting_amount, sends prompt (PT)', async () => {
     vi.mocked(getSpreadConfig).mockResolvedValue({
       ok: true,
-      data: { dealFlowMode: 'simple', operatorJid: null, groupLanguage: 'pt' } as never,
+      data: { dealFlowMode: 'simple', groupLanguage: 'pt' } as never,
     })
     vi.mocked(startAwaitingAmount).mockResolvedValue({ ok: true, data: { ...LOCKED_DEAL, state: 'awaiting_amount' } as never })
 
@@ -722,7 +723,7 @@ describe('handlePriceLock simple mode', () => {
   it('simple mode without amount: sends EN prompt when group language is EN', async () => {
     vi.mocked(getSpreadConfig).mockResolvedValue({
       ok: true,
-      data: { dealFlowMode: 'simple', operatorJid: null, groupLanguage: 'en' } as never,
+      data: { dealFlowMode: 'simple', groupLanguage: 'en' } as never,
     })
     vi.mocked(startAwaitingAmount).mockResolvedValue({ ok: true, data: { ...LOCKED_DEAL, state: 'awaiting_amount' } as never })
 
@@ -739,7 +740,7 @@ describe('handlePriceLock simple mode', () => {
   it('classic mode: existing behavior unchanged (no simple mode branching)', async () => {
     vi.mocked(getSpreadConfig).mockResolvedValue({
       ok: true,
-      data: { dealFlowMode: 'classic', operatorJid: null, groupLanguage: 'pt' } as never,
+      data: { dealFlowMode: 'classic', groupLanguage: 'pt' } as never,
     })
 
     const context = createTestContext({ message: 'trava' })
@@ -781,8 +782,9 @@ describe('handleVolumeInput', () => {
     vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...AWAITING_DEAL, state: 'completed' } as never })
     vi.mocked(getSpreadConfig).mockResolvedValue({
       ok: true,
-      data: { operatorJid: '5511888888888@s.whatsapp.net', groupLanguage: 'pt' } as never,
+      data: { groupLanguage: 'pt' } as never,
     })
+    vi.mocked(resolveOperatorJid).mockReturnValue('5511888888888@s.whatsapp.net')
 
     const context = createTestContext({ message: '5000' })
     const result = await handleVolumeInput(context)
@@ -814,7 +816,7 @@ describe('handleVolumeInput', () => {
     })
     vi.mocked(startComputation).mockResolvedValue({ ok: true, data: AWAITING_DEAL as never })
     vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...AWAITING_DEAL, state: 'completed' } as never })
-    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { operatorJid: null, groupLanguage: 'pt' } as never })
+    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { groupLanguage: 'pt' } as never })
 
     const context = createTestContext({ message: '10k' })
     const result = await handleVolumeInput(context)
@@ -826,7 +828,7 @@ describe('handleVolumeInput', () => {
   })
 
   it('sends gentle error message when amount cannot be parsed (PT)', async () => {
-    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { operatorJid: null, groupLanguage: 'pt' } as never })
+    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { groupLanguage: 'pt' } as never })
 
     const context = createTestContext({ message: 'abc' })
     const result = await handleVolumeInput(context)
@@ -843,7 +845,7 @@ describe('handleVolumeInput', () => {
   })
 
   it('sends gentle error message when amount cannot be parsed (EN)', async () => {
-    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { operatorJid: null, groupLanguage: 'en' } as never })
+    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { groupLanguage: 'en' } as never })
 
     const context = createTestContext({ message: 'abc' })
     const result = await handleVolumeInput(context)

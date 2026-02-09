@@ -202,9 +202,10 @@ function cloneConfig(config: GroupConfig): GroupConfig {
 }
 
 /**
- * Sprint 9.1: Resolve the operator JID for a group.
+ * Resolve the operator JID for a group — the sole source of truth for operator tagging.
  * Checks player_roles in the in-memory config cache for a player with 'operator' role.
- * Returns null if no operator is assigned.
+ * Set via the `role <group> <phone> operator` command.
+ * Returns null if no operator is assigned (no @mention will be sent).
  */
 export function resolveOperatorJid(groupJid: string): string | null {
   const config = configCache.get(groupJid)
