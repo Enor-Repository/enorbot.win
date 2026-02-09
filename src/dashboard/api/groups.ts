@@ -4,7 +4,7 @@
  * Stories D.11-D.12: Mode Selector & AI Threshold
  */
 import { Router, type Request, type Response } from 'express'
-import { getAllGroupConfigs, setGroupMode, getGroupConfigSync } from '../../services/groupConfig.js'
+import { getAllGroupConfigs, setGroupMode, getGroupConfigSync, setPlayerRole, removePlayerRole, type PlayerRole } from '../../services/groupConfig.js'
 import { getSupabase } from '../../services/supabase.js'
 import { seedDefaultTriggers } from '../../services/systemTriggerSeeder.js'
 import { logger } from '../../utils/logger.js'
@@ -383,13 +383,14 @@ groupsRouter.get('/:groupJid/players', async (req: Request, res: Response) => {
     })
 
     // Build response matching frontend's expected format
+    const groupConfig = getGroupConfigSync(groupJid)
     const players = topPlayerJids.map((jid) => {
       const stats = playerMap.get(jid)!
       return {
         jid,
         name: contactMap.get(jid) || 'Unknown',
         messageCount: stats.messageCount,
-        role: null,
+        role: groupConfig?.playerRoles?.[jid] ?? null,
       }
     })
 
@@ -401,6 +402,82 @@ groupsRouter.get('/:groupJid/players', async (req: Request, res: Response) => {
     })
     res.status(500).json({
       error: 'Failed to get players',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+})
+
+/**
+ * PUT /api/groups/:groupJid/players/:playerJid/role
+ * Set or remove a player's role in a group.
+ * Body: { "role": "operator" | "client" | "cio" | null }
+ * Enforces one operator per group: setting a new operator demotes the previous one to client.
+ */
+groupsRouter.put('/:groupJid/players/:playerJid/role', async (req: Request, res: Response) => {
+  try {
+    const groupJid = req.params.groupJid as string
+    const playerJid = req.params.playerJid as string
+
+    if (!isValidGroupJid(groupJid)) {
+      return res.status(400).json({ error: 'Invalid group JID format' })
+    }
+
+    if (!playerJid || !/^\d+@s\.whatsapp\.net$/.test(playerJid)) {
+      return res.status(400).json({ error: 'Invalid player JID format' })
+    }
+
+    const { role } = req.body
+    const validRoles: (PlayerRole | null)[] = ['operator', 'client', 'cio', null]
+    if (!validRoles.includes(role)) {
+      return res.status(400).json({ error: 'Invalid role. Must be "operator", "client", "cio", or null' })
+    }
+
+    // Remove role
+    if (role === null) {
+      const result = await removePlayerRole(groupJid, playerJid, 'dashboard')
+      if (!result.ok) {
+        return res.status(400).json({ error: result.error })
+      }
+      logger.info('Player role removed via dashboard', {
+        event: 'player_role_removed_dashboard',
+        groupJid,
+        playerJid,
+      })
+      return res.json({ ok: true })
+    }
+
+    // Enforce one operator per group: demote existing operator before promoting new one
+    if (role === 'operator') {
+      const config = getGroupConfigSync(groupJid)
+      if (config?.playerRoles) {
+        for (const [existingJid, existingRole] of Object.entries(config.playerRoles)) {
+          if (existingRole === 'operator' && existingJid !== playerJid) {
+            await setPlayerRole(groupJid, existingJid, 'client', 'dashboard')
+          }
+        }
+      }
+    }
+
+    const result = await setPlayerRole(groupJid, playerJid, role, 'dashboard')
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error })
+    }
+
+    logger.info('Player role updated via dashboard', {
+      event: 'player_role_updated_dashboard',
+      groupJid,
+      playerJid,
+      role,
+    })
+
+    res.json({ ok: true })
+  } catch (error) {
+    logger.error('Failed to update player role', {
+      event: 'player_role_update_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({
+      error: 'Failed to update player role',
       message: error instanceof Error ? error.message : String(error),
     })
   }

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { ChevronDown, ChevronRight, Zap, Clock, DollarSign, Handshake, Users } from 'lucide-react'
-import { API_ENDPOINTS } from '@/lib/api'
+import { ChevronDown, ChevronRight, Zap, Clock, DollarSign, Handshake, Users, Star } from 'lucide-react'
+import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { GroupSpreadEditor } from '@/components/groups/GroupSpreadEditor'
 import { GroupTimeRulesEditor } from '@/components/groups/GroupTimeRulesEditor'
@@ -61,7 +61,7 @@ interface Player {
   jid: string
   name: string
   messageCount: number
-  role: 'eNor' | 'non-eNor' | null
+  role: 'operator' | 'client' | 'cio' | null
 }
 
 export function GroupsAndRulesPage() {
@@ -149,12 +149,38 @@ export function GroupsAndRulesPage() {
     }
   }
 
-  const updatePlayerRole = async (_groupJid: string, _playerJid: string, _role: 'eNor' | 'non-eNor' | null) => {
-    // Backend route for player roles not yet implemented (Sprint backlog)
-    showToast({
-      type: 'info',
-      message: 'Player role management coming soon'
+  const updatePlayerRole = async (groupJid: string, playerJid: string, role: 'operator' | 'client' | 'cio' | null) => {
+    // Optimistically update local state
+    setGroupPlayers(prev => {
+      const current = prev[groupJid] || []
+      const updated = current.map(p => {
+        if (p.jid === playerJid) return { ...p, role }
+        // If setting a new operator, clear operator from others
+        if (role === 'operator' && p.role === 'operator') return { ...p, role: null }
+        return p
+      })
+      return { ...prev, [groupJid]: updated }
     })
+
+    try {
+      const response = await fetch(API_ENDPOINTS.playerRole(groupJid, playerJid), {
+        method: 'PUT',
+        headers: writeHeaders(),
+        body: JSON.stringify({ role }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || `HTTP ${response.status}`)
+      }
+    } catch (error) {
+      // Revert optimistic update on failure
+      fetchGroupPlayers(groupJid)
+      showToast({
+        type: 'error',
+        message: `Failed to update role: ${error instanceof Error ? error.message : 'Unknown error'}`
+      })
+    }
   }
 
   useEffect(() => {
@@ -358,16 +384,8 @@ export function GroupsAndRulesPage() {
                               )}
                               {section.key === 'players' && (
                                 <div className="space-y-3">
-                                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground font-mono">
-                                    <span className="flex items-center gap-1">
-                                      <div className="h-1.5 w-1.5 rounded-full bg-cyan-400"></div>
-                                      eNor
-                                    </span>
-                                    <span className="opacity-40">|</span>
-                                    <span className="flex items-center gap-1">
-                                      <div className="h-1.5 w-1.5 rounded-full bg-amber-400"></div>
-                                      non-eNor
-                                    </span>
+                                  <div className="text-[10px] text-muted-foreground font-mono">
+                                    Click <Star className="inline h-3 w-3 text-cyan-400" /> to set a player as the group's operator (gets @tagged in deals)
                                   </div>
 
                                   {isLoadingPlayers ? (
@@ -388,47 +406,37 @@ export function GroupsAndRulesPage() {
                                             className="flex items-center gap-2 px-3 py-2 rounded-md bg-background/30 border border-cyan-500/10 hover:border-cyan-500/30 hover:shadow-[0_0_8px_rgba(34,211,238,0.1)] transition-all backdrop-blur-sm"
                                           >
                                             <div className="flex-1 min-w-0">
-                                              <div className="text-sm font-mono font-semibold text-foreground truncate">
-                                                {player.name}
+                                              <div className="flex items-center gap-1.5">
+                                                <span className="text-sm font-mono font-semibold text-foreground truncate">
+                                                  {player.name}
+                                                </span>
+                                                {player.role === 'operator' && (
+                                                  <Badge className="bg-cyan-500/15 text-cyan-400 border-cyan-500/30 text-[9px] font-mono px-1.5 py-0">
+                                                    OPERATOR
+                                                  </Badge>
+                                                )}
                                               </div>
                                               <div className="text-[10px] text-muted-foreground font-mono">
                                                 {player.messageCount} msg
                                               </div>
                                             </div>
 
-                                            {/* Role Toggle Switch */}
-                                            <div className="relative inline-flex items-center bg-purple-500/10 border border-purple-500/30 rounded-lg p-0.5 w-[140px]">
-                                              <button
-                                                onClick={() => updatePlayerRole(group.jid, player.jid, 'eNor')}
-                                                className={`relative z-10 flex-1 px-2 py-1 text-[10px] font-mono transition-all rounded-md ${
-                                                  player.role === 'eNor'
-                                                    ? 'text-cyan-300'
-                                                    : 'text-muted-foreground hover:text-foreground'
-                                                }`}
-                                              >
-                                                eNor
-                                              </button>
-                                              <button
-                                                onClick={() => updatePlayerRole(group.jid, player.jid, 'non-eNor')}
-                                                className={`relative z-10 flex-1 px-2 py-1 text-[10px] font-mono transition-all rounded-md ${
-                                                  player.role === 'non-eNor'
-                                                    ? 'text-amber-300'
-                                                    : 'text-muted-foreground hover:text-foreground'
-                                                }`}
-                                              >
-                                                non-eNor
-                                              </button>
-                                              {/* Sliding indicator */}
-                                              <div
-                                                className={`absolute top-0.5 bottom-0.5 w-[calc(50%-2px)] transition-all duration-200 rounded-md ${
-                                                  player.role === 'eNor'
-                                                    ? 'left-0.5 bg-cyan-500/30 border border-cyan-500/50 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
-                                                    : player.role === 'non-eNor'
-                                                    ? 'left-[calc(50%+0.5px)] bg-amber-500/30 border border-amber-500/50 shadow-[0_0_8px_rgba(251,191,36,0.3)]'
-                                                    : 'opacity-0'
-                                                }`}
-                                              />
-                                            </div>
+                                            {/* Operator Star Toggle */}
+                                            <button
+                                              onClick={() => updatePlayerRole(
+                                                group.jid,
+                                                player.jid,
+                                                player.role === 'operator' ? null : 'operator'
+                                              )}
+                                              className={`flex-shrink-0 p-1.5 rounded-md transition-all ${
+                                                player.role === 'operator'
+                                                  ? 'text-cyan-400 bg-cyan-500/20 border border-cyan-500/40 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
+                                                  : 'text-muted-foreground hover:text-cyan-400 hover:bg-cyan-500/10 border border-transparent'
+                                              }`}
+                                              title={player.role === 'operator' ? 'Remove operator role' : 'Set as operator'}
+                                            >
+                                              <Star className={`h-4 w-4 ${player.role === 'operator' ? 'fill-cyan-400' : ''}`} />
+                                            </button>
                                           </div>
                                         ))}
                                     </div>

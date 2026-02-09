@@ -632,6 +632,57 @@ export async function setPlayerRole(
 }
 
 /**
+ * Remove a player's role from a group.
+ */
+export async function removePlayerRole(
+  groupJid: string,
+  playerJid: string,
+  updatedBy: string
+): Promise<Result<void>> {
+  if (!supabase) {
+    return err('Group config service not initialized')
+  }
+
+  const existing = configCache.get(groupJid)
+  if (!existing) {
+    return err(`Group not found: ${groupJid}`)
+  }
+
+  const newRoles = { ...existing.playerRoles }
+  delete newRoles[playerJid]
+
+  try {
+    const { error } = await supabase
+      .from('group_config')
+      .update({
+        player_roles: newRoles,
+        updated_by: updatedBy,
+      })
+      .eq('group_jid', groupJid)
+
+    if (error) {
+      return err(`Failed to remove player role: ${error.message}`)
+    }
+
+    existing.playerRoles = newRoles
+    existing.updatedBy = updatedBy
+    existing.updatedAt = new Date()
+
+    logger.info('Player role removed', {
+      event: 'player_role_removed',
+      groupJid,
+      playerJid,
+      updatedBy,
+    })
+
+    return ok(undefined)
+  } catch (e) {
+    const errorMessage = e instanceof Error ? e.message : String(e)
+    return err(`Unexpected error: ${errorMessage}`)
+  }
+}
+
+/**
  * Set AI threshold for a group.
  */
 export async function setAiThreshold(
