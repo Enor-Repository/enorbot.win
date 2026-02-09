@@ -28,7 +28,8 @@ import { useSupabaseAuthState } from './authState.js'
 import { clearAuthState, checkSupabaseHealth } from '../services/supabase.js'
 import { routeMessage, isControlGroupMessage, type RouterContext } from './router.js'
 import { handleControlMessage } from '../handlers/control.js'
-import { ensureGroupRegistered } from '../services/groupConfig.js'
+import { ensureGroupRegistered, resolveOperatorJid, getGroupModeSync } from '../services/groupConfig.js'
+import { sendWithAntiDetection, formatMention } from '../utils/messaging.js'
 import { handlePriceMessage } from '../handlers/price.js'
 import { handleTronscanMessage } from '../handlers/tronscan.js'
 import type { EnvConfig } from '../types/config.js'
@@ -510,7 +511,25 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
           hasTrigger: route.context.hasTrigger,
         })
       }
-      // IGNORE and RECEIPT_HANDLER destinations: no action in text message handler
+      // IGNORE in active groups: tag operator so they know the client said something
+      if (route.destination === 'IGNORE' && !isControlGroup) {
+        const groupMode = getGroupModeSync(groupId)
+        if (groupMode === 'active') {
+          const operatorJid = resolveOperatorJid(groupId)
+          if (operatorJid && operatorJid !== sender) {
+            const mention = formatMention(operatorJid)
+            const tagMsg = `${mention.textSegment}`
+            sendWithAntiDetection(context.sock, groupId, tagMsg, [mention.jid]).catch((e) => {
+              logger.warn('Failed to tag operator on unhandled message', {
+                event: 'operator_tag_failed',
+                groupId,
+                error: e instanceof Error ? e.message : String(e),
+              })
+            })
+          }
+        }
+      }
+      // RECEIPT_HANDLER destination: no action in text message handler
 
       // Story 8.6: Log observation for pattern analysis (fire-and-forget)
       // Skip control group messages and ignored messages
