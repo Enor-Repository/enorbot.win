@@ -44,6 +44,7 @@ import {
   removeTriggerPattern,
   setPlayerRole,
   resolveOperatorJid,
+  getGroupModeSync,
   type GroupConfig,
 } from '../services/groupConfig.js'
 import { getClassificationMetrics } from '../services/classificationEngine.js'
@@ -1029,6 +1030,17 @@ async function sendOffToGroup(
   groupJid: string,
   groupName: string
 ): Promise<void> {
+  // Safety: never send to learning mode groups
+  const mode = getGroupModeSync(groupJid)
+  if (mode === 'learning') {
+    logger.warn('Blocked off message to learning mode group', {
+      event: 'off_blocked_learning',
+      groupJid,
+      groupName,
+    })
+    return
+  }
+
   const operatorJid = resolveOperatorJid(groupJid)
 
   if (operatorJid) {
@@ -1086,45 +1098,43 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
     return
   }
 
-  // "off off" → broadcast off to ALL non-paused groups
+  // "off off" → cancel deals + send off to active-mode groups that have deals
   if (args[0].toLowerCase() === 'off') {
     const configs = await getAllGroupConfigs()
     const targetGroups: Array<{ groupJid: string; groupName: string }> = []
     let totalCancelled = 0
 
-    // Collect all non-paused groups and cancel any active deals
+    // Only target active-mode groups with active deals
     for (const config of configs.values()) {
-      if (config.mode === 'paused') continue
+      if (config.mode !== 'active') continue
+
+      const dealsResult = await getActiveDeals(config.groupJid)
+      if (!dealsResult.ok || dealsResult.data.length === 0) continue
 
       targetGroups.push({ groupJid: config.groupJid, groupName: config.groupName })
 
-      // Cancel active deals if any
-      const dealsResult = await getActiveDeals(config.groupJid)
-      if (dealsResult.ok) {
-        for (const deal of dealsResult.data) {
-          const cancelResult = await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator')
-          if (cancelResult.ok) {
-            totalCancelled++
-            archiveDeal(deal.id, config.groupJid).catch(() => {})
-          }
+      for (const deal of dealsResult.data) {
+        const cancelResult = await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator')
+        if (cancelResult.ok) {
+          totalCancelled++
+          archiveDeal(deal.id, config.groupJid).catch(() => {})
         }
       }
     }
 
     if (targetGroups.length === 0) {
-      await sendControlResponse(context, 'Nenhum grupo ativo encontrado.')
+      await sendControlResponse(context, 'Nenhum deal ativo em nenhum grupo.')
       return
     }
 
     // Reply to CONTROLE first (instant feedback)
     const groupNames = targetGroups.map(g => g.groupName).join(', ')
-    const dealMsg = totalCancelled > 0 ? ` ${totalCancelled} deal(s) cancelados.` : ''
     await sendControlResponse(
       context,
-      `off enviado para ${targetGroups.length} grupo(s): ${groupNames}.${dealMsg}`
+      `off enviado para ${targetGroups.length} grupo(s): ${groupNames}. ${totalCancelled} deal(s) cancelados.`
     )
 
-    // Then send "off @operator" to each trading group sequentially (with anti-detection)
+    // Then send "off @operator" to each target group (with anti-detection)
     for (const group of targetGroups) {
       await sendOffToGroup(context.sock, group.groupJid, group.groupName)
     }

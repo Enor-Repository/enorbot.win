@@ -15,6 +15,7 @@ import type { WASocket } from '@whiskeysockets/baileys'
 import { chaosDelay } from './chaos.js'
 import { logger } from './logger.js'
 import { type Result, ok, err } from './result.js'
+import { getGroupModeSync } from '../services/groupConfig.js'
 
 /**
  * Format a WhatsApp @mention for inclusion in a message.
@@ -89,6 +90,19 @@ export async function sendWithAntiDetection(
   }
   if (!message || message.trim() === '') {
     return err('Invalid message: must be non-empty')
+  }
+
+  // SAFETY: Block outbound messages to learning mode groups
+  if (jid.endsWith('@g.us')) {
+    const mode = getGroupModeSync(jid)
+    if (mode === 'learning') {
+      logger.warn('BLOCKED: outbound message to learning mode group', {
+        event: 'learning_mode_blocked',
+        jid,
+        mode,
+      })
+      return err('Blocked: cannot send messages to learning mode groups')
+    }
   }
 
   try {

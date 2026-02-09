@@ -28,6 +28,10 @@ vi.mock('./logger.js', () => ({
   logger: mockLogger,
 }))
 
+vi.mock('../services/groupConfig.js', () => ({
+  getGroupModeSync: () => 'active',
+}))
+
 import {
   sendWithAntiDetection,
   getTypingDuration,
