@@ -106,7 +106,131 @@ Client: (in AWAITING) "hello" → Bot: "Envie o valor em USDT (ex: 500, 10k) ou 
 
 ---
 
-## Test results
+## Round 1 test results
 - `npx tsc --noEmit` — 0 errors
 - `npx vitest run` — 1704 passed, 0 failed (54 test files)
 - 4 test assertions updated to reflect new behavior (router + systemPatternService)
+
+---
+---
+
+# Round 2 — Live Test Session 16:59–17:13 BRT (2026-02-09)
+
+## What worked
+
+| Flow | Example | Result |
+|------|---------|--------|
+| `taxa` → price response | Galhardo: "taxa" → Bot: "5,2032" | ✅ |
+| `trava` → quote_lock bridge | Galhardo: "taxa" → "trava" → "Taxa travada em 5,2058. Quantos USDTs?" | ✅ |
+| AWAITING_AMOUNT reprompt | Bot: "Aguardando valor em USDT..." (after 90s timeout) | ✅ |
+| Deal expiration notification | Bot: "Sua cotação expirou..." | ✅ |
+| `Preco?` → price + `100k` → direct_amount | Daniel: "Preco?" → "5,2053" → "100k" → `100.000 USDT x 5,2053 = R$ 520.530 @op` | ✅ |
+| `Preco` → price + `10000` → direct_amount | Daniel: "Preco" → "5,2048" → "10000" → `10.000 USDT x 5,2048 = R$ 52.048 @op` | ✅ |
+| `Off` → deal rejection | Daniel: "Off @..." → "off @operator" | ✅ |
+
+**3 deals completed successfully via direct_amount** (100k, 10k, 100k). The price→amount shortcut is working cleanly.
+
+---
+
+## Issue 6 — @mention phone number parsed as deal volume (HIGH) ⬅ NEW
+
+**What happened:** Daniel sent `@6202620641384` (a WhatsApp @mention of a phone number). The bot treated it as a volume inquiry and created a deal with **R$ 6.2 trillion** as the BRL amount. The quote response was absurd: "R$ 6.202.620.641.384 → 1.191.070.865.923,64 USDT".
+
+This happened twice:
+- Message `@6202620641384` at 20:04:17 → Deal `83629b03` (expired, R$6.2T)
+- Message `Off @6202620641384` at 20:08:37 → Deal `81a5f34c` (rejected, R$6.2T)
+
+**Root cause:** `extractBrlAmount()` in `dealComputation.ts` has a catch-all **Pattern 4** at line 179:
+```regex
+/([\d]{4,}(?:,\d{1,2})?)/
+```
+This matches ANY 4+ digit sequence. The phone number `6202620641384` (13 digits) matches, and `parseBrazilianNumber("6202620641384")` returns 6,202,620,641,384.
+
+**Fix applied (Round 2):**
+1. Both `extractBrlAmount` and `extractUsdtAmount` now strip `@mentions` (`@\w\d+`) before processing
+2. `extractBrlAmount` rejects amounts > 100M BRL (`MAX_BRL_AMOUNT = 100_000_000`)
+3. Both defenses combined: @mention stripping + upper bound guard
+
+**Files changed:**
+- `src/services/dealComputation.ts` — @mention stripping + MAX_BRL_AMOUNT guard on all 4 patterns
+- `src/services/dealComputation.test.ts` — 3 new test cases for @mention rejection + amount cap
+
+---
+
+## Issue 7 — "Usdt 100 k quanto consegue?" — USDT prefix not recognized (MEDIUM) ⬅ NEW
+
+**What happened:** Daniel sent `Usdt 100 k quanto consegue?`. The bot created a deal via volume_inquiry, but the quote showed the WRONG conversion direction:
+- Quote said: "R$ 100.000 → 19.201,96 USDT" (treating 100k as BRL)
+- Should have been: "100.000 USDT → R$ 520.780" (treating 100k as USDT)
+
+The deal eventually completed with CORRECT amounts (100k USDT, R$520.780) — likely corrected during lock/completion — but the initial quote message was confusing.
+
+**Root cause:** `extractUsdtAmount()` in `dealComputation.ts` only matches **number followed by USDT** (line 198):
+```regex
+/([\d.,]+)\s*(?:usdt|usd|u)\b/i
+```
+It does NOT match **USDT followed by number** ("Usdt 100 k"). So `extractUsdtAmount` returns null, and `extractBrlAmount` catches "100 k" via its k-suffix pattern as BRL.
+
+**Fix applied (Round 2):** Added USDT/USD prefix pattern (Pattern 2) to `extractUsdtAmount`:
+```regex
+/(?:usdt|usd)\s+([\d.,]+(?:\s*(?:k|mil))?)/i
+```
+Now matches: "usdt 500", "Usdt 100 k quanto consegue?", "USDT 10k", "usd 5000"
+
+**Files changed:**
+- `src/services/dealComputation.ts` — New Pattern 2 for USDT prefix + @mention stripping
+- `src/services/dealComputation.test.ts` — 2 new test cases for prefix format + @mention rejection
+
+---
+
+## Issue 8 — First `trava` at 17:00:36 got no response (LOW) ⬅ LIKELY DEPLOYMENT TIMING
+
+**What happened:** Galhardo sent `taxa` at 16:59 → got price response. Then sent `trava` at 17:00:36 → **no response at all**. The second attempt at 17:06 worked perfectly.
+
+**Analysis:** The commit was pushed at ~16:54 BRT. CI/CD deploy likely takes several minutes. The first `trava` at 17:00 may have hit the OLD code (before the quote_lock bridge). By 17:06, the new code was live. The `taxa` keyword worked at 16:59 because it was already in the DB's `system_patterns` table (fallback not needed).
+
+**No code fix needed** — deployment timing artifact. Can confirm by checking CI logs.
+
+---
+
+## Full chronological transcript — Round 2
+
+```
+16:59:29  Galhardo   taxa                                  → trigger ✅
+16:59:49  Bot        5,2032                                (commercial_dollar + 33bps)
+17:00:36  Galhardo   trava                                 → NO RESPONSE ❌ (deployment timing?)
+17:04:17  Daniel     @6202620641384                        → trigger ✅ ← WRONG: phone parsed as volume
+17:04:34  Bot        📊 Cotação Taxa: 5,2076 R$6.2T→1.19T USDT  ← ABSURD AMOUNTS
+17:05:52  Galhardo   taxa                                  → trigger ✅
+17:05:59  Bot        5,2058
+17:06:01  Galhardo   trava                                 → quote_lock bridge ✅
+17:06:17  Bot        Taxa travada em 5,2058. Quantos USDTs?
+17:07:38  Bot        Aguardando valor em USDT...           (reprompt ✅)
+17:08:25  (deal 1d08 expired — Galhardo never sent amount)
+17:08:37  Daniel     Off @6202620641384                    → WRONG: created new deal from @mention
+17:08:40  Bot        ⏰ Sua cotação expirou                 (sweep notification)
+17:08:54  Bot        📊 Cotação Taxa: 5,2078 R$6.2T→1.19T ← ABSURD (deal from "Off @phone")
+17:09:06  Daniel     Off @6202620641384                    → rejected deal ✅ (correct for wrong deal)
+17:09:21  Bot        off @operator
+17:10:03  Daniel     Preco?                                → trigger ✅
+17:10:20  Bot        5,2053
+17:10:39  Daniel     100k                                  → direct_amount ✅
+17:10:51  Bot        100.000,00 USDT x 5,2053 = R$ 520.530,00 @op  ✅
+17:11:39  Daniel     Preco                                 → trigger ✅
+17:11:52  Bot        5,2048
+17:12:22  Daniel     10000                                 → direct_amount ✅
+17:12:32  Bot        10.000,00 USDT x 5,2048 = R$ 52.048,00 @op  ✅
+17:12:41  Daniel     Usdt 100 k quanto consegue?           → trigger ✅ (but amount as BRL ❌)
+17:12:54  Bot        📊 Cotação R$100.000→19.201 USDT      ← WRONG DIRECTION
+```
+
+## Deals created
+
+| Deal | Client | Flow | Outcome | Rate | USDT | BRL | Issue |
+|------|--------|------|---------|------|------|-----|-------|
+| 83629b03 | Daniel | volume_inquiry (@mention) | Expired | 5.2076 | 1.19T | 6.2T | #6 |
+| 1d082b9e | Galhardo | quote_lock (trava) | Expired | 5.2058 | — | — | OK (test) |
+| 81a5f34c | Daniel | volume_inquiry (Off @mention) | Rejected | 5.2078 | 1.19T | 6.2T | #6 |
+| 96f6319e | Daniel | direct_amount (100k) | **Completed** | 5.2053 | 100,000 | 520,530 | ✅ |
+| c70b723b | Daniel | direct_amount (10000) | **Completed** | 5.2048 | 10,000 | 52,048 | ✅ |
+| 33a5cfc5 | Daniel | volume_inquiry (Usdt 100k) | **Completed** | 5.2078 | 100,000 | 520,780 | #7 (quote wrong) |

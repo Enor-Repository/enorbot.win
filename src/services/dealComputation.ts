@@ -142,6 +142,9 @@ export function parseBrazilianNumber(input: string): number | null {
   return Number.isFinite(value) && value > 0 ? value : null
 }
 
+/** Maximum plausible BRL amount (100 million). Rejects phone numbers / garbage. */
+const MAX_BRL_AMOUNT = 100_000_000
+
 /**
  * Extract a BRL amount from a message string.
  * Looks for patterns like "R$ 4.479.100", "4.479.100 reais", "4479100", etc.
@@ -152,34 +155,36 @@ export function parseBrazilianNumber(input: string): number | null {
 export function extractBrlAmount(message: string): number | null {
   if (!message) return null
 
-  const normalized = message.trim()
+  // Strip @mentions (phone numbers / JIDs) to avoid parsing them as amounts
+  const normalized = message.trim().replace(/@[\w\d+]+/g, '').trim()
+  if (!normalized) return null
 
   // Pattern 1: R$ prefix followed by number
   const brlPrefixMatch = normalized.match(/R\$\s*([\d.,]+(?:\s*(?:k|mil))?)/i)
   if (brlPrefixMatch) {
     const parsed = parseBrazilianNumber(brlPrefixMatch[1])
-    if (parsed !== null) return parsed
+    if (parsed !== null && parsed <= MAX_BRL_AMOUNT) return parsed
   }
 
   // Pattern 2: Number followed by "reais" or "brl"
   const brlSuffixMatch = normalized.match(/([\d.,]+(?:\s*(?:k|mil))?)\s*(?:reais|brl)\b/i)
   if (brlSuffixMatch) {
     const parsed = parseBrazilianNumber(brlSuffixMatch[1])
-    if (parsed !== null) return parsed
+    if (parsed !== null && parsed <= MAX_BRL_AMOUNT) return parsed
   }
 
   // Pattern 3: Number with k/mil suffix (likely BRL in OTC context)
   const multiplierMatch = normalized.match(/([\d.,]+)\s*(?:k|mil)\b/i)
   if (multiplierMatch) {
     const parsed = parseBrazilianNumber(multiplierMatch[0])
-    if (parsed !== null) return parsed
+    if (parsed !== null && parsed <= MAX_BRL_AMOUNT) return parsed
   }
 
   // Pattern 4: Large plain number (4+ digits) or number with thousand separators
   const numberMatch = normalized.match(/([\d]{1,3}(?:\.[\d]{3})+(?:,\d{1,2})?|[\d]{4,}(?:,\d{1,2})?)/i)
   if (numberMatch) {
     const parsed = parseBrazilianNumber(numberMatch[1])
-    if (parsed !== null) return parsed
+    if (parsed !== null && parsed <= MAX_BRL_AMOUNT) return parsed
   }
 
   return null
@@ -187,21 +192,30 @@ export function extractBrlAmount(message: string): number | null {
 
 /**
  * Extract a USDT amount from a message string.
- * Looks for patterns like "500 usdt", "500u", "US$ 500", etc.
+ * Looks for patterns like "500 usdt", "usdt 500", "500u", "US$ 500", etc.
  */
 export function extractUsdtAmount(message: string): number | null {
   if (!message) return null
 
-  const normalized = message.trim()
+  // Strip @mentions to avoid parsing phone numbers
+  const normalized = message.trim().replace(/@[\w\d+]+/g, '').trim()
+  if (!normalized) return null
 
   // Pattern 1: Number followed by "usdt", "usd", or "u"
-  const usdtMatch = normalized.match(/([\d.,]+)\s*(?:usdt|usd|u)\b/i)
-  if (usdtMatch) {
-    const parsed = parseBrazilianNumber(usdtMatch[1])
+  const usdtSuffixMatch = normalized.match(/([\d.,]+)\s*(?:usdt|usd|u)\b/i)
+  if (usdtSuffixMatch) {
+    const parsed = parseBrazilianNumber(usdtSuffixMatch[1])
     if (parsed !== null) return parsed
   }
 
-  // Pattern 2: US$ prefix
+  // Pattern 2: "usdt" or "usd" followed by number (prefix format: "usdt 100k")
+  const usdtPrefixMatch = normalized.match(/(?:usdt|usd)\s+([\d.,]+(?:\s*(?:k|mil))?)/i)
+  if (usdtPrefixMatch) {
+    const parsed = parseBrazilianNumber(usdtPrefixMatch[1])
+    if (parsed !== null) return parsed
+  }
+
+  // Pattern 3: US$ prefix
   const usdPrefixMatch = normalized.match(/US\$\s*([\d.,]+)/i)
   if (usdPrefixMatch) {
     const parsed = parseBrazilianNumber(usdPrefixMatch[1])

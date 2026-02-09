@@ -139,6 +139,22 @@ describe('extractBrlAmount', () => {
     expect(extractBrlAmount('preço por favor')).toBeNull()
     expect(extractBrlAmount('')).toBeNull()
   })
+
+  it('ignores @mention phone numbers', () => {
+    expect(extractBrlAmount('@6202620641384')).toBeNull()
+    expect(extractBrlAmount('Off @6202620641384')).toBeNull()
+    expect(extractBrlAmount('@5511999999999 preço')).toBeNull()
+  })
+
+  it('rejects amounts above 100M BRL', () => {
+    expect(extractBrlAmount('200000000')).toBeNull()
+    expect(extractBrlAmount('999999999')).toBeNull()
+  })
+
+  it('still extracts valid amounts after @mention stripping', () => {
+    expect(extractBrlAmount('compro 10k @operator')).toBe(10000)
+    expect(extractBrlAmount('R$ 5.000 @mention')).toBe(5000)
+  })
 })
 
 // ============================================================
@@ -157,6 +173,17 @@ describe('extractUsdtAmount', () => {
 
   it('extracts US$ prefixed amounts', () => {
     expect(extractUsdtAmount('tenho US$ 500')).toBe(500)
+  })
+
+  it('extracts USDT prefix amounts', () => {
+    expect(extractUsdtAmount('usdt 500')).toBe(500)
+    expect(extractUsdtAmount('Usdt 100 k quanto consegue?')).toBe(100000)
+    expect(extractUsdtAmount('USDT 10k')).toBe(10000)
+    expect(extractUsdtAmount('usd 5000')).toBe(5000)
+  })
+
+  it('ignores @mention phone numbers', () => {
+    expect(extractUsdtAmount('@6202620641384')).toBeNull()
   })
 
   it('returns null for no USDT amount', () => {
