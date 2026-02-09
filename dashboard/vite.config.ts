@@ -15,6 +15,12 @@ export default defineConfig({
     emptyOutDir: false, // Keep TypeScript-compiled server files
   },
   server: {
-    port: 3002,
+    port: 3004,
+    proxy: {
+      '/api': {
+        target: 'http://181.215.135.75:3004',
+        changeOrigin: true,
+      },
+    },
   },
 })

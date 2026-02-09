@@ -31,6 +31,9 @@ const __dirname = path.dirname(__filename)
 
 const app = express()
 
+// Trust proxy (Cloudflare Tunnel adds X-Forwarded-For headers)
+app.set('trust proxy', 1)
+
 // Middleware
 const config = getConfig()
 const allowedOrigins = config.ALLOWED_ORIGINS
@@ -60,12 +63,15 @@ app.use(helmet({
 }))
 
 // Rate limiting — 100 requests per minute per IP on API routes
+// Price endpoints are exempt: the dashboard polls commercial dollar every 1s
+// (60 req/min alone), and these are lightweight local reads with no abuse risk.
 const apiLimiter = rateLimit({
   windowMs: 60_000,
   limit: 100,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later' },
+  skip: (req: Request) => req.path === '/prices' || req.path.startsWith('/prices/'),
 })
 app.use('/api', apiLimiter)
 
@@ -86,13 +92,15 @@ app.use('/api', (req: Request, _res: Response, next: NextFunction) => {
 
 app.use(express.json({ limit: '100kb' }))
 
-// Request logging
+// Request logging (skip price endpoints — polled every 1s, would flood logs)
 app.use((req: Request, _res: Response, next: NextFunction) => {
-  logger.info('Dashboard API request', {
-    event: 'dashboard_request',
-    method: req.method,
-    path: req.path,
-  })
+  if (!req.path.startsWith('/api/prices')) {
+    logger.info('Dashboard API request', {
+      event: 'dashboard_request',
+      method: req.method,
+      path: req.path,
+    })
+  }
   next()
 })
 
@@ -124,6 +132,11 @@ app.get('/health', (_req: Request, res: Response) => {
 const dashboardPath = path.join(__dirname, '../../dist/dashboard')
 app.use(express.static(dashboardPath))
 
+// API 404 handler — return JSON for unmatched /api/* routes
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({ error: 'Route not found' })
+})
+
 // SPA fallback - serve index.html for all non-API routes
 app.use((_req: Request, res: Response) => {
   res.sendFile(path.join(dashboardPath, 'index.html'))
@@ -144,7 +157,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
  */
 export function startDashboardServer(): void {
   const config = getConfig()
-  const port = config.DASHBOARD_PORT || 3001
+  const port = config.DASHBOARD_PORT
 
   if (!config.DASHBOARD_ENABLED) {
     logger.info('Dashboard server disabled', { event: 'dashboard_disabled' })

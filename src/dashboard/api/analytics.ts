@@ -24,51 +24,41 @@ const MAX_DAYS_LOOKBACK = 365
 analyticsRouter.get('/:groupId/analytics/heatmap', async (req: Request, res: Response) => {
   try {
     const groupId = req.params.groupId as string
-    const days = Math.min(parseInt(req.query.days as string) || 30, MAX_DAYS_LOOKBACK)
 
     const supabase = getSupabase()
     if (!supabase) {
       return res.status(503).json({ error: 'Database not configured' })
     }
 
-    const startDate = new Date()
-    startDate.setDate(startDate.getDate() - days)
-
-    // Query to get message count by hour and day of week
-    // Skip RPC and use direct query (more reliable)
+    // Read from Silver layer — pre-aggregated heatmap data
     let query = supabase
-      .from('messages')
-      .select('created_at, content, is_trigger')
-      .gte('created_at', startDate.toISOString())
-      .order('created_at', { ascending: false })
+      .from('silver_group_activity')
+      .select('group_jid, hour_of_day, day_of_week, message_count, trigger_count, top_trigger')
 
     // If groupId is 'all', don't filter by group - aggregate all groups
     if (groupId !== 'all') {
       query = query.eq('group_jid', groupId)
     }
 
-    // Always apply safety limit to prevent OOM
-    query = query.limit(MAX_HEATMAP_MESSAGES)
-
-    const { data: messages, error: queryError } = await query
+    const { data: rows, error: queryError } = await query
 
     if (queryError) {
+      // Fall back to old approach if silver table doesn't exist yet
+      if (queryError.code === 'PGRST205' || queryError.code === '42P01') {
+        return res.json({ heatmap: [], range: { start: new Date().toISOString(), end: new Date().toISOString() }, notice: 'Silver layer not yet initialized' })
+      }
       throw queryError
     }
 
-    // Aggregate in-memory
-    const heatmapMap = new Map<string, { count: number; triggers: string[] }>()
+    // If groupId is 'all', aggregate across groups
+    const heatmapMap = new Map<string, { count: number; topTrigger: string | null }>()
 
-    messages?.forEach((msg: any) => {
-      const date = new Date(msg.created_at)
-      const hour = date.getHours()
-      const dayOfWeek = date.getDay() // 0 = Sunday
-      const key = `${hour}-${dayOfWeek}`
-
-      const existing = heatmapMap.get(key) || { count: 0, triggers: [] }
-      existing.count++
-      if (msg.is_trigger && msg.content) {
-        existing.triggers.push(msg.content)
+    rows?.forEach((row: any) => {
+      const key = `${row.hour_of_day}-${row.day_of_week}`
+      const existing = heatmapMap.get(key) || { count: 0, topTrigger: null }
+      existing.count += row.message_count || 0
+      if (!existing.topTrigger && row.top_trigger) {
+        existing.topTrigger = row.top_trigger
       }
       heatmapMap.set(key, existing)
     })
@@ -79,26 +69,24 @@ analyticsRouter.get('/:groupId/analytics/heatmap', async (req: Request, res: Res
         hour,
         dayOfWeek,
         count: data.count,
-        topTrigger: data.triggers[0] || null,
+        topTrigger: data.topTrigger,
       }
     })
 
+    // Derive range from current time (silver is pre-aggregated over last 30 days)
+    const rangeEnd = new Date().toISOString()
+    const rangeStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+
     res.json({
       heatmap,
-      range: {
-        start: startDate.toISOString(),
-        end: new Date().toISOString(),
-      },
+      range: { start: rangeStart, end: rangeEnd },
     })
   } catch (error) {
     logger.error('Failed to get heatmap analytics', {
       event: 'heatmap_error',
       error: error instanceof Error ? error.message : String(error),
     })
-    res.status(500).json({
-      error: 'Failed to get heatmap',
-      message: error instanceof Error ? error.message : String(error),
-    })
+    res.status(500).json({ error: 'Failed to get heatmap' })
   }
 })
 
@@ -121,67 +109,58 @@ analyticsRouter.get('/:groupId/analytics/heatmap', async (req: Request, res: Res
 analyticsRouter.get('/:groupId/analytics/players', async (req: Request, res: Response) => {
   try {
     const groupId = req.params.groupId as string
-    const limit = parseInt(req.query.limit as string) || 20
-    const days = parseInt(req.query.days as string) || 30
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 20, 1), 100)
 
     const supabase = getSupabase()
     if (!supabase) {
       return res.status(503).json({ error: 'Database not configured' })
     }
 
-    const startDate = new Date()
-    startDate.setDate(startDate.getDate() - days)
-
-    // Get message counts per sender in this group (with safety limit)
-    const { data: messages, error } = await supabase
-      .from('messages')
-      .select('sender_jid, is_trigger, created_at')
+    // Read from Silver layer — pre-aggregated player stats
+    const { data: stats, error } = await supabase
+      .from('silver_player_stats')
+      .select('sender_jid, message_count, trigger_count, last_active, first_seen')
       .eq('group_jid', groupId)
-      .eq('is_from_bot', false) // Exclude bot messages
-      .gte('created_at', startDate.toISOString())
-      .limit(MAX_PLAYERS_MESSAGES)
+      .order('message_count', { ascending: false })
+      .limit(limit)
 
-    if (error) throw error
-
-    // Aggregate by sender
-    const playerMap = new Map<string, { messageCount: number; triggerCount: number; lastActive: string }>()
-
-    messages?.forEach((msg: any) => {
-      const existing = playerMap.get(msg.sender_jid) || {
-        messageCount: 0,
-        triggerCount: 0,
-        lastActive: msg.created_at,
+    if (error) {
+      // Fall back gracefully if silver table doesn't exist yet
+      if (error.code === 'PGRST205' || error.code === '42P01') {
+        return res.json({ players: [], notice: 'Silver layer not yet initialized' })
       }
-      existing.messageCount++
-      if (msg.is_trigger) existing.triggerCount++
-      if (msg.created_at > existing.lastActive) existing.lastActive = msg.created_at
-      playerMap.set(msg.sender_jid, existing)
-    })
+      throw error
+    }
 
-    // Get contact info for top players
-    const topPlayerJids = Array.from(playerMap.entries())
-      .sort((a, b) => b[1].messageCount - a[1].messageCount)
-      .slice(0, limit)
-      .map(([jid]) => jid)
+    if (!stats || stats.length === 0) {
+      return res.json({ players: [] })
+    }
+
+    // Get contact info for the players
+    const playerJids = stats.map((s: any) => s.sender_jid)
 
     const { data: contacts, error: contactsError } = await supabase
       .from('contacts')
       .select('jid, phone, push_name')
-      .in('jid', topPlayerJids)
+      .in('jid', playerJids)
 
     if (contactsError) throw contactsError
 
-    const players = topPlayerJids.map((jid) => {
-      const stats = playerMap.get(jid)!
-      const contact = contacts?.find((c: any) => c.jid === jid)
+    const contactMap = new Map<string, { phone: string; pushName: string }>()
+    contacts?.forEach((c: any) => {
+      contactMap.set(c.jid, { phone: c.phone || c.jid, pushName: c.push_name || 'Unknown' })
+    })
+
+    const players = stats.map((s: any) => {
+      const contact = contactMap.get(s.sender_jid)
       return {
-        jid,
-        phone: contact?.phone || jid,
-        pushName: contact?.push_name || 'Unknown',
-        messageCount: stats.messageCount,
-        triggerCount: stats.triggerCount,
-        role: null, // TODO: Get from player_roles table when implemented
-        lastActive: stats.lastActive,
+        jid: s.sender_jid,
+        phone: contact?.phone || s.sender_jid,
+        pushName: contact?.pushName || 'Unknown',
+        messageCount: s.message_count,
+        triggerCount: s.trigger_count,
+        role: null,
+        lastActive: s.last_active,
       }
     })
 
@@ -191,10 +170,7 @@ analyticsRouter.get('/:groupId/analytics/players', async (req: Request, res: Res
       event: 'players_error',
       error: error instanceof Error ? error.message : String(error),
     })
-    res.status(500).json({
-      error: 'Failed to get players',
-      message: error instanceof Error ? error.message : String(error),
-    })
+    res.status(500).json({ error: 'Failed to get players' })
   }
 })
 
@@ -362,10 +338,7 @@ analyticsRouter.get('/:groupId/analytics/patterns', async (req: Request, res: Re
       event: 'patterns_error',
       error: error instanceof Error ? error.message : String(error),
     })
-    res.status(500).json({
-      error: 'Failed to get patterns',
-      message: error instanceof Error ? error.message : String(error),
-    })
+    res.status(500).json({ error: 'Failed to get patterns' })
   }
 })
 
@@ -425,12 +398,13 @@ analyticsRouter.get('/:groupId/learning', async (req: Request, res: Response) =>
 
     if (triggerError) throw triggerError
 
-    // Get pattern count (unique trigger phrases)
+    // Get pattern count (unique trigger phrases, capped for performance)
     const { data: triggers, error: triggersError } = await supabase
       .from('messages')
       .select('content')
       .eq('group_jid', groupId)
       .eq('is_trigger', true)
+      .limit(5000)
 
     if (triggersError) throw triggersError
 
@@ -453,9 +427,6 @@ analyticsRouter.get('/:groupId/learning', async (req: Request, res: Response) =>
       event: 'learning_error',
       error: error instanceof Error ? error.message : String(error),
     })
-    res.status(500).json({
-      error: 'Failed to get learning progress',
-      message: error instanceof Error ? error.message : String(error),
-    })
+    res.status(500).json({ error: 'Failed to get learning progress' })
   }
 })

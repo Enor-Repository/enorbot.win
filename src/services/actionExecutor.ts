@@ -127,6 +127,10 @@ async function executePriceQuote(
       defaultSide: 'client_buys_usdt',
       defaultCurrency: 'BRL',
       language: 'pt-BR',
+      dealFlowMode: 'classic',
+      operatorJid: null,
+      amountTimeoutSeconds: 60,
+      groupLanguage: 'pt',
       createdAt: activeRule.createdAt,
       updatedAt: activeRule.updatedAt,
     }
@@ -225,6 +229,10 @@ async function executeVolumeQuote(
       defaultSide: 'client_buys_usdt',
       defaultCurrency: 'BRL',
       language: 'pt-BR',
+      dealFlowMode: 'classic',
+      operatorJid: null,
+      amountTimeoutSeconds: 60,
+      groupLanguage: 'pt',
       createdAt: activeRule.createdAt,
       updatedAt: activeRule.updatedAt,
     }

@@ -17,6 +17,22 @@ import { logger } from './logger.js'
 import { type Result, ok, err } from './result.js'
 
 /**
+ * Format a WhatsApp @mention for inclusion in a message.
+ *
+ * WhatsApp mentions require two parts:
+ * 1. The @displayName text in the message body (visible to users)
+ * 2. The JID in the mentions array (triggers push notification)
+ *
+ * @param jid - Full WhatsApp JID (e.g., "5511999999999@s.whatsapp.net")
+ * @param displayName - Display name to show (defaults to phone number extracted from JID)
+ * @returns Object with textSegment (for message body) and jid (for mentions array)
+ */
+export function formatMention(jid: string, displayName?: string): { textSegment: string; jid: string } {
+  const name = displayName || jid.replace(/@.*$/, '')
+  return { textSegment: `@${name}`, jid }
+}
+
+/**
  * Minimum typing indicator duration in milliseconds (NFR15).
  */
 export const MIN_TYPING_MS = 1000 // 1 second
@@ -58,12 +74,14 @@ export function getTypingDuration(): number {
  * @param sock - WhatsApp socket connection
  * @param jid - Chat JID to send message to
  * @param message - Text message to send
+ * @param mentions - Optional array of JIDs to @mention (triggers push notifications)
  * @returns Result<void> - success or error message, never throws
  */
 export async function sendWithAntiDetection(
   sock: WASocket,
   jid: string,
-  message: string
+  message: string,
+  mentions?: string[]
 ): Promise<Result<void>> {
   // Input validation
   if (!jid || jid.trim() === '') {
@@ -101,7 +119,11 @@ export async function sendWithAntiDetection(
     })
 
     // Step 4: Send message (AC1)
-    await sock.sendMessage(jid, { text: message })
+    const messagePayload: { text: string; mentions?: string[] } = { text: message }
+    if (mentions && mentions.length > 0) {
+      messagePayload.mentions = mentions
+    }
+    await sock.sendMessage(jid, messagePayload)
 
     logger.info('Message sent', {
       event: 'message_sent',

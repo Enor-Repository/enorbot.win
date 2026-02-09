@@ -9,6 +9,11 @@ import { matchTrigger, type GroupTrigger } from '../services/triggerService.js'
 import { logger } from '../utils/logger.js'
 // Volatility Protection: Close active quotes on deal acceptance
 import { getActiveQuote, forceAccept } from '../services/activeQuotes.js'
+// Sprint 9: Simple mode deal-state intercept
+import { getActiveDealForSender } from '../services/dealFlowService.js'
+import { getSpreadConfig } from '../services/groupSpreadService.js'
+import { getKeywordsForPatternSync } from '../services/systemPatternService.js'
+import { parseBrazilianNumber } from '../services/dealComputation.js'
 
 /**
  * Route destinations for message handling.
@@ -55,7 +60,7 @@ export interface RouterContext {
   /** Matched trigger from triggerService (populated when a group trigger matches) */
   matchedTrigger?: GroupTrigger
   /** Deal flow action type for DEAL_HANDLER routing */
-  dealAction?: 'volume_inquiry' | 'price_lock' | 'confirmation' | 'cancellation'
+  dealAction?: 'volume_inquiry' | 'price_lock' | 'confirmation' | 'cancellation' | 'rejection' | 'volume_input'
 }
 
 /**
@@ -119,6 +124,131 @@ const ACTION_TO_DESTINATION: Record<string, RouteDestination> = {
   control_command: 'CONTROL_HANDLER',
 }
 
+// ============================================================================
+// Sprint 9: Simple Mode Deal-State Intercept
+// ============================================================================
+
+/** Additional lock keywords always included beyond system_patterns.price_lock */
+const EXTRA_LOCK_KEYWORDS = ['ok', 'fecha']
+
+/** Off keywords that trigger rejection */
+const OFF_KEYWORDS = ['off']
+
+/** Cancel keywords for awaiting_amount state */
+const CANCEL_KEYWORDS_SYNC = () => getKeywordsForPatternSync('deal_cancellation')
+
+/**
+ * Check if a message matches any keyword in a list (case-insensitive, whole-word).
+ * Uses word-boundary matching to avoid false positives.
+ */
+function matchesKeyword(message: string, keywords: string[]): boolean {
+  const normalized = message.toLowerCase().trim()
+  return keywords.some((kw) => {
+    const kwLower = kw.toLowerCase()
+    // Exact match or word-boundary match
+    if (normalized === kwLower) return true
+    // Check if keyword appears as a word boundary (not substring of another word)
+    const regex = new RegExp(`\\b${kwLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
+    return regex.test(normalized)
+  })
+}
+
+/**
+ * Sprint 9: Attempt to intercept a message based on sender's active deal state.
+ * ONLY runs for simple-mode groups. Classic mode completely skips this.
+ *
+ * Returns a RouteResult if intercepted, or null to fall through to normal routing.
+ */
+async function trySimpleModeIntercept(
+  enrichedContext: RouterContext
+): Promise<RouteResult | null> {
+  // 1. Check if group is in simple mode
+  const configResult = await getSpreadConfig(enrichedContext.groupId)
+  if (!configResult.ok || configResult.data.dealFlowMode !== 'simple') {
+    return null // Not simple mode → skip intercept entirely
+  }
+
+  // 2. Check if sender has an active deal
+  const dealResult = await getActiveDealForSender(enrichedContext.groupId, enrichedContext.sender)
+  if (!dealResult.ok || !dealResult.data) {
+    return null // No active deal → fall through to normal routing
+  }
+
+  const deal = dealResult.data
+  const message = enrichedContext.message
+
+  // 3. Route based on deal state
+  if (deal.state === 'quoted') {
+    // QUOTED + "off" → rejection
+    if (matchesKeyword(message, OFF_KEYWORDS)) {
+      logger.info('Simple mode intercept: rejection (off)', {
+        event: 'simple_mode_intercept',
+        action: 'rejection',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'rejection' },
+      }
+    }
+
+    // QUOTED + lock keyword → price_lock
+    const lockKeywords = [...getKeywordsForPatternSync('price_lock'), ...EXTRA_LOCK_KEYWORDS]
+    if (matchesKeyword(message, lockKeywords)) {
+      logger.info('Simple mode intercept: price_lock', {
+        event: 'simple_mode_intercept',
+        action: 'price_lock',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'price_lock' },
+      }
+    }
+  }
+
+  if (deal.state === 'awaiting_amount') {
+    // AWAITING_AMOUNT + cancel keyword → cancellation
+    if (matchesKeyword(message, CANCEL_KEYWORDS_SYNC())) {
+      logger.info('Simple mode intercept: cancellation (awaiting_amount)', {
+        event: 'simple_mode_intercept',
+        action: 'cancellation',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'cancellation' },
+      }
+    }
+
+    // AWAITING_AMOUNT + number → volume_input
+    const parsed = parseBrazilianNumber(message.trim())
+    if (parsed !== null && parsed > 0) {
+      logger.info('Simple mode intercept: volume_input', {
+        event: 'simple_mode_intercept',
+        action: 'volume_input',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+        parsedAmount: parsed,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'volume_input' },
+      }
+    }
+  }
+
+  // No intercept matched → fall through to normal routing
+  return null
+}
+
 /**
  * Resolve a matched trigger to a route destination and enriched context.
  */
@@ -164,12 +294,13 @@ function resolveTriggeredRoute(
 /**
  * Route a message to the appropriate handler.
  *
- * Sprint 7B routing (unified trigger layer):
+ * Sprint 9 routing (with simple mode intercept):
  * 1. Control group → always process (trigger match or control handler)
  * 2. Per-group mode → paused=IGNORE, learning/assisted=OBSERVE_ONLY
- * 3. Receipt detection (MIME-based) → RECEIPT_HANDLER
- * 4. Database triggers (system + user, priority-ordered) → mapped handler
- * 5. No match → IGNORE
+ * 3. Simple mode deal-state intercept (Sprint 9) → DEAL_HANDLER if sender has active deal
+ * 4. Receipt detection (MIME-based) → RECEIPT_HANDLER
+ * 5. Database triggers (system + user, priority-ordered) → mapped handler
+ * 6. No match → IGNORE
  */
 export async function routeMessage(
   context: RouterContext,
@@ -225,7 +356,25 @@ export async function routeMessage(
 
   // ACTIVE mode: full routing through database triggers
 
-  // Priority 3: Receipt messages (MIME-based, checked before keyword triggers)
+  // Priority 3 (Sprint 9): Simple mode deal-state intercept
+  // Runs BEFORE trigger matching so deal-state context takes priority
+  // Classic mode: completely skipped (returns null instantly)
+  try {
+    const interceptResult = await trySimpleModeIntercept(enrichedContext)
+    if (interceptResult) {
+      return interceptResult
+    }
+  } catch (e) {
+    logger.error('Simple mode intercept failed, falling through to normal routing', {
+      event: 'simple_mode_intercept_error',
+      groupId: context.groupId,
+      sender: context.sender,
+      error: e instanceof Error ? e.message : String(e),
+    })
+    // Fall through to normal routing on error — safe degradation
+  }
+
+  // Priority 4: Receipt messages (MIME-based, checked before keyword triggers)
   if (isReceipt) {
     return { destination: 'RECEIPT_HANDLER', context: enrichedContext }
   }

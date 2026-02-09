@@ -6,10 +6,14 @@ import { initGroupConfigs } from './services/groupConfig.js'
 import { checkBackupPermissions } from './services/authBackup.js'
 import { createConnection, getSocket } from './bot/connection.js'
 import { startDealSweepTimer, stopDealSweepTimer } from './handlers/deal.js'
+// TradingView scraper for commercial dollar pricing
+import { startScraper, stopScraper } from './services/tradingViewScraper.js'
 // Volatility Protection: WebSocket and monitoring services
 import { startWebSocket, stopWebSocket } from './services/binanceWebSocket.js'
 import { startMonitoring, stopMonitoring } from './services/volatilityMonitor.js'
 import { expireOldQuotes } from './services/activeQuotes.js'
+// Medallion Data Architecture: Bronze → Silver → Gold
+import { startDataLakeRefresh, stopDataLakeRefresh } from './services/dataLake.js'
 
 let healthServer: Server | null = null
 let quoteCleanupInterval: NodeJS.Timeout | null = null
@@ -81,6 +85,14 @@ async function main(): Promise<void> {
   // Sprint 4: Start periodic deal TTL sweep (every 30s)
   startDealSweepTimer()
 
+  // Commercial dollar: Start TradingView scraper (non-fatal if fails)
+  startScraper().catch((error) => {
+    logger.warn('TradingView scraper failed to start, will use AwesomeAPI fallback', {
+      event: 'tradingview_start_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
+
   // Volatility Protection: Start Binance WebSocket IMMEDIATELY
   // Price streaming is independent of WhatsApp connection
   startWebSocket()
@@ -98,6 +110,9 @@ async function main(): Promise<void> {
     cleanupIntervalMs: QUOTE_CLEANUP_INTERVAL_MS,
   })
 
+  // Medallion Data Architecture: Start Silver/Gold refresh timers
+  startDataLakeRefresh()
+
   // Initialize WhatsApp connection
   await createConnection(config)
 }
@@ -111,13 +126,17 @@ function shutdown(signal: string): void {
   // Stop deal sweep timer
   stopDealSweepTimer()
 
-  // Stop volatility protection services
+  // Stop data sources first (stop generating events)
+  stopScraper().catch(() => {})
   if (quoteCleanupInterval) {
     clearInterval(quoteCleanupInterval)
     quoteCleanupInterval = null
   }
   stopMonitoring()
   stopWebSocket()
+
+  // Stop data lake consumers after sources are stopped
+  stopDataLakeRefresh()
 
   // Close health server
   if (healthServer) {

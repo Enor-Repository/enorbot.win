@@ -24,9 +24,15 @@ vi.mock('../utils/logger.js', () => ({
   },
 }))
 
+// Mock data lake to prevent bronze deal event side effects during tests
+vi.mock('./dataLake.js', () => ({
+  emitDealEvent: vi.fn(),
+}))
+
 import {
   createDeal,
   getActiveDeals,
+  getActiveDealForSender,
   getAllDeals,
   getDealById,
   findClientDeal,
@@ -34,9 +40,13 @@ import {
   startComputation,
   completeDeal,
   cancelDeal,
+  rejectDeal,
+  startAwaitingAmount,
   expireDeal,
   extendDealTtl,
   sweepExpiredDeals,
+  getDealsNeedingReprompt,
+  markReprompted,
   archiveDeal,
   getDealHistory,
   isValidTransition,
@@ -60,6 +70,9 @@ describe('dealFlowService', () => {
     amountBrl: 10000,
   }
 
+  // Use future dates to avoid TTL expiration issues
+  const futureDate = new Date(Date.now() + 3600_000).toISOString() // 1 hour from now
+
   const mockDealRow = {
     id: 'deal-1',
     group_jid: groupJid,
@@ -68,21 +81,22 @@ describe('dealFlowService', () => {
     side: 'client_buys_usdt',
     quoted_rate: 5.25,
     base_rate: 5.20,
-    quoted_at: '2026-02-05T10:00:00Z',
+    quoted_at: new Date().toISOString(),
     locked_rate: null,
     locked_at: null,
     amount_brl: 10000,
     amount_usdt: null,
-    ttl_expires_at: '2026-02-05T10:03:00Z',
+    ttl_expires_at: futureDate,
     rule_id_used: null,
     rule_name: null,
     pricing_source: 'usdt_binance',
     spread_mode: 'bps',
     sell_spread: 0,
     buy_spread: 0,
+    reprompted_at: null,
     metadata: {},
-    created_at: '2026-02-05T10:00:00Z',
-    updated_at: '2026-02-05T10:00:00Z',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   }
 
   const mockLockedRow = {
@@ -714,6 +728,173 @@ describe('dealFlowService', () => {
       if (!result.ok) {
         expect(result.error).toContain('Invalid transition')
       }
+    })
+  })
+
+  // ============================================================
+  // Sprint 9: New State Transitions
+  // ============================================================
+
+  describe('isValidTransition (Sprint 9 new states)', () => {
+    it('quoted → rejected is valid', () => {
+      expect(isValidTransition('quoted', 'rejected')).toBe(true)
+    })
+
+    it('locked → awaiting_amount is valid', () => {
+      expect(isValidTransition('locked', 'awaiting_amount')).toBe(true)
+    })
+
+    it('awaiting_amount → computing is valid', () => {
+      expect(isValidTransition('awaiting_amount', 'computing')).toBe(true)
+    })
+
+    it('awaiting_amount → expired is valid', () => {
+      expect(isValidTransition('awaiting_amount', 'expired')).toBe(true)
+    })
+
+    it('awaiting_amount → cancelled is valid', () => {
+      expect(isValidTransition('awaiting_amount', 'cancelled')).toBe(true)
+    })
+
+    it('rejected is terminal (no transitions out)', () => {
+      expect(isValidTransition('rejected', 'quoted')).toBe(false)
+      expect(isValidTransition('rejected', 'completed')).toBe(false)
+    })
+  })
+
+  describe('getActiveDealForSender', () => {
+    it('returns deal for matching sender', async () => {
+      setupChain({ data: [mockDealRow], error: null })
+
+      const result = await getActiveDealForSender(groupJid, clientJid)
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data).not.toBeNull()
+        expect(result.data?.clientJid).toBe(clientJid)
+      }
+    })
+
+    it('returns null when no deal for sender', async () => {
+      setupChain({ data: [mockDealRow], error: null })
+
+      const result = await getActiveDealForSender(groupJid, 'other@s.whatsapp.net')
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data).toBeNull()
+      }
+    })
+  })
+
+  describe('startAwaitingAmount', () => {
+    it('transitions locked → awaiting_amount', async () => {
+      const awaitingRow = { ...mockLockedRow, state: 'awaiting_amount' }
+      setupSequentialChains([
+        { data: mockLockedRow, error: null }, // fetch current
+        { data: awaitingRow, error: null },   // update
+      ])
+
+      const result = await startAwaitingAmount('deal-1', groupJid)
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.state).toBe('awaiting_amount')
+      }
+    })
+  })
+
+  describe('rejectDeal', () => {
+    it('transitions quoted → rejected', async () => {
+      const rejectedRow = { ...mockDealRow, state: 'rejected' }
+      setupSequentialChains([
+        { data: mockDealRow, error: null }, // fetch current
+        { data: rejectedRow, error: null }, // update
+      ])
+
+      const result = await rejectDeal('deal-1', groupJid)
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.state).toBe('rejected')
+      }
+    })
+  })
+
+  describe('getDealsNeedingReprompt', () => {
+    it('returns empty when no awaiting_amount deals', async () => {
+      setupChain({ data: [], error: null })
+
+      const result = await getDealsNeedingReprompt()
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.needsReprompt).toHaveLength(0)
+        expect(result.data.needsExpiry).toHaveLength(0)
+      }
+    })
+
+    it('returns deal needing reprompt when old enough and not yet reprompted', async () => {
+      const oldLockedAt = new Date(Date.now() - 120_000).toISOString() // 2 min ago
+      setupChain({
+        data: [{
+          id: 'deal-1',
+          group_jid: groupJid,
+          client_jid: clientJid,
+          locked_rate: 5.25,
+          quoted_rate: 5.25,
+          reprompted_at: null,
+          locked_at: oldLockedAt,
+        }],
+        error: null,
+      })
+
+      const result = await getDealsNeedingReprompt()
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.needsReprompt).toHaveLength(1)
+        expect(result.data.needsExpiry).toHaveLength(0)
+      }
+    })
+
+    it('returns deal needing expiry when already reprompted', async () => {
+      const oldLockedAt = new Date(Date.now() - 120_000).toISOString()
+      const repromptedAt = new Date(Date.now() - 60_000).toISOString()
+      setupChain({
+        data: [{
+          id: 'deal-1',
+          group_jid: groupJid,
+          client_jid: clientJid,
+          locked_rate: 5.25,
+          quoted_rate: 5.25,
+          reprompted_at: repromptedAt,
+          locked_at: oldLockedAt,
+        }],
+        error: null,
+      })
+
+      const result = await getDealsNeedingReprompt()
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.needsReprompt).toHaveLength(0)
+        expect(result.data.needsExpiry).toHaveLength(1)
+      }
+    })
+  })
+
+  describe('markReprompted', () => {
+    it('updates reprompted_at in database', async () => {
+      const chain = setupChain({ data: null, error: null })
+
+      const result = await markReprompted('deal-1')
+
+      expect(result.ok).toBe(true)
+      expect(mockSupabase.from).toHaveBeenCalledWith('active_deals')
+      expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+        reprompted_at: expect.any(String),
+      }))
     })
   })
 })

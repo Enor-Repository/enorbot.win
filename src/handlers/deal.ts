@@ -32,15 +32,22 @@ import {
   startComputation,
   completeDeal,
   cancelDeal,
+  rejectDeal,
+  startAwaitingAmount,
   sweepExpiredDeals,
   archiveDeal,
+  getDealsNeedingReprompt,
+  markReprompted,
+  expireDeal,
   type ActiveDeal,
   type CreateDealInput,
 } from '../services/dealFlowService.js'
+import { getSocket } from '../bot/connection.js'
 import type { BotMessageType } from '../services/messageHistory.js'
 import {
   extractBrlAmount,
   extractUsdtAmount,
+  parseBrazilianNumber,
   computeBrlToUsdt,
   computeUsdtToBrl,
   formatBrl,
@@ -57,7 +64,7 @@ import { getActiveRule, type GroupRule } from '../services/ruleService.js'
 
 /** Result returned by deal handler operations */
 export interface DealHandlerResult {
-  action: 'deal_quoted' | 'deal_locked' | 'deal_computed' | 'deal_cancelled' | 'no_action'
+  action: 'deal_quoted' | 'deal_locked' | 'deal_computed' | 'deal_cancelled' | 'deal_rejected' | 'no_action'
   dealId?: string
   groupId: string
   clientJid: string
@@ -211,6 +218,10 @@ async function getQuoteContext(groupJid: string): Promise<Result<{
       defaultSide: side,
       defaultCurrency: spreadConfig?.defaultCurrency ?? 'BRL',
       language: spreadConfig?.language ?? 'pt-BR',
+      dealFlowMode: spreadConfig?.dealFlowMode ?? 'classic',
+      operatorJid: spreadConfig?.operatorJid ?? null,
+      amountTimeoutSeconds: spreadConfig?.amountTimeoutSeconds ?? 60,
+      groupLanguage: spreadConfig?.groupLanguage ?? 'pt',
       createdAt: now,
       updatedAt: now,
     }
@@ -293,6 +304,7 @@ export async function handleVolumeInquiry(
     const stateMessages: Record<string, string> = {
       quoted: '📊 Você já tem uma cotação aberta. Responda *trava* para travar a taxa.',
       locked: '🔒 Sua taxa já está travada. Responda *fechado* para confirmar.',
+      awaiting_amount: '💰 Aguardando o valor em USDT. Envie o valor desejado.',
       computing: '⏳ Sua operação está sendo processada.',
     }
     const reminder = stateMessages[existing.state] ?? 'Você já tem uma operação ativa.'
@@ -457,11 +469,29 @@ export async function handlePriceLock(
   const amountBrl = extractBrlAmount(message)
   const amountUsdt = extractUsdtAmount(message)
 
+  // Check for simple mode — inline amount uses parseBrazilianNumber as fallback
+  const configResult = await getSpreadConfig(groupId)
+  const isSimpleMode = configResult.ok && configResult.data.dealFlowMode === 'simple'
+
+  // In simple mode, also try parseBrazilianNumber for bare numbers in the message
+  let simpleAmount = amountUsdt
+  if (isSimpleMode && simpleAmount === null) {
+    // Try to extract a bare number from the message (e.g., "trava 5000", "ok 10k")
+    const words = message.trim().split(/\s+/)
+    for (const word of words) {
+      const parsed = parseBrazilianNumber(word)
+      if (parsed !== null && parsed > 0) {
+        simpleAmount = parsed
+        break
+      }
+    }
+  }
+
   // Lock the deal
   const lockResult = await lockDeal(deal.id, groupId, {
     lockedRate: deal.quotedRate,
     amountBrl: amountBrl ?? undefined,
-    amountUsdt: amountUsdt ?? undefined,
+    amountUsdt: (isSimpleMode ? simpleAmount : amountUsdt) ?? undefined,
   })
 
   if (!lockResult.ok) {
@@ -479,6 +509,94 @@ export async function handlePriceLock(
   }
 
   const lockedDeal = lockResult.data
+
+  // ---- Simple Mode: branch based on whether amount was included ----
+  if (isSimpleMode) {
+    if (simpleAmount !== null && simpleAmount > 0) {
+      // Amount included: compute and complete immediately
+      const rate = lockedDeal.lockedRate ?? lockedDeal.quotedRate
+      const comp = computeUsdtToBrl(simpleAmount, rate)
+
+      if (!comp.ok) {
+        return err(`Computation failed: ${comp.error}`)
+      }
+
+      // Transition: LOCKED → COMPUTING → COMPLETED
+      const computeResult = await startComputation(deal.id, groupId)
+      if (!computeResult.ok) return err(computeResult.error)
+
+      const completeResult = await completeDeal(deal.id, groupId, {
+        amountBrl: comp.data.amountBrl,
+        amountUsdt: simpleAmount,
+      })
+      if (!completeResult.ok) return err(completeResult.error)
+
+      // Send formatted calculation + @mention
+      const operatorJid = configResult.ok ? configResult.data.operatorJid : null
+      const mentions = operatorJid ? [operatorJid] : []
+      const calcLine = `${formatUsdt(simpleAmount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
+      const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
+      const calcMsg = `🔒 ${calcLine}${mentionSuffix}`
+
+      const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+      if (sendResult.ok) {
+        logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
+        recordMessageSent(groupId)
+      }
+
+      // Archive (fire-and-forget)
+      archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+      logger.info('Simple mode lock+compute completed', {
+        event: 'deal_simple_lock_complete',
+        dealId: deal.id,
+        groupId,
+        sender,
+        rate,
+        amountUsdt: simpleAmount,
+        amountBrl: comp.data.amountBrl,
+      })
+
+      return ok({
+        action: 'deal_computed',
+        dealId: deal.id,
+        groupId,
+        clientJid: sender,
+        message: calcMsg,
+      })
+    }
+
+    // No amount: transition to AWAITING_AMOUNT
+    const awaitResult = await startAwaitingAmount(deal.id, groupId)
+    if (!awaitResult.ok) return err(awaitResult.error)
+
+    const rate = lockedDeal.lockedRate ?? lockedDeal.quotedRate
+    const language = configResult.ok ? configResult.data.groupLanguage : 'pt'
+    const promptMsg = language === 'en'
+      ? `Rate locked at ${formatRate(rate)}. How much USDT will be purchased?`
+      : `Taxa travada em ${formatRate(rate)}. Quantos USDTs serão comprados?`
+
+    await sendDealMessage(context, promptMsg, 'deal_awaiting_amount')
+
+    logger.info('Simple mode lock → awaiting amount', {
+      event: 'deal_simple_awaiting_amount',
+      dealId: deal.id,
+      groupId,
+      sender,
+      rate,
+      language,
+    })
+
+    return ok({
+      action: 'deal_locked',
+      dealId: deal.id,
+      groupId,
+      clientJid: sender,
+      message: promptMsg,
+    })
+  }
+
+  // ---- Classic Mode: existing behavior ----
 
   // Send lock confirmation
   const lockMsg = buildLockMessage(lockedDeal)
@@ -707,6 +825,212 @@ export async function handleDealCancellation(
   })
 }
 
+/**
+ * Sprint 9: Handle deal rejection ("off" path).
+ * When a client says "off" while in QUOTED state, the deal is rejected.
+ * Sends "off" to the group, @mentions the operator, and archives the deal.
+ */
+export async function handleRejection(
+  context: RouterContext
+): Promise<Result<DealHandlerResult>> {
+  const { groupId, sender } = context
+
+  logger.info('Rejection detected for deal flow', {
+    event: 'deal_rejection',
+    groupId,
+    sender,
+  })
+
+  // Find existing deal
+  const existingResult = await findClientDeal(groupId, sender)
+  if (!existingResult.ok) {
+    return err(`Failed to find deal: ${existingResult.error}`)
+  }
+
+  const deal = existingResult.data
+  if (deal === null) {
+    return ok({
+      action: 'no_action',
+      groupId,
+      clientJid: sender,
+      message: 'No active deal to reject',
+    })
+  }
+
+  if (deal.state !== 'quoted') {
+    logger.warn('Rejection attempted on non-quoted deal', {
+      event: 'deal_rejection_wrong_state',
+      dealId: deal.id,
+      groupId,
+      currentState: deal.state,
+    })
+    return ok({
+      action: 'no_action',
+      dealId: deal.id,
+      groupId,
+      clientJid: sender,
+      message: `Deal in ${deal.state} state, cannot reject`,
+    })
+  }
+
+  // Transition: QUOTED → REJECTED
+  const rejectResult = await rejectDeal(deal.id, groupId)
+  if (!rejectResult.ok) {
+    return err(rejectResult.error)
+  }
+
+  // Send "off" to group with @mention of operator
+  const configResult = await getSpreadConfig(groupId)
+  const operatorJid = configResult.ok ? configResult.data.operatorJid : null
+  const mentions = operatorJid ? [operatorJid] : []
+  const offMessage = operatorJid ? `off @${operatorJid.replace(/@.*/, '')}` : 'off'
+
+  const sendResult = await sendWithAntiDetection(context.sock, groupId, offMessage, mentions)
+  if (sendResult.ok) {
+    logBotMessage({
+      groupJid: groupId,
+      content: offMessage,
+      messageType: 'deal_rejected',
+      isControlGroup: false,
+    })
+    recordMessageSent(groupId)
+  } else {
+    logger.error('Failed to send rejection message', {
+      event: 'deal_rejection_send_failed',
+      error: sendResult.error,
+      groupId,
+    })
+  }
+
+  // Archive deal (fire-and-forget)
+  archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+  logger.info('Deal rejected by client', {
+    event: 'deal_rejected_by_client',
+    dealId: deal.id,
+    groupId,
+    sender,
+    operatorMentioned: !!operatorJid,
+  })
+
+  return ok({
+    action: 'deal_rejected',
+    dealId: deal.id,
+    groupId,
+    clientJid: sender,
+    message: offMessage,
+  })
+}
+
+/**
+ * Sprint 9: Handle volume input (AWAITING_AMOUNT state).
+ * Client sends a USDT amount (e.g., "5000", "10k") after rate was locked.
+ * Computes USDT × rate = BRL, sends formatted message, @mentions operator, completes deal.
+ */
+export async function handleVolumeInput(
+  context: RouterContext
+): Promise<Result<DealHandlerResult>> {
+  const { groupId, sender, message } = context
+
+  logger.info('Volume input detected for deal flow', {
+    event: 'deal_volume_input',
+    groupId,
+    sender,
+    messageLength: message.length,
+  })
+
+  // Find existing deal
+  const existingResult = await findClientDeal(groupId, sender)
+  if (!existingResult.ok) {
+    return err(`Failed to find deal: ${existingResult.error}`)
+  }
+
+  const deal = existingResult.data
+  if (deal === null || deal.state !== 'awaiting_amount') {
+    return ok({
+      action: 'no_action',
+      groupId,
+      clientJid: sender,
+      message: 'No deal in awaiting_amount state',
+    })
+  }
+
+  // Parse the USDT amount
+  const amount = extractUsdtAmount(message) ?? parseBrazilianNumber(message.trim())
+
+  if (amount === null || amount <= 0) {
+    // Gentle error message — bilingual
+    const configResult = await getSpreadConfig(groupId)
+    const language = configResult.ok ? configResult.data.groupLanguage : 'pt'
+    const errorMsg = language === 'en'
+      ? "Couldn't understand the amount. Send USDT value (e.g., 500, 10k)."
+      : 'Não entendi o valor. Envie o valor em USDT (ex: 500, 10k).'
+
+    await sendDealMessage(context, errorMsg, 'deal_awaiting_amount')
+
+    return ok({
+      action: 'no_action',
+      dealId: deal.id,
+      groupId,
+      clientJid: sender,
+      message: 'Amount parse failed',
+    })
+  }
+
+  // Compute USDT × rate = BRL
+  const rate = deal.lockedRate ?? deal.quotedRate
+  const comp = computeUsdtToBrl(amount, rate)
+
+  if (!comp.ok) {
+    return err(`Computation failed: ${comp.error}`)
+  }
+
+  // Transition: AWAITING_AMOUNT → COMPUTING → COMPLETED
+  const computeResult = await startComputation(deal.id, groupId)
+  if (!computeResult.ok) return err(computeResult.error)
+
+  const completeResult = await completeDeal(deal.id, groupId, {
+    amountBrl: comp.data.amountBrl,
+    amountUsdt: amount,
+  })
+  if (!completeResult.ok) return err(completeResult.error)
+
+  // Send formatted calculation + @mention
+  const configResult = await getSpreadConfig(groupId)
+  const operatorJid = configResult.ok ? configResult.data.operatorJid : null
+  const mentions = operatorJid ? [operatorJid] : []
+  const calcLine = `${formatUsdt(amount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
+  const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
+  const calcMsg = `✅ ${calcLine}${mentionSuffix}`
+
+  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+  if (sendResult.ok) {
+    logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
+    recordMessageSent(groupId)
+  }
+
+  // Archive (fire-and-forget)
+  archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+  logger.info('Volume input completed deal', {
+    event: 'deal_volume_input_completed',
+    dealId: deal.id,
+    groupId,
+    sender,
+    rate,
+    amountUsdt: amount,
+    amountBrl: comp.data.amountBrl,
+  })
+
+  return ok({
+    action: 'deal_computed',
+    dealId: deal.id,
+    groupId,
+    clientJid: sender,
+    message: calcMsg,
+  })
+}
+
 // ============================================================================
 // TTL Sweep & Notifications
 // ============================================================================
@@ -726,8 +1050,79 @@ export async function runDealSweep(): Promise<Result<number>> {
 }
 
 /**
+ * Sprint 9: Run the awaiting_amount re-prompt sweep.
+ * Sends reminders for deals waiting too long, and expires deals past 2× timeout.
+ */
+async function runRepromptSweep(): Promise<void> {
+  const repromptResult = await getDealsNeedingReprompt()
+  if (!repromptResult.ok) return
+
+  const { needsReprompt, needsExpiry } = repromptResult.data
+  const sock = getSocket()
+
+  // Process re-prompts
+  for (const deal of needsReprompt) {
+    const configResult = await getSpreadConfig(deal.groupJid)
+    const timeout = configResult.ok ? configResult.data.amountTimeoutSeconds : 60
+    const language = configResult.ok ? configResult.data.groupLanguage : 'pt'
+
+    const lockedAt = deal.lockedAt ?? new Date()
+    const ageSeconds = (Date.now() - lockedAt.getTime()) / 1000
+
+    if (ageSeconds < timeout) continue // Not old enough yet
+
+    // Send re-prompt message
+    const rate = deal.lockedRate ?? deal.quotedRate
+    const promptMsg = language === 'en'
+      ? `Waiting for USDT amount... Rate locked at ${formatRate(rate)}.`
+      : `Aguardando valor em USDT... Taxa travada em ${formatRate(rate)}.`
+
+    if (sock) {
+      await sendWithAntiDetection(sock, deal.groupJid, promptMsg)
+      logBotMessage({ groupJid: deal.groupJid, content: promptMsg, messageType: 'deal_awaiting_amount', isControlGroup: false })
+      recordMessageSent(deal.groupJid)
+    }
+
+    await markReprompted(deal.id)
+
+    logger.info('Awaiting amount re-prompt sent', {
+      event: 'deal_reprompt_sent',
+      dealId: deal.id,
+      groupJid: deal.groupJid,
+      ageSeconds: Math.round(ageSeconds),
+    })
+  }
+
+  // Process expiries (already reprompted, now past 2× timeout)
+  for (const deal of needsExpiry) {
+    const configResult = await getSpreadConfig(deal.groupJid)
+    const timeout = configResult.ok ? configResult.data.amountTimeoutSeconds : 60
+
+    const lockedAt = deal.lockedAt ?? new Date()
+    const ageSeconds = (Date.now() - lockedAt.getTime()) / 1000
+
+    if (ageSeconds < timeout * 2) continue // Not old enough for expiry yet
+
+    const expireResult = await expireDeal(deal.id, deal.groupJid)
+    if (expireResult.ok && sock) {
+      await sendWithAntiDetection(sock, deal.groupJid, buildExpirationMessage())
+      logBotMessage({ groupJid: deal.groupJid, content: buildExpirationMessage(), messageType: 'deal_expired', isControlGroup: false })
+      recordMessageSent(deal.groupJid)
+    }
+
+    logger.info('Awaiting amount deal expired after 2× timeout', {
+      event: 'deal_awaiting_expired',
+      dealId: deal.id,
+      groupJid: deal.groupJid,
+      ageSeconds: Math.round(ageSeconds),
+    })
+  }
+}
+
+/**
  * Start the periodic deal sweep timer.
  * M4 Fix: Ensures deals expire automatically without manual dashboard action.
+ * Sprint 9: Also runs awaiting_amount re-prompt sweep.
  * Call this once during bot initialization.
  */
 export function startDealSweepTimer(): void {
@@ -745,6 +1140,16 @@ export function startDealSweepTimer(): void {
     } catch (e) {
       logger.error('Periodic deal sweep failed', {
         event: 'deal_sweep_periodic_error',
+        error: e instanceof Error ? e.message : String(e),
+      })
+    }
+
+    // Sprint 9: Run re-prompt sweep
+    try {
+      await runRepromptSweep()
+    } catch (e) {
+      logger.error('Re-prompt sweep failed', {
+        event: 'deal_reprompt_sweep_error',
         error: e instanceof Error ? e.message : String(e),
       })
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { fetchCommercialDollar, AWESOMEAPI_TIMEOUT_MS } from './awesomeapi.js'
+import { fetchCommercialDollar, fetchFromAwesomeApiRest, AWESOMEAPI_TIMEOUT_MS } from './awesomeapi.js'
 
 // Mock logger to verify logging behavior
 vi.mock('../utils/logger.js', () => ({
@@ -11,8 +11,21 @@ vi.mock('../utils/logger.js', () => ({
   },
 }))
 
-// Import mocked logger for assertions
+// Mock TradingView scraper — returns null by default (fallback to AwesomeAPI)
+vi.mock('./tradingViewScraper.js', () => ({
+  getCommercialDollarPrice: vi.fn().mockResolvedValue(null),
+}))
+
+// Mock data lake to prevent bronze tick side effects during tests
+vi.mock('./dataLake.js', () => ({
+  emitPriceTick: vi.fn(),
+}))
+
+// Import mocked modules for assertions
 import { logger } from '../utils/logger.js'
+import { getCommercialDollarPrice } from './tradingViewScraper.js'
+
+const mockGetCommercialDollarPrice = vi.mocked(getCommercialDollarPrice)
 
 describe('fetchCommercialDollar', () => {
   const originalEnv = process.env.AWESOMEAPI_TOKEN
@@ -20,6 +33,8 @@ describe('fetchCommercialDollar', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
+    // Default: scraper returns null → falls through to AwesomeAPI
+    mockGetCommercialDollarPrice.mockResolvedValue(null)
     // Set a valid token for most tests
     process.env.AWESOMEAPI_TOKEN = 'test-token-123'
   })
@@ -36,7 +51,103 @@ describe('fetchCommercialDollar', () => {
     })
   })
 
-  describe('AC1: Successful Price Fetch', () => {
+  describe('TradingView primary path', () => {
+    it('returns TradingView price when scraper is available', async () => {
+      mockGetCommercialDollarPrice.mockResolvedValue(5.2169)
+
+      const resultPromise = fetchCommercialDollar()
+      await vi.runAllTimersAsync()
+      const result = await resultPromise
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.bid).toBeCloseTo(5.2169)
+        expect(result.data.ask).toBeCloseTo(5.2169)
+        expect(result.data.spread).toBe(0)
+        expect(result.data.timestamp).toBeDefined()
+      }
+    })
+
+    it('uses bid = ask = scraped price (single reference rate)', async () => {
+      mockGetCommercialDollarPrice.mockResolvedValue(5.3)
+
+      const resultPromise = fetchCommercialDollar()
+      await vi.runAllTimersAsync()
+      const result = await resultPromise
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.bid).toBe(result.data.ask)
+      }
+    })
+
+    it('does not call AwesomeAPI when scraper succeeds', async () => {
+      mockGetCommercialDollarPrice.mockResolvedValue(5.22)
+      const mockFetch = vi.fn()
+      vi.stubGlobal('fetch', mockFetch)
+
+      const resultPromise = fetchCommercialDollar()
+      await vi.runAllTimersAsync()
+      await resultPromise
+
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it('logs TradingView source when scraper succeeds', async () => {
+      mockGetCommercialDollarPrice.mockResolvedValue(5.2169)
+
+      const resultPromise = fetchCommercialDollar()
+      await vi.runAllTimersAsync()
+      await resultPromise
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Commercial dollar from TradingView',
+        expect.objectContaining({
+          event: 'tradingview_price_used',
+          price: 5.2169,
+        })
+      )
+    })
+
+    it('falls back to AwesomeAPI when scraper returns null', async () => {
+      mockGetCommercialDollarPrice.mockResolvedValue(null)
+
+      const mockResponse = {
+        USDBRL: {
+          code: 'USD',
+          codein: 'BRL',
+          bid: '5.2584',
+          ask: '5.2614',
+        },
+      }
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve(mockResponse),
+        })
+      )
+
+      const resultPromise = fetchCommercialDollar()
+      await vi.runAllTimersAsync()
+      const result = await resultPromise
+
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.data.bid).toBeCloseTo(5.2584)
+        expect(result.data.ask).toBeCloseTo(5.2614)
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        'TradingView unavailable, falling back to AwesomeAPI',
+        expect.objectContaining({
+          event: 'tradingview_fallback_to_awesomeapi',
+        })
+      )
+    })
+  })
+
+  describe('AwesomeAPI fallback: Successful Price Fetch', () => {
     it('returns bid and ask prices on successful fetch', async () => {
       const mockResponse = {
         USDBRL: {
@@ -57,7 +168,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -87,7 +198,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -100,11 +211,11 @@ describe('fetchCommercialDollar', () => {
     })
   })
 
-  describe('AC2: Token Validation', () => {
+  describe('AwesomeAPI fallback: Token Validation', () => {
     it('returns error when AWESOMEAPI_TOKEN is not set', async () => {
       process.env.AWESOMEAPI_TOKEN = ''
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -115,7 +226,7 @@ describe('fetchCommercialDollar', () => {
     })
   })
 
-  describe('AC3: Timeout Handling', () => {
+  describe('AwesomeAPI fallback: Timeout Handling', () => {
     it('returns timeout error after 2 seconds', async () => {
       vi.stubGlobal(
         'fetch',
@@ -131,7 +242,7 @@ describe('fetchCommercialDollar', () => {
         )
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.advanceTimersByTimeAsync(2001)
       const result = await resultPromise
 
@@ -166,7 +277,7 @@ describe('fetchCommercialDollar', () => {
         )
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.advanceTimersByTimeAsync(1999)
       resolvePromise!()
       await vi.runAllTimersAsync()
@@ -176,7 +287,7 @@ describe('fetchCommercialDollar', () => {
     })
   })
 
-  describe('AC4: API Error Handling', () => {
+  describe('AwesomeAPI fallback: API Error Handling', () => {
     it('returns error on 500 status', async () => {
       vi.stubGlobal(
         'fetch',
@@ -186,7 +297,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -205,7 +316,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -224,7 +335,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -243,7 +354,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -256,7 +367,7 @@ describe('fetchCommercialDollar', () => {
     it('returns error on network failure', async () => {
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')))
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -283,7 +394,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
@@ -303,7 +414,7 @@ describe('fetchCommercialDollar', () => {
     })
   })
 
-  describe('AC5: Latency Monitoring', () => {
+  describe('AwesomeAPI fallback: Latency Monitoring', () => {
     it('logs success with latencyMs', async () => {
       const mockResponse = {
         USDBRL: {
@@ -321,12 +432,12 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       await resultPromise
 
       expect(logger.info).toHaveBeenCalledWith(
-        'AwesomeAPI commercial dollar fetched',
+        'AwesomeAPI commercial dollar fetched (fallback)',
         expect.objectContaining({
           event: 'awesomeapi_price_fetched',
           bid: expect.any(Number),
@@ -351,7 +462,7 @@ describe('fetchCommercialDollar', () => {
         )
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.advanceTimersByTimeAsync(2001)
       await resultPromise
 
@@ -374,7 +485,7 @@ describe('fetchCommercialDollar', () => {
         })
       )
 
-      const resultPromise = fetchCommercialDollar()
+      const resultPromise = fetchFromAwesomeApiRest()
       await vi.runAllTimersAsync()
       await resultPromise
 
@@ -401,7 +512,7 @@ describe('fetchCommercialDollar', () => {
       for (const mockFetch of errorScenarios) {
         vi.stubGlobal('fetch', mockFetch)
 
-        const resultPromise = fetchCommercialDollar()
+        const resultPromise = fetchFromAwesomeApiRest()
         await vi.runAllTimersAsync()
         const result = await resultPromise
 

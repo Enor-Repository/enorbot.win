@@ -6,6 +6,7 @@ import WebSocket from 'ws'
 import { z } from 'zod'
 import { logger } from '../utils/logger.js'
 import { fetchPrice } from './binance.js'
+import { emitPriceTick } from './dataLake.js'
 
 /**
  * Binance WebSocket URL for USDT/BRL trades.
@@ -58,6 +59,10 @@ const priceCallbacks: Set<PriceCallback> = new Set()
  */
 function notifyPriceUpdate(price: number): void {
   currentPrice = price
+
+  // Bronze layer: emit price tick (5s throttle applied inside dataLake)
+  emitPriceTick('binance_ws', 'USDT/BRL', price)
+
   for (const callback of priceCallbacks) {
     try {
       callback(price)

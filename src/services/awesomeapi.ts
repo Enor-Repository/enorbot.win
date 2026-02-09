@@ -2,9 +2,12 @@ import { z } from 'zod'
 import { ok, err, type Result } from '../utils/result.js'
 import { logger } from '../utils/logger.js'
 import { recordSuccess } from './errors.js'
+import { getCommercialDollarPrice } from './tradingViewScraper.js'
+import { emitPriceTick } from './dataLake.js'
 
 /**
  * AwesomeAPI base endpoint for commercial USD/BRL exchange rate.
+ * Kept as fallback when TradingView scraper is unavailable.
  */
 export const AWESOMEAPI_BASE_URL = 'https://economia.awesomeapi.com.br/json/last/USD-BRL'
 
@@ -57,12 +60,46 @@ export interface CommercialDollarQuote {
 }
 
 /**
- * Fetch current commercial USD/BRL exchange rate from AwesomeAPI.
- * Returns Result type - never throws.
+ * Fetch current commercial USD/BRL exchange rate.
  *
- * @returns Promise<Result<CommercialDollarQuote>> - ok(quote) on success, err(message) on failure
+ * Primary: TradingView scraper (reads page title — instant, accurate).
+ * Fallback: AwesomeAPI REST endpoint (less accurate but always available).
+ *
+ * Returns Result type — never throws.
  */
 export async function fetchCommercialDollar(): Promise<Result<CommercialDollarQuote>> {
+  // Strategy 1: TradingView scraper (primary)
+  const tvPrice = await getCommercialDollarPrice()
+
+  if (tvPrice !== null) {
+    const quote: CommercialDollarQuote = {
+      bid: tvPrice,
+      ask: tvPrice,
+      spread: 0,
+      timestamp: new Date().toISOString(),
+    }
+
+    logger.debug('Commercial dollar from TradingView', {
+      event: 'tradingview_price_used',
+      price: tvPrice,
+    })
+
+    return ok(quote)
+  }
+
+  // Strategy 2: AwesomeAPI REST fallback
+  logger.warn('TradingView unavailable, falling back to AwesomeAPI', {
+    event: 'tradingview_fallback_to_awesomeapi',
+  })
+
+  return fetchFromAwesomeApiRest()
+}
+
+/**
+ * Fetch commercial dollar from AwesomeAPI REST endpoint.
+ * This is the original implementation, now used as a fallback.
+ */
+export async function fetchFromAwesomeApiRest(): Promise<Result<CommercialDollarQuote>> {
   const startTime = Date.now()
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), AWESOMEAPI_TIMEOUT_MS)
@@ -124,7 +161,7 @@ export async function fetchCommercialDollar(): Promise<Result<CommercialDollarQu
       timestamp: parsed.data.USDBRL.create_date,
     }
 
-    logger.info('AwesomeAPI commercial dollar fetched', {
+    logger.info('AwesomeAPI commercial dollar fetched (fallback)', {
       event: 'awesomeapi_price_fetched',
       bid,
       ask,
@@ -134,6 +171,9 @@ export async function fetchCommercialDollar(): Promise<Result<CommercialDollarQu
 
     // Reset AwesomeAPI failure counter on success
     recordSuccess('awesomeapi')
+
+    // Bronze layer: emit price tick with bid/ask
+    emitPriceTick('awesomeapi', 'USD/BRL', bid, bid, ask)
 
     return ok(quote)
   } catch (error) {

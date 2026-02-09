@@ -7,6 +7,10 @@ import type { WASocket } from '@whiskeysockets/baileys'
 
 const mockGetGroupModeSync = vi.hoisted(() => vi.fn())
 const mockMatchTrigger = vi.hoisted(() => vi.fn())
+const mockGetActiveDealForSender = vi.hoisted(() => vi.fn())
+const mockGetSpreadConfig = vi.hoisted(() => vi.fn())
+const mockGetKeywordsForPatternSync = vi.hoisted(() => vi.fn())
+const mockParseBrazilianNumber = vi.hoisted(() => vi.fn())
 
 vi.mock('../services/groupConfig.js', () => ({
   getGroupModeSync: mockGetGroupModeSync,
@@ -23,6 +27,22 @@ vi.mock('../utils/logger.js', () => ({
     error: vi.fn(),
     debug: vi.fn(),
   },
+}))
+
+vi.mock('../services/dealFlowService.js', () => ({
+  getActiveDealForSender: mockGetActiveDealForSender,
+}))
+
+vi.mock('../services/groupSpreadService.js', () => ({
+  getSpreadConfig: mockGetSpreadConfig,
+}))
+
+vi.mock('../services/systemPatternService.js', () => ({
+  getKeywordsForPatternSync: mockGetKeywordsForPatternSync,
+}))
+
+vi.mock('../services/dealComputation.js', () => ({
+  parseBrazilianNumber: mockParseBrazilianNumber,
 }))
 
 import {
@@ -76,6 +96,11 @@ describe('routeMessage', () => {
     vi.clearAllMocks()
     mockGetGroupModeSync.mockReturnValue('active')
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
+    // Default: classic mode (intercept skipped)
+    mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
+    mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    mockParseBrazilianNumber.mockReturnValue(null)
   })
 
   // ---- Trigger detection routing (via matchTrigger) ----
@@ -365,6 +390,10 @@ describe('routeMessage receipt routing', () => {
     vi.clearAllMocks()
     mockGetGroupModeSync.mockReturnValue('active')
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
+    mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
+    mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    mockParseBrazilianNumber.mockReturnValue(null)
   })
 
   it('routes PDF document to RECEIPT_HANDLER', async () => {
@@ -434,6 +463,10 @@ describe('routeMessage per-group modes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
+    mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
+    mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    mockParseBrazilianNumber.mockReturnValue(null)
   })
 
   describe('PAUSED mode', () => {
@@ -554,6 +587,251 @@ describe('routeMessage per-group modes', () => {
       const context = { ...baseContext, message: 'status', isControlGroup: true }
       const result = await routeMessage(context)
       expect(result.destination).toBe('CONTROL_HANDLER')
+    })
+  })
+})
+
+// ============================================================================
+// Sprint 9: Simple Mode Deal-State Intercept
+// ============================================================================
+
+describe('routeMessage simple mode intercept', () => {
+  const mockSock = {} as WASocket
+
+  const baseContext: RouterContext = {
+    groupId: '123456789@g.us',
+    groupName: 'Test Group',
+    message: '',
+    sender: 'client@s.whatsapp.net',
+    isControlGroup: false,
+    sock: mockSock,
+  }
+
+  const MOCK_QUOTED_DEAL = {
+    id: 'deal-1',
+    clientJid: 'client@s.whatsapp.net',
+    state: 'quoted',
+    groupJid: '123456789@g.us',
+  }
+
+  const MOCK_AWAITING_DEAL = {
+    id: 'deal-2',
+    clientJid: 'client@s.whatsapp.net',
+    state: 'awaiting_amount',
+    groupJid: '123456789@g.us',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetGroupModeSync.mockReturnValue('active')
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
+    // Default: simple mode with lock keywords
+    mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'simple' } })
+    mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    mockParseBrazilianNumber.mockReturnValue(null)
+  })
+
+  // ---- Classic mode: zero behavior change ----
+
+  describe('classic mode regression', () => {
+    beforeEach(() => {
+      mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: MOCK_QUOTED_DEAL })
+    })
+
+    it('skips intercept entirely in classic mode even with active deal', async () => {
+      const context = { ...baseContext, message: 'trava' }
+      const result = await routeMessage(context)
+      // Falls through to normal routing → no trigger → IGNORE
+      expect(result.destination).toBe('IGNORE')
+      expect(result.context.dealAction).toBeUndefined()
+    })
+
+    it('does not intercept "off" in classic mode', async () => {
+      const context = { ...baseContext, message: 'off' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('IGNORE')
+      expect(result.context.dealAction).toBeUndefined()
+    })
+  })
+
+  // ---- Simple mode: QUOTED state intercepts ----
+
+  describe('simple mode QUOTED state', () => {
+    beforeEach(() => {
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: MOCK_QUOTED_DEAL })
+    })
+
+    it('intercepts "off" → rejection', async () => {
+      const context = { ...baseContext, message: 'off' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('rejection')
+    })
+
+    it('intercepts "Off" (case insensitive) → rejection', async () => {
+      const context = { ...baseContext, message: 'Off' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('rejection')
+    })
+
+    it('intercepts "trava" → price_lock', async () => {
+      const context = { ...baseContext, message: 'trava' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('price_lock')
+    })
+
+    it('intercepts "lock" (system pattern keyword) → price_lock', async () => {
+      const context = { ...baseContext, message: 'lock' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('price_lock')
+    })
+
+    it('intercepts "ok" (extra lock keyword) → price_lock', async () => {
+      const context = { ...baseContext, message: 'ok' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('price_lock')
+    })
+
+    it('intercepts "fecha" (extra lock keyword) → price_lock', async () => {
+      const context = { ...baseContext, message: 'fecha' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('price_lock')
+    })
+
+    it('does not intercept unrelated messages → falls through to normal routing', async () => {
+      const context = { ...baseContext, message: 'hello world' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('IGNORE')
+      expect(result.context.dealAction).toBeUndefined()
+    })
+
+    it('does not intercept a number (QUOTED state, not awaiting_amount)', async () => {
+      mockParseBrazilianNumber.mockReturnValue(5000)
+      const context = { ...baseContext, message: '5000' }
+      const result = await routeMessage(context)
+      // QUOTED state does not handle numbers — falls through
+      expect(result.destination).toBe('IGNORE')
+    })
+  })
+
+  // ---- Simple mode: AWAITING_AMOUNT state intercepts ----
+
+  describe('simple mode AWAITING_AMOUNT state', () => {
+    beforeEach(() => {
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: MOCK_AWAITING_DEAL })
+    })
+
+    it('intercepts a valid number → volume_input', async () => {
+      mockParseBrazilianNumber.mockReturnValue(5000)
+      const context = { ...baseContext, message: '5000' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('volume_input')
+    })
+
+    it('intercepts "10k" as number → volume_input', async () => {
+      mockParseBrazilianNumber.mockReturnValue(10000)
+      const context = { ...baseContext, message: '10k' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('volume_input')
+    })
+
+    it('intercepts cancel keyword → cancellation', async () => {
+      mockGetKeywordsForPatternSync.mockImplementation((key: string) => {
+        if (key === 'deal_cancellation') return ['cancela', 'cancelar', 'cancel']
+        if (key === 'price_lock') return ['trava', 'lock', 'travar']
+        return []
+      })
+      const context = { ...baseContext, message: 'cancela' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('cancellation')
+    })
+
+    it('does not intercept non-number, non-cancel message → falls through', async () => {
+      const context = { ...baseContext, message: 'hello' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('IGNORE')
+    })
+  })
+
+  // ---- Cross-talk guard: sender B does not affect sender A's deal ----
+
+  describe('cross-talk guard', () => {
+    it('sender B saying "off" does not intercept when only sender A has deal', async () => {
+      // Deal belongs to sender A
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+      const context = { ...baseContext, sender: 'senderB@s.whatsapp.net', message: 'off' }
+      const result = await routeMessage(context)
+      // No deal for sender B → falls through
+      expect(result.destination).toBe('IGNORE')
+    })
+  })
+
+  // ---- No active deal: "ok" in casual chat ----
+
+  describe('no active deal — false positive guards', () => {
+    it('"ok" without deal falls through to normal triggers', async () => {
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+      const context = { ...baseContext, message: 'ok' }
+      const result = await routeMessage(context)
+      // No deal → falls through to trigger matching → no match → IGNORE
+      expect(result.destination).toBe('IGNORE')
+    })
+
+    it('"trava" without deal falls through to normal triggers', async () => {
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+      // If a database trigger matches "trava", it should still fire
+      mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'deal_lock' }) })
+      const context = { ...baseContext, message: 'trava' }
+      const result = await routeMessage(context)
+      // Falls through to trigger matching → deal_lock trigger fires
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('price_lock')
+    })
+
+    it('"5000" without deal falls through to normal routing', async () => {
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+      mockParseBrazilianNumber.mockReturnValue(5000)
+      const context = { ...baseContext, message: '5000' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('IGNORE')
+    })
+  })
+
+  // ---- Error handling ----
+
+  describe('intercept error handling', () => {
+    it('falls through to normal routing if getSpreadConfig fails', async () => {
+      mockGetSpreadConfig.mockResolvedValue({ ok: false, error: 'DB down' })
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: MOCK_QUOTED_DEAL })
+      const context = { ...baseContext, message: 'off' }
+      const result = await routeMessage(context)
+      // Config error → intercept returns null → normal routing → IGNORE
+      expect(result.destination).toBe('IGNORE')
+    })
+
+    it('falls through to normal routing if getActiveDealForSender fails', async () => {
+      mockGetActiveDealForSender.mockResolvedValue({ ok: false, error: 'DB down' })
+      const context = { ...baseContext, message: 'off' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('IGNORE')
+    })
+
+    it('falls through to normal routing if intercept throws', async () => {
+      mockGetSpreadConfig.mockRejectedValue(new Error('Unexpected error'))
+      const context = { ...baseContext, message: 'off' }
+      const result = await routeMessage(context)
+      // Error is caught by try/catch in routeMessage → falls through
+      expect(result.destination).toBe('IGNORE')
     })
   })
 })

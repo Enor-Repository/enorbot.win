@@ -18,20 +18,8 @@ const BROADCAST_INTERVAL_MS = 200 // Throttle to ~5 updates/second
 
 export const pricesRouter = Router()
 
-// Fallback values when API is rate-limited (updated 2026-02-02)
-const FALLBACK_USD_BRL_BID = 5.26
-const FALLBACK_USD_BRL_ASK = 5.27
-const FALLBACK_USD_BRL_SPREAD = 0.01
-
-// Cache for commercial dollar (15 minute TTL - AwesomeAPI rate limits)
-let commercialDollarCache: {
-  bid: number
-  ask: number
-  spread: number
-  timestamp: string
-  cachedAt: number
-} | null = null
-const CACHE_TTL_MS = 15 * 60 * 1000 // 15 minutes - AwesomeAPI has strict rate limits
+// No hardcoded fallback — a fake price displayed as "fresh" is worse than
+// showing an error. When both sources fail, we return HTTP 503.
 
 /**
  * GET /api/prices/usdt-brl
@@ -62,95 +50,28 @@ pricesRouter.get('/usdt-brl', async (_req: Request, res: Response) => {
       error: error instanceof Error ? error.message : String(error),
     })
 
-    res.status(500).json({
-      error: 'Failed to fetch USDT/BRL price',
-      message: error instanceof Error ? error.message : String(error),
-    })
+    res.status(500).json({ error: 'Failed to fetch USDT/BRL price' })
   }
 })
 
 /**
  * GET /api/prices/commercial-dollar
- * Proxies AwesomeAPI commercial dollar rate with server-side caching
- * Query params:
- *   - force=true: bypass cache and fetch fresh data
+ * Reads commercial dollar from TradingView page title (instant, no network call).
+ * Falls back to AwesomeAPI if scraper is down.
+ * No caching — title reads are free.
  */
-pricesRouter.get('/commercial-dollar', async (req: Request, res: Response) => {
+pricesRouter.get('/commercial-dollar', async (_req: Request, res: Response) => {
   try {
-    const forceRefresh = req.query.force === 'true'
+    const { fetchCommercialDollar } = await import('../../services/awesomeapi.js')
+    const result = await fetchCommercialDollar()
 
-    // Check cache first (unless force refresh)
-    const now = Date.now()
-    if (!forceRefresh && commercialDollarCache && (now - commercialDollarCache.cachedAt) < CACHE_TTL_MS) {
-      logger.debug('Commercial dollar from cache', {
-        event: 'commercial_dollar_cache_hit',
-        cacheAge: Math.floor((now - commercialDollarCache.cachedAt) / 1000),
-      })
-      return res.json({
-        bid: commercialDollarCache.bid,
-        ask: commercialDollarCache.ask,
-        spread: commercialDollarCache.spread,
-        timestamp: commercialDollarCache.timestamp,
-        cached: true,
-        cacheAge: Math.floor((now - commercialDollarCache.cachedAt) / 1000),
-      })
+    if (!result.ok) {
+      throw new Error(result.error)
     }
-
-    logger.info('Fetching commercial dollar from AwesomeAPI', {
-      event: 'commercial_dollar_fetch',
-      reason: forceRefresh ? 'force_refresh' : 'cache_miss_or_expired',
-    })
-
-    // Fetch fresh data - use token if available for higher rate limits
-    const token = process.env.AWESOMEAPI_TOKEN || ''
-    const apiUrl = token
-      ? `https://economia.awesomeapi.com.br/json/last/USD-BRL?token=${token}`
-      : 'https://economia.awesomeapi.com.br/json/last/USD-BRL'
-
-    const response = await fetch(apiUrl, {
-      headers: {
-        'Accept': 'application/json',
-      },
-    })
-
-    if (!response.ok) {
-      throw new Error(`AwesomeAPI error: ${response.status}`)
-    }
-
-    const data = await response.json()
-    const usdBrl = data.USDBRL
-
-    if (!usdBrl || !usdBrl.bid || !usdBrl.ask) {
-      throw new Error('Invalid response from AwesomeAPI')
-    }
-
-    const bid = parseFloat(usdBrl.bid)
-    const ask = parseFloat(usdBrl.ask)
-    const spread = ask - bid
-
-    // Update cache
-    commercialDollarCache = {
-      bid,
-      ask,
-      spread,
-      timestamp: usdBrl.create_date || new Date().toISOString(),
-      cachedAt: now,
-    }
-
-    logger.info('Commercial dollar fetched successfully', {
-      event: 'commercial_dollar_success',
-      bid,
-      ask,
-      spread,
-    })
 
     res.json({
-      bid,
-      ask,
-      spread,
-      timestamp: commercialDollarCache.timestamp,
-      cached: false,
-      cacheAge: 0,
+      price: result.data.bid,
+      timestamp: result.data.timestamp || new Date().toISOString(),
     })
   } catch (error) {
     logger.error('Failed to fetch commercial dollar', {
@@ -158,30 +79,9 @@ pricesRouter.get('/commercial-dollar', async (req: Request, res: Response) => {
       error: error instanceof Error ? error.message : String(error),
     })
 
-    // If we have stale cache, return it with warning
-    if (commercialDollarCache) {
-      return res.json({
-        bid: commercialDollarCache.bid,
-        ask: commercialDollarCache.ask,
-        spread: commercialDollarCache.spread,
-        timestamp: commercialDollarCache.timestamp,
-        cached: true,
-        cacheAge: Math.floor((Date.now() - commercialDollarCache.cachedAt) / 1000),
-        stale: true,
-      })
-    }
-
-    // Return a reasonable fallback value when rate-limited and no cache
-    // This prevents the UI from showing blank
-    res.json({
-      bid: FALLBACK_USD_BRL_BID,
-      ask: FALLBACK_USD_BRL_ASK,
-      spread: FALLBACK_USD_BRL_SPREAD,
+    res.status(503).json({
+      error: 'Commercial dollar temporarily unavailable',
       timestamp: new Date().toISOString(),
-      cached: false,
-      cacheAge: 0,
-      fallback: true,
-      error: error instanceof Error ? error.message : String(error),
     })
   }
 })
@@ -260,8 +160,11 @@ pricesRouter.get('/stream', (req: Request, res: Response) => {
     }
   }, 30000)
 
-  // Cleanup handler for connection termination
+  // Cleanup handler for connection termination (guarded against double-fire)
+  let cleaned = false
   const cleanup = () => {
+    if (cleaned) return
+    cleaned = true
     activeConnections--
     unsubscribe()
     clearInterval(heartbeatInterval)
@@ -294,4 +197,146 @@ pricesRouter.get('/stream/status', (_req: Request, res: Response) => {
     connectionStatus: getConnectionStatus(),
     available: activeConnections < MAX_SSE_CONNECTIONS,
   })
+})
+
+/**
+ * GET /api/prices/ohlc
+ * Returns OHLC candle data from the Silver layer for price charting.
+ * Query params:
+ *   symbol: 'USDT/BRL' (default) or 'USD/BRL'
+ *   source: filter by source (optional)
+ *   hours: lookback in hours (default 24, max 168)
+ */
+pricesRouter.get('/ohlc', async (req: Request, res: Response) => {
+  try {
+    const { getSupabase } = await import('../../services/supabase.js')
+    const supabase = getSupabase()
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' })
+    }
+
+    const symbol = (req.query.symbol as string) || 'USDT/BRL'
+    const source = req.query.source as string | undefined
+    const hours = Math.min(parseInt(req.query.hours as string) || 24, 168)
+
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString()
+
+    let query = supabase
+      .from('silver_price_ohlc_1m')
+      .select('symbol, bucket, source, open_price, high_price, low_price, close_price, tick_count')
+      .eq('symbol', symbol)
+      .gte('bucket', since)
+      .order('bucket', { ascending: true })
+      .limit(2000)
+
+    if (source) {
+      query = query.eq('source', source)
+    }
+
+    const { data, error } = await query
+
+    if (error) {
+      if (error.code === 'PGRST205' || error.code === '42P01') {
+        return res.json({ candles: [], notice: 'Silver OHLC table not yet initialized' })
+      }
+      throw error
+    }
+
+    const candles = (data || []).map((row: any) => ({
+      time: row.bucket,
+      source: row.source,
+      open: Number(row.open_price),
+      high: Number(row.high_price),
+      low: Number(row.low_price),
+      close: Number(row.close_price),
+      tickCount: row.tick_count,
+    }))
+
+    res.json({ symbol, hours, candles })
+  } catch (error) {
+    logger.error('Failed to fetch OHLC data', {
+      event: 'ohlc_fetch_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({ error: 'Failed to fetch OHLC data' })
+  }
+})
+
+/**
+ * GET /api/prices/trade-desk
+ * Returns trade desk metrics from Gold layer: volume, spread effectiveness, response times.
+ * Query params:
+ *   days: lookback in days (default 7, max 90)
+ *   groupJid: filter by group (optional)
+ */
+pricesRouter.get('/trade-desk', async (req: Request, res: Response) => {
+  try {
+    const { getSupabase } = await import('../../services/supabase.js')
+    const supabase = getSupabase()
+    if (!supabase) {
+      return res.status(503).json({ error: 'Database not configured' })
+    }
+
+    const days = Math.min(parseInt(req.query.days as string) || 7, 90)
+    const groupJid = req.query.groupJid as string | undefined
+    const sinceDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+
+    // Fetch all three Gold tables in parallel
+    let volumeQuery = supabase
+      .from('gold_daily_trade_volume')
+      .select('trade_date, group_jid, deal_count, total_usdt, total_brl, avg_rate, completed, expired, cancelled, rejected')
+      .gte('trade_date', sinceDate)
+      .order('trade_date', { ascending: false })
+      .limit(500)
+
+    let spreadQuery = supabase
+      .from('gold_spread_effectiveness')
+      .select('trade_date, group_jid, avg_quoted_spread, avg_slippage, spread_capture_pct, deal_count')
+      .gte('trade_date', sinceDate)
+      .order('trade_date', { ascending: false })
+      .limit(500)
+
+    let responseQuery = supabase
+      .from('gold_operator_response_times')
+      .select('trade_date, group_jid, avg_quote_to_lock_s, avg_lock_to_complete_s, avg_total_deal_s, p50_total_deal_s, p95_total_deal_s, deal_count')
+      .gte('trade_date', sinceDate)
+      .order('trade_date', { ascending: false })
+      .limit(500)
+
+    if (groupJid) {
+      volumeQuery = volumeQuery.eq('group_jid', groupJid)
+      spreadQuery = spreadQuery.eq('group_jid', groupJid)
+      responseQuery = responseQuery.eq('group_jid', groupJid)
+    }
+
+    const [volumeResult, spreadResult, responseResult] = await Promise.all([
+      volumeQuery,
+      spreadQuery,
+      responseQuery,
+    ])
+
+    // Handle table-not-found gracefully (PGRST205 = PostgREST, 42P01 = Postgres)
+    const isNotFound = (code?: string) => code === 'PGRST205' || code === '42P01'
+    const volume = isNotFound(volumeResult.error?.code) ? [] : (volumeResult.data || [])
+    const spreads = isNotFound(spreadResult.error?.code) ? [] : (spreadResult.data || [])
+    const responses = isNotFound(responseResult.error?.code) ? [] : (responseResult.data || [])
+
+    // Check for real errors
+    if (volumeResult.error && !isNotFound(volumeResult.error.code)) throw volumeResult.error
+    if (spreadResult.error && !isNotFound(spreadResult.error.code)) throw spreadResult.error
+    if (responseResult.error && !isNotFound(responseResult.error.code)) throw responseResult.error
+
+    res.json({
+      days,
+      volume,
+      spreads,
+      responses,
+    })
+  } catch (error) {
+    logger.error('Failed to fetch trade desk data', {
+      event: 'trade_desk_fetch_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({ error: 'Failed to fetch trade desk data' })
+  }
 })

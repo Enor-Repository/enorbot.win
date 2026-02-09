@@ -3,6 +3,7 @@
  * Insights-first, executive-friendly layout with SVG icons
  */
 import { useState, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { ChevronDown, ChevronUp, TrendingUp } from 'lucide-react'
 import { API_ENDPOINTS } from '@/lib/api'
@@ -463,6 +464,9 @@ export function ActivityHeatmap({ groupId, days = 30, onCellClick }: ActivityHea
                               setHoveredCell(cell || { hour, dayOfWeek: dayIndex, count: 0 })
                               setMousePosition({ x: e.clientX, y: e.clientY })
                             }}
+                            onMouseMove={(e) => {
+                              setMousePosition({ x: e.clientX, y: e.clientY })
+                            }}
                             onMouseLeave={() => setHoveredCell(null)}
                           />
                         )
@@ -492,8 +496,8 @@ export function ActivityHeatmap({ groupId, days = 30, onCellClick }: ActivityHea
           )}
         </div>
 
-        {/* Hover Tooltip */}
-        {hoveredCell && hoveredCell.count > 0 && (
+        {/* Hover Tooltip — portal to body to escape backdrop-blur stacking context */}
+        {hoveredCell && hoveredCell.count > 0 && createPortal(
           <div
             className="fixed z-50 pointer-events-none bg-popover/95 backdrop-blur-sm border border-cyan-500/30 rounded-lg shadow-xl shadow-cyan-500/20 p-3 text-sm font-mono"
             style={{
@@ -512,7 +516,8 @@ export function ActivityHeatmap({ groupId, days = 30, onCellClick }: ActivityHea
                 <span className="text-muted-foreground">Top:</span> "{hoveredCell.topTrigger}"
               </div>
             )}
-          </div>
+          </div>,
+          document.body,
         )}
       </CardContent>
     </Card>

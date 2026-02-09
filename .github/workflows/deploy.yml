@@ -1,0 +1,72 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npx vitest run --reporter=dot
+
+      - name: Build bot (TypeScript)
+        run: npx tsc
+
+      - name: Build dashboard (Vite)
+        run: |
+          cd dashboard
+          npx vite build --outDir ../dist/dashboard
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        run: |
+          SSH="ssh -i ~/.ssh/deploy_key -o ConnectTimeout=10"
+          VPS="${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}"
+          VPS_PATH="/opt/enorbot"
+
+          # Sync dist/
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            dist/ "$VPS:$VPS_PATH/dist/"
+
+          # Sync package files
+          rsync -az \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            package.json package-lock.json ecosystem.config.cjs \
+            "$VPS:$VPS_PATH/"
+
+          # Install production deps & restart
+          $SSH $VPS "cd $VPS_PATH && npm ci --omit=dev --ignore-scripts"
+          $SSH $VPS "pm2 delete enorbot 2>/dev/null || true; cd $VPS_PATH && pm2 start dist/index.js --name enorbot -i 1 --cwd $VPS_PATH && pm2 save"
+
+          # Health check
+          for i in $(seq 1 15); do
+            RESULT=$($SSH $VPS "curl -sf http://localhost:3000/api/status 2>/dev/null" || true)
+            if echo "$RESULT" | grep -q '"status":"ok"'; then
+              echo "Health check passed (${i}s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Health check failed after 15s"
+          exit 1

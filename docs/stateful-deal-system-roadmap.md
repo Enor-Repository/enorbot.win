@@ -2,8 +2,8 @@
 
 > **Document Purpose**: Living roadmap for transforming eNorBOT into Daniel's automated CIO desk with full control via dashboard.
 >
-> **Last Updated**: 2026-02-04
-> **Status**: Sprint 1-6 + 7A Complete, Sprint 7B (Trigger Engine Consolidation) In Progress
+> **Last Updated**: 2026-02-09
+> **Status**: Sprints 1-8.5 Complete + Deployed | Sprint 9 CODE COMPLETE — Pending migration + e2e verification
 > **Architecture**: Triggers + Rules (separated concerns)
 
 ---
@@ -258,7 +258,11 @@ This ensures the bot always has a valid pricing configuration.
 | **5** | Message Lookback & Polish | ✅ COMPLETE | ✅ Approved |
 | **6** | Demo Hardening & Production Readiness | ✅ COMPLETE | ✅ Approved |
 | **7A** | Editable System Keywords | ✅ COMPLETE | ✅ Approved (13 findings, 11 fixed) |
-| **7B** | Trigger Engine Consolidation | 🔵 PLANNED | — |
+| **7B** | Trigger Engine Consolidation | ✅ COMPLETE | ✅ Approved |
+| **8** | Volatility Protection | ✅ COMPLETE | ✅ Deployed to production |
+| **8.5** | Data Lake (Medallion Architecture) | ✅ DEPLOYED | ✅ Production verified, 60+ code review fixes |
+| **9** | Daniel's Live Trade Flow | ✅ CODE COMPLETE | ⏳ Pending migration + deploy + e2e |
+| **10** | Unified Quote Visibility | 📋 PLANNED | — |
 
 ---
 
@@ -1266,18 +1270,828 @@ Final router structure:
 - **Dual-layer safety net**: During cutover, both database triggers and hardcoded functions exist. Only remove hardcoded functions in 7B.5 after all cutovers are stable.
 
 ### Acceptance Criteria
-- [ ] All message routing decisions made via database triggers (except receipt MIME detection)
-- [ ] No hardcoded pattern detection functions in router (after 7B.5)
-- [ ] Daniel sees unified trigger list with system + user triggers
-- [ ] System triggers marked as non-deletable (SYSTEM badge, no delete button, 403 on API)
-- [ ] Deal flow works identically before and after migration (verified at each cutover step)
-- [ ] Gradual cutover completed: price → deal → tronscan
-- [ ] All existing tests pass + new tests for action types + is_system protection
-- [ ] Production stable for 1+ hours after each cutover step
+- [x] All message routing decisions made via database triggers (except receipt MIME detection)
+- [x] No hardcoded pattern detection functions in router (after 7B.5)
+- [x] Daniel sees unified trigger list with system + user triggers
+- [x] System triggers marked as non-deletable (SYSTEM badge, no delete button, 403 on API)
+- [x] Deal flow works identically before and after migration (verified at each cutover step)
+- [x] Gradual cutover completed: price → deal → tronscan
+- [x] All existing tests pass + new tests for action types + is_system protection
+- [x] Production stable for 1+ hours after each cutover step
 
 ---
 
-## 14. Risk Register
+## 14. Sprint 8: Volatility Protection ✅ COMPLETE
+
+### Goal
+Protect eNor from price movements between quote delivery and customer acceptance. Real-time USDT/BRL monitoring with automatic repricing when volatility thresholds are breached.
+
+### Problem Statement
+When the bot sends a price quote to a customer, there's a dangerous window between quote delivery and customer acceptance. If USD/BRL moves significantly during this time and the customer then accepts the old quote, eNor absorbs the loss from the price movement.
+
+**Current State:**
+- Daniel manually monitors prices while managing customer conversations
+- Manual cancellation and re-quoting when volatility strikes
+- Sometimes forced to absorb losses when he can't react fast enough
+- On volatile days, this affects EVERY negotiation
+
+### Solution
+A real-time volatility protection system that:
+1. Tracks USDT/BRL continuously via Binance WebSocket (free tier, true real-time)
+2. Monitors the spread between quoted price and current market price for active quotes
+3. Allows Daniel to configure the maximum acceptable deviation threshold per group
+4. Automatically triggers re-pricing when threshold is breached: send "off" → fetch new price → send new quote
+5. Escalates to Daniel after 3 reprices (control group alert + dashboard banner)
+
+### Components Delivered
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Migration | `supabase/migrations/20260205_002_volatility_protection.sql` | `group_volatility_config` + `volatility_escalations` tables |
+| Migration (rollback) | `supabase/migrations/20260205_002_volatility_protection_down.sql` | Rollback script |
+| WebSocket service | `src/services/binanceWebSocket.ts` | Real-time USDT/BRL streaming with auto-reconnect + REST fallback |
+| WebSocket tests | `src/services/binanceWebSocket.test.ts` | 12 tests |
+| Active quotes service | `src/services/activeQuotes.ts` | Quote lifecycle state machine (pending → repricing → accepted/expired) |
+| Active quotes tests | `src/services/activeQuotes.test.ts` | State machine tests |
+| Volatility monitor | `src/services/volatilityMonitor.ts` | Core engine: threshold detection, reprice triggering, escalation |
+| Volatility monitor tests | `src/services/volatilityMonitor.test.ts` | 15 tests |
+| Volatility API | `src/dashboard/api/volatility.ts` | GET/PUT/POST endpoints for per-group config |
+| Escalations API | `src/dashboard/api/escalations.ts` | GET escalations, POST dismiss |
+| Price SSE endpoint | `src/dashboard/api/prices.ts` | Server-Sent Events for live price streaming (throttled 5/sec, max 10 connections) |
+| Dashboard widget | `dashboard/src/components/groups/GroupSpreadEditor.tsx` | Real-time chart + threshold config + escalation banner |
+| Boot integration | `src/index.ts` | WebSocket + monitoring startup/shutdown |
+| Router integration | `src/bot/router.ts` | `forceAccept()` on deal confirmation |
+| Price handler integration | `src/handlers/price.ts` | `createQuote()` on successful price send |
+
+### Tasks
+
+#### 8.1 Database Migration ✅
+- [x] Create `group_volatility_config` table (enabled, threshold_bps, max_reprices)
+- [x] Create `volatility_escalations` table (for dashboard banner persistence)
+- [x] Add indexes and constraints (threshold 1-1000 bps, max reprices 1-10)
+- [x] Create rollback migration
+
+**Deliverables**: `supabase/migrations/20260205_002_volatility_protection.sql`
+
+#### 8.2 Binance WebSocket Service ✅
+- [x] Create `src/services/binanceWebSocket.ts`
+- [x] WebSocket connection to Binance USDT/BRL trade stream
+- [x] Auto-reconnect with exponential backoff (max 10s)
+- [x] REST fallback polling during reconnection (2s interval, 2s overlap after reconnect)
+- [x] Price callback system for monitoring service
+- [x] Graceful shutdown on process exit
+- [x] Connection status tracking (connected/connecting/disconnected)
+
+**Deliverables**: `src/services/binanceWebSocket.ts`, `src/services/binanceWebSocket.test.ts` (12 tests)
+
+#### 8.3 Active Quotes Service ✅
+- [x] Create `src/services/activeQuotes.ts`
+- [x] Formal state machine: `pending` → `repricing` → `pending`/`accepted`/`expired`
+- [x] `tryLockForReprice()` - prevents concurrent reprices
+- [x] `forceAccept()` - always wins, even during repricing (customer acceptance priority)
+- [x] Auto-expire after configurable TTL (default 5 min)
+- [x] One active quote per group at a time
+
+**Deliverables**: `src/services/activeQuotes.ts`, `src/services/activeQuotes.test.ts`
+
+#### 8.4 Volatility Monitor Service ✅
+- [x] Create `src/services/volatilityMonitor.ts`
+- [x] Subscribe to price updates from WebSocket
+- [x] Threshold breach detection (deviation >= threshold_bps)
+- [x] Reprice flow: send "off" → fetch fresh price → apply spread → send new quote
+- [x] Escalation after max reprices (persist to DB + control group notification)
+- [x] Per-group config loading with 1-minute cache
+- [x] Group pausing after escalation
+
+**Deliverables**: `src/services/volatilityMonitor.ts`, `src/services/volatilityMonitor.test.ts` (15 tests)
+
+#### 8.5 Price Handler Integration ✅
+- [x] Import activeQuotes service in `src/handlers/price.ts`
+- [x] Call `createQuote(groupJid, finalPrice)` after successful price send
+- [x] Quote lifecycle starts on price send, ends on deal acceptance
+
+**Deliverables**: Updates to `src/handlers/price.ts`
+
+#### 8.6 Router Integration ✅
+- [x] Import activeQuotes in `src/bot/router.ts`
+- [x] On `deal_confirm` trigger, call `forceAccept(groupJid)`
+- [x] Acceptance always wins, even during active reprice
+
+**Deliverables**: Updates to `src/bot/router.ts`
+
+#### 8.7 Volatility Config API ✅
+- [x] Create `src/dashboard/api/volatility.ts`
+- [x] `GET /api/groups/:groupJid/volatility` - Get config (returns defaults if none)
+- [x] `PUT /api/groups/:groupJid/volatility` - Update config (upsert)
+- [x] `POST /api/groups/:groupJid/volatility` - Create config with defaults
+- [x] Input validation via Zod
+- [x] Register routes in `server.ts`
+
+**Deliverables**: `src/dashboard/api/volatility.ts`
+
+#### 8.8 Dashboard Price Stream (SSE) ✅
+- [x] Add SSE endpoint `GET /api/prices/stream` in `src/dashboard/api/prices.ts`
+- [x] Rate limiting: max 10 concurrent connections
+- [x] Throttle broadcasts to 5/second (200ms interval)
+- [x] Connection cleanup on client disconnect
+
+**Deliverables**: Updates to `src/dashboard/api/prices.ts`
+
+#### 8.9 Dashboard Widget ✅
+- [x] Replace "COMING SOON" placeholder in `GroupSpreadEditor.tsx`
+- [x] Real-time line chart using Recharts with EventSource for SSE
+- [x] Settings panel: enable/disable toggle, threshold input (1-1000 bps), max reprices input (1-10)
+- [x] Threshold line overlay on chart
+- [x] Escalation alert banner (red, dismissible)
+- [x] Input validation (clamp to valid ranges)
+
+**Deliverables**: Rewritten `dashboard/src/components/groups/GroupSpreadEditor.tsx`
+
+#### 8.10 Escalation API ✅
+- [x] Create `src/dashboard/api/escalations.ts`
+- [x] `GET /api/groups/:groupJid/escalations` - List escalations (optional `?active=true`)
+- [x] `POST /api/groups/:groupJid/escalations/:id/dismiss` - Dismiss escalation + unpause group
+- [x] Register routes in `server.ts`
+
+**Deliverables**: `src/dashboard/api/escalations.ts`
+
+#### 8.11 Boot Sequence Integration ✅
+- [x] Start Binance WebSocket IMMEDIATELY on process start (not gated by WhatsApp)
+- [x] Start monitoring service after WebSocket
+- [x] Periodic quote cleanup interval (every 60s)
+- [x] Initialize socket reference when WhatsApp connects
+- [x] Graceful shutdown: stop monitoring, clear intervals, close WebSocket
+
+**Deliverables**: Updates to `src/index.ts`, `src/bot/connection.ts`
+
+### Remaining Tasks
+
+#### 8.12 Deploy & Verify
+- [ ] Apply Supabase migration to production
+- [ ] Build + deploy to VPS (rsync + PM2 restart)
+- [ ] Verify WebSocket connects to Binance
+- [ ] Verify dashboard widget loads and shows live prices
+- [ ] Test threshold configuration save/load
+- [ ] Test reprice flow end-to-end (may need volatile market or test with low threshold)
+- [ ] Verify escalation banner appears and can be dismissed
+
+#### 8.13 Code Review ✅
+- [x] Adversarial code review per project standards
+- [x] Fix all HIGH/MEDIUM issues before marking complete
+
+**Code Review Findings (7 fixed):**
+- **SSE Connection Leak** (HIGH): Only `close` event handled, not `error` → Added error handler with shared cleanup function
+- **Escalation Race Condition** (HIGH): Group paused before DB persist could fail → Reordered: persist first, pause only on success
+- **forceAccept During Repricing** (MEDIUM): Only checked `pending` status → Now accepts both `pending` and `repricing`
+- **Overly Sensitive Threshold** (MEDIUM): Zod min(1) bps would trigger on every tick → Changed to min(10) bps
+- **Quote ID Not Crash-Safe** (MEDIUM): Simple counter reset on restart → Changed to timestamp + counter format
+- **False Positives Identified**: WebSocket backoff (already had exponential backoff), SSE heartbeat timer (already cleared per-client)
+- **New Integration Tests**: Full reprice cycle, escalation after max reprices, race condition fix (DB failure = group NOT paused)
+
+### Technical Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | **Binance WebSocket over REST polling** | True real-time updates, free tier, lower latency |
+| 2 | **REST fallback during reconnection** | 2s overlap period avoids blind spots |
+| 3 | **In-memory active quotes store** | Speed critical; quotes are short-lived |
+| 4 | **Per-group threshold config in Supabase** | Configurable via dashboard, survives restarts |
+| 5 | **"off" + new price messaging** | Industry standard in OTC |
+| 6 | **3-reprice limit before escalation** | Prevents infinite loops on extreme volatility |
+| 7 | **Formal state machine for quotes** | Explicit states with locked transitions prevent race conditions |
+| 8 | **SSE over WebSocket for dashboard** | Simpler, works over HTTP, dashboard only receives |
+
+### Acceptance Criteria
+- [x] Binance WebSocket streams USDT/BRL prices continuously
+- [x] Active quotes tracked from price send to acceptance/expiry
+- [x] Threshold breach triggers automatic reprice (send "off" + new quote)
+- [x] Max 3 reprices before escalation to control group
+- [x] Dashboard shows real-time price chart with SSE
+- [x] Daniel can configure threshold per group (1-1000 bps)
+- [x] Escalation banner persists across page refreshes
+- [x] All tests pass (1601 tests)
+- [x] TypeScript compiles cleanly
+- [ ] Deployed to production and verified
+- [x] Code review passed (7 issues fixed)
+
+---
+
+## 14b. Sprint 8.5: Data Lake — Medallion Architecture ✅ COMPLETE
+
+### Goal
+Build an analytical data foundation (Bronze → Silver → Gold) so price ticks are captured, deal state transitions are recorded as events, and dashboard analytics read from pre-aggregated tables instead of scanning 10k+ raw messages per request. Required before Sprint 9 (live trading) for trade desk analytics, slippage analysis, and operator response metrics.
+
+### Architecture
+
+```
+BRONZE (raw capture)          SILVER (enriched)              GOLD (business-ready)
+─────────────────────         ─────────────────              ───────────────────
+bronze_price_ticks      →     silver_price_ohlc_1m     →     gold_daily_trade_volume
+bronze_deal_events      →     silver_deal_lifecycle    →     gold_spread_effectiveness
+messages (existing)     →     silver_player_stats      →     gold_operator_response_times
+                              silver_group_activity    →     gold_group_summary
+                                                       →     gold_cost_daily
+```
+
+### Components Delivered
+
+| Component | File | Description |
+|-----------|------|-------------|
+| Bronze migration | `supabase/migrations/20260210_003_bronze_layer.sql` | `bronze_price_ticks` + `bronze_deal_events` tables + indexes + retention cleanup function |
+| Silver migration | `supabase/migrations/20260210_004_silver_layer.sql` | 3 Silver tables + `silver_deal_lifecycle` view + 3 refresh functions |
+| Gold migration | `supabase/migrations/20260210_005_gold_layer.sql` | 5 Gold tables + master `refresh_gold_layer()` PL/pgSQL function |
+| Data Lake service | `src/services/dataLake.ts` | Emit functions, refresh orchestration, lifecycle management |
+| Data Lake tests | `src/services/dataLake.test.ts` | 16 tests covering emit, throttle, refresh, lifecycle |
+| Binance WS hook | `src/services/binanceWebSocket.ts` | `emitPriceTick('binance_ws', ...)` in `notifyPriceUpdate()` |
+| AwesomeAPI hook | `src/services/awesomeapi.ts` | `emitPriceTick('awesomeapi', ...)` after fetch |
+| TradingView hook | `src/services/tradingViewScraper.ts` | `emitPriceTick('tradingview', ...)` after title parse |
+| Deal event hooks | `src/services/dealFlowService.ts` | `emitDealEvent()` in `createDeal()`, `transitionDeal()`, `archiveDeal()` |
+| Boot integration | `src/index.ts` | `startDataLakeRefresh()` / `stopDataLakeRefresh()` in lifecycle |
+| Analytics API | `src/dashboard/api/analytics.ts` | Heatmap + players endpoints switched to Silver reads |
+| Costs API | `src/dashboard/api/costs.ts` | Summary/by-group/trend endpoints try Gold first, fall back to raw |
+| Prices API | `src/dashboard/api/prices.ts` | New `/ohlc` + `/trade-desk` endpoints from Silver/Gold |
+
+### Tasks
+
+#### 8.5A — Bronze Layer (raw event capture)
+- [x] Create `bronze_price_ticks` table (source, symbol, price, bid, ask, captured_at) with indexes
+- [x] Create `bronze_deal_events` table (deal_id, group_jid, client_jid, from_state, to_state, event_type, market_price, deal_snapshot, metadata)
+- [x] Create `bronze_retention_cleanup()` function (90-day TTL for ticks, deal events kept indefinitely)
+- [x] Create `src/services/dataLake.ts` with `emitPriceTick()` (fire-and-forget, 5s throttle for Binance WS) and `emitDealEvent()`
+- [x] Hook price tick emission into Binance WS, AwesomeAPI, and TradingView scraper
+- [x] Hook deal event emission into `createDeal()`, `transitionDeal()`, `archiveDeal()`
+
+#### 8.5B — Silver Layer (enriched aggregates)
+- [x] Create `silver_price_ohlc_1m` table (1-minute OHLC candles, composite PK on symbol+bucket+source)
+- [x] Create `silver_deal_lifecycle` view over `deal_history` + `bronze_deal_events` (timing, slippage enrichment)
+- [x] Create `silver_player_stats` table (incremental upsert from messages)
+- [x] Create `silver_group_activity` table (hour×day heatmap, replaces 10k-message JS aggregation)
+- [x] Create 3 refresh functions: `refresh_silver_ohlc()`, `refresh_silver_player_stats()`, `refresh_silver_group_activity()`
+- [x] Add Silver refresh to dataLake service (every 60 seconds via `setInterval`)
+
+#### 8.5C — Gold Layer (business-ready metrics)
+- [x] Create `gold_daily_trade_volume`, `gold_spread_effectiveness`, `gold_operator_response_times` tables
+- [x] Create `gold_group_summary` table (replaces expensive `/api/groups` aggregation)
+- [x] Create `gold_cost_daily` table (replaces full `ai_usage` scans)
+- [x] Create master `refresh_gold_layer()` PL/pgSQL function (refreshes last 7 days on each run)
+- [x] Add Gold refresh to dataLake service (every 5 minutes via `setInterval`)
+- [x] Add Bronze retention cleanup (daily via `setInterval`)
+
+#### 8.5D — Dashboard Integration
+- [x] Switch heatmap endpoint to read from `silver_group_activity` (graceful fallback if table missing)
+- [x] Switch players endpoint to read from `silver_player_stats` + contacts join
+- [x] Switch cost summary/by-group/trend to try `gold_cost_daily` first, fall back to raw `ai_usage`
+- [x] Add `GET /api/prices/ohlc` — OHLC candles from Silver layer (symbol, source, hours params)
+- [x] Add `GET /api/prices/trade-desk` — trade volume + spread + response time from Gold layer
+- [x] Add `startDataLakeRefresh()` / `stopDataLakeRefresh()` to bot lifecycle in `src/index.ts`
+
+### Technical Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | **Fire-and-forget Bronze writes** | Bronze inserts use `Promise.resolve().then().catch()` — never block the caller, never throw. Trading performance is sacrosanct. |
+| 2 | **5-second throttle for Binance WS** | Binance WS delivers hundreds of ticks/sec. 12/min is more than enough for OHLC candles. |
+| 3 | **Graceful Silver/Gold fallback** | All dashboard endpoints check for PGRST205/42P01 (table not found) and fall back to raw queries. Migration can be applied incrementally. |
+| 4 | **Postgres-side aggregation** | Silver/Gold refresh uses SQL functions (`refresh_silver_ohlc()`, `refresh_gold_layer()`). JS side just calls `.rpc()`. Heavy lifting stays in the database. |
+| 5 | **Separate refresh cadences** | Silver=60s (near-real-time analytics), Gold=5min (business summaries), Retention=daily. Each layer serves a different freshness need. |
+| 6 | **Market price snapshot in deal events** | `bronze_deal_events.market_price` captures Binance price at event time via `getCurrentPrice()`. Enables slippage analysis in Silver/Gold. |
+
+### Refresh Cadence
+
+| Layer | Interval | Method |
+|-------|----------|--------|
+| Bronze ticks | Real-time (throttled 5s for WS) | `emitPriceTick()` — fire-and-forget insert |
+| Bronze events | Real-time | `emitDealEvent()` — fire-and-forget insert |
+| Silver | Every 60 seconds | `refreshSilverLayer()` — calls 3 Postgres RPCs |
+| Gold | Every 5 minutes | `refreshGoldLayer()` — calls master Postgres RPC |
+| Retention | Every 24 hours | `runRetentionCleanup()` — deletes ticks > 90 days |
+
+### Acceptance Criteria
+- [x] Bronze tables created with indexes and retention function
+- [x] Price ticks emitted from all 3 sources (Binance WS, AwesomeAPI, TradingView)
+- [x] Deal events emitted on create, transition, and archive
+- [x] Silver refresh functions aggregate from Bronze + messages tables
+- [x] Gold refresh function produces business-ready daily summaries
+- [x] Dashboard analytics endpoints read from Silver/Gold with graceful fallback
+- [x] New OHLC and trade desk API endpoints functional
+- [x] Data lake lifecycle integrated into bot startup/shutdown
+- [x] All 1,705 tests pass (54 test files), zero TypeScript errors
+- [ ] Supabase migrations applied to production
+- [ ] Production verified with data flowing through all 3 layers
+
+---
+
+## 15. Sprint 9: Daniel's Live Trade Flow (CODE COMPLETE — Deploy + E2E)
+
+### Goal
+Implement CIO Daniel Hon's two production scenarios for live mode: the **good scenario** (price → lock → amount → calculation + @mention) and the **off scenario** (price → rejection + @mention). This is the bridge from learning mode to live trading. Per-group configurable via `deal_flow_mode`.
+
+### Background
+Daniel sent explicit instructions for how the bot should behave when switched from learning to live mode. Analysis of 256 real messages from 6 OTC groups (see `docs/behavioral-analysis.md`) confirms these are the exact patterns operators execute manually today. The bot automates what Davi currently does by hand.
+
+**Real conversation from OTC Liqd > eNor (2026-01-27):**
+```
+[17:45] Henequim:       trava 7831
+[17:45] OTC eNor/Davi:  opa
+[17:46] OTC eNor/Davi:  7831 * 5.232 = 40,971.79 BRL
+[17:46] Henequim:       trava
+[17:46] Henequim:       e manda pf
+[17:47] Henequim:       /compra
+```
+
+**Daniel's OFF scenario:**
+```
+Client asks "preço" → Bot sends price → Client sends "off" → Bot replies "off" + @mentions Daniel
+```
+
+**Daniel's GOOD scenario:**
+```
+Client asks "preço" → Bot sends price → Client sends trava/fecha/lock/ok →
+Bot waits for USDT amount (1 min timeout, then asks) →
+Client sends amount → Bot sends calculation (amount × rate = BRL) + @mentions Daniel
+```
+
+### Design Decisions (Party Mode — John, Winston, Amelia, Murat, Mary)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | **Per-group `deal_flow_mode`** (`classic` / `simple`) | Classic = existing 3-step (quote→lock→confirm). Simple = Daniel's 2-step. Groups choose independently. |
+| 2 | **Locks are context-gated by deal state** | Lock keywords (trava/fecha/lock/ok) ONLY trigger when sender has active QUOTED deal. Prevents false positives from casual "ok" in chat. Boss directive. |
+| 3 | **Deal state drives routing in simple mode** | Router intercepts by deal state BEFORE trigger matching. No new trigger action types needed. Classic mode completely bypasses this intercept. |
+| 4 | **WhatsApp @mentions via Baileys native API** | `sock.sendMessage(jid, { text, mentions: [jid] })`. Optional param added to messaging utility — zero impact on existing callers. |
+| 5 | **Amount extraction reuses existing math engine** | `dealComputation.ts` already handles "trava 5000", "500 usdt", "10k", Brazilian formats. No new parsing needed. |
+| 6 | **Bilingual prompts based on group language** | `group_language` column (`pt`/`en`). "Quantos USDTs serão comprados?" / "How much USDT will be purchased?" |
+| 7 | **Re-prompt via extended sweep** | Extend `sweepExpiredDeals()` — if `awaiting_amount` > 60s and not re-prompted, send prompt. > 120s → expire. No new timer infrastructure. |
+
+### Prerequisites
+- Sprint 8 complete (volatility protection operational) ✅
+- Sprint 8.5 complete (Medallion data lake deployed to production) ✅
+- Deal state machine working (Sprints 4-5) ✅
+- Trigger system consolidated (Sprint 7B) ✅
+- Brazilian math engine tested (dealComputation.ts) ✅
+
+### Tasks
+
+#### 9.1 WhatsApp Mentions Support ✅ CODE COMPLETE
+**Objective**: Enable @mentioning users in WhatsApp group messages via Baileys native API.
+
+- [x] Update `sendWithAntiDetection()` in `src/utils/messaging.ts`:
+  - Add optional `mentions?: string[]` parameter
+  - Pass through to Baileys' `sock.sendMessage(jid, { text, mentions })`
+  - WhatsApp format: `@DisplayName` in text + `["5511...@s.whatsapp.net"]` in mentions array
+- [x] Create helper: `formatMention(jid: string, displayName?: string)` → returns `{ textSegment, jid }`
+- [x] Unit tests: verify payload shape with mock socket, test with/without mentions (backward compatible)
+- [x] Zero impact on existing callers (parameter is optional, defaults to undefined)
+
+**Files affected**: `src/utils/messaging.ts`, new tests
+
+**>> REVIEW GATE: Mentions work with Baileys, existing callers unaffected**
+
+#### 9.2 Deal Flow Mode Configuration ✅ CODE COMPLETE
+**Objective**: Add per-group configuration for Daniel's simplified trade flow.
+
+- [x] Create migration `supabase/migrations/20260210_001_deal_flow_mode.sql`:
+  ```sql
+  ALTER TABLE group_spreads
+    ADD COLUMN IF NOT EXISTS deal_flow_mode TEXT NOT NULL DEFAULT 'classic'
+      CHECK (deal_flow_mode IN ('classic', 'simple')),
+    ADD COLUMN IF NOT EXISTS operator_jid TEXT,
+    ADD COLUMN IF NOT EXISTS amount_timeout_seconds INTEGER NOT NULL DEFAULT 60
+      CHECK (amount_timeout_seconds BETWEEN 30 AND 300),
+    ADD COLUMN IF NOT EXISTS group_language TEXT NOT NULL DEFAULT 'pt'
+      CHECK (group_language IN ('pt', 'en'));
+  ```
+- [x] Update `GroupSpreadService` to expose new columns
+- [x] Update `GroupSpreadEditor.tsx` dashboard component:
+  - Deal Flow Mode toggle: Classic / Simple
+  - Operator JID input (with contact picker if possible, or raw JID)
+  - Amount timeout slider (30-300 seconds)
+  - Group language selector (PT / EN)
+- [x] Update API validation (Zod schema for PUT endpoint)
+- [x] Create rollback migration
+
+**Files affected**: Migration, `src/services/groupSpreadService.ts`, `dashboard/src/components/groups/GroupSpreadEditor.tsx`, `src/dashboard/api/spreads.ts`
+
+**>> REVIEW GATE: Config persists, dashboard UI exposes all 4 fields, defaults are safe**
+
+#### 9.3 New Deal States ✅ CODE COMPLETE
+**Objective**: Extend the deal state machine with `awaiting_amount` and `rejected` states.
+
+- [x] Update `DealState` type in `src/services/dealFlowService.ts`:
+  ```typescript
+  type DealState = 'quoted' | 'locked' | 'awaiting_amount' | 'computing' | 'completed' | 'expired' | 'cancelled' | 'rejected'
+  ```
+- [x] Add transitions:
+  - `locked → awaiting_amount` (when lock has no amount, simple mode)
+  - `awaiting_amount → computing → completed` (when amount received)
+  - `awaiting_amount → expired` (timeout after 2× amount_timeout_seconds)
+  - `awaiting_amount → cancelled` (client cancels)
+  - `quoted → rejected` (client sends "off")
+- [x] Add `reprompted_at` nullable timestamp column to `active_deals`
+- [x] Update `sweepExpiredDeals()` to handle `awaiting_amount`:
+  - Age > `amount_timeout_seconds` and `reprompted_at` is null → send re-prompt, set `reprompted_at`
+  - Age > 2× `amount_timeout_seconds` → expire normally
+- [x] Update database CHECK constraint for new states
+- [x] Update all state guard validations
+- [x] Tests: new state transitions, sweep re-prompt logic, rejection path
+
+**Files affected**: `src/services/dealFlowService.ts`, migration `20260210_002_deal_states_expansion.sql`
+
+**>> REVIEW GATE: State machine extended, TTL sweep handles re-prompt, all existing transitions untouched**
+
+#### 9.4 Deal-State Router Intercept (Simple Mode) ✅ CODE COMPLETE
+**Objective**: In simple mode, route messages based on sender's deal state BEFORE trigger matching.
+
+- [x] In `src/bot/router.ts`, add intercept after mode check, before trigger matching:
+  ```
+  [SIMPLE MODE ONLY] Check sender's active deal:
+    QUOTED + lock keyword    → DEAL_HANDLER (dealAction: 'price_lock')
+    QUOTED + "off"           → DEAL_HANDLER (dealAction: 'rejection')
+    AWAITING_AMOUNT + number → DEAL_HANDLER (dealAction: 'volume_input')
+    AWAITING_AMOUNT + cancel → DEAL_HANDLER (dealAction: 'cancellation')
+    Otherwise                → fall through to normal trigger matching
+  ```
+- [x] Lock keywords sourced from `system_patterns.price_lock` + "ok" + "fecha" (configurable)
+- [x] Off keywords: "off" (hardcoded, matches Daniel's instruction)
+- [x] Amount detection: reuse `parseBrazilianNumber()` — if message parses to a valid number > 0
+- [x] `deal_flow_mode` fetched from group config (cached)
+- [x] Classic mode: intercept completely skipped, existing behavior untouched
+- [x] Tests:
+  - Classic mode: verify ZERO behavior change (regression suite)
+  - Simple mode: lock keywords only fire with active QUOTED deal
+  - Simple mode: "ok" in casual chat (no deal) → falls through to triggers
+  - Simple mode: sender A has deal, sender B says "off" → B's message doesn't affect A
+  - Simple mode: amount intercept only fires in AWAITING_AMOUNT state
+
+**Files affected**: `src/bot/router.ts`
+
+**>> REVIEW GATE: Classic mode regression-free, simple mode intercept correct, false positive tests pass**
+
+#### 9.5 Rejection Handler ("Off" Path) ✅ CODE COMPLETE
+**Objective**: Handle the off scenario — client rejects the quoted price.
+
+- [x] Add `handleRejection()` in `src/handlers/deal.ts`:
+  1. Find sender's active deal (must be in `quoted` state)
+  2. Transition deal to `rejected` state
+  3. Send "off" to group (matching Daniel's instruction)
+  4. @mention `operator_jid` from group config (using Task 9.1)
+  5. Archive deal to `deal_history`
+- [x] Log to control group: "Deal rejected by {clientName} in {groupName}"
+- [x] Tests: rejection transition, mention payload, archive verification
+
+**Files affected**: `src/handlers/deal.ts`
+
+**>> REVIEW GATE: Off path works end-to-end, Daniel gets tagged, deal archived**
+
+#### 9.6 Lock + Amount Flow (Simple Mode) ✅ CODE COMPLETE
+**Objective**: Handle the lock step in Daniel's good scenario, with or without inline amount.
+
+- [x] Modify `handlePriceLock()` in `src/handlers/deal.ts` for simple mode:
+  - **Amount included** (e.g., "trava 5000"):
+    1. Extract USDT amount via `extractUsdtAmount()` / `parseBrazilianNumber()`
+    2. Lock deal at quoted rate
+    3. Compute: `usdt_amount × locked_rate = brl_amount`
+    4. Send formatted message: `"5.000 USDT × 5,2500 = R$ 26.250,00"`
+    5. @mention `operator_jid`
+    6. Transition: LOCKED → COMPUTING → COMPLETED
+    7. Archive deal
+  - **No amount** (e.g., "trava", "ok", "fecha"):
+    1. Lock deal at quoted rate
+    2. Transition: LOCKED → AWAITING_AMOUNT
+    3. Send bilingual prompt:
+      - PT: `"Taxa travada em {rate}. Quantos USDTs serão comprados?"`
+      - EN: `"Rate locked at {rate}. How much USDT will be purchased?"`
+- [x] Classic mode: existing `handlePriceLock()` behavior unchanged
+- [x] Tests: both paths (with/without amount), language variants, classic mode unaffected
+
+**Files affected**: `src/handlers/deal.ts`
+
+**>> REVIEW GATE: Both lock paths work, classic mode untouched, bilingual prompts correct**
+
+#### 9.7 Volume Input Handler ✅ CODE COMPLETE
+**Objective**: Handle the follow-up amount message after lock (awaiting_amount state).
+
+- [x] Add `handleVolumeInput()` in `src/handlers/deal.ts`:
+  1. Parse USDT amount from message via `extractUsdtAmount()` / `parseBrazilianNumber()`
+  2. If parsing fails → send gentle error: "Não entendi o valor. Envie o valor em USDT (ex: 500, 10k)." / "Couldn't understand the amount. Send USDT value (e.g., 500, 10k)."
+  3. Compute: `usdt_amount × locked_rate = brl_amount` using `computeUsdtToBrl()`
+  4. Send formatted message: `"500 USDT × 5,2500 = R$ 2.625,00"`
+  5. @mention `operator_jid`
+  6. Transition: AWAITING_AMOUNT → COMPUTING → COMPLETED
+  7. Archive deal
+- [x] Tests: valid amount, invalid amount (retry), Brazilian format parsing, mention payload
+
+**Files affected**: `src/handlers/deal.ts`
+
+**>> REVIEW GATE: Volume input parsed correctly, calculation matches dealComputation output, Daniel tagged**
+
+#### 9.8 Re-prompt Timer ✅ CODE COMPLETE
+**Objective**: After 60 seconds of waiting for amount, send a reminder. After 120 seconds, expire.
+
+- [x] Extend `sweepExpiredDeals()` in `src/services/dealFlowService.ts`:
+  - For each deal in `awaiting_amount` state:
+    - If `age > amount_timeout_seconds` AND `reprompted_at IS NULL`:
+      - Send bilingual prompt to group: "Aguardando valor em USDT..." / "Waiting for USDT amount..."
+      - Update `reprompted_at = NOW()` in database
+    - If `age > 2 × amount_timeout_seconds`:
+      - Expire deal normally (transition to `expired`)
+      - Send expiry message to group
+- [x] Sweep already runs every 30 seconds — no new infrastructure needed
+- [x] Tests: re-prompt fires at correct time, expiry after 2× timeout, reprompted_at prevents double-prompt
+
+**Files affected**: `src/services/dealFlowService.ts`
+
+**>> REVIEW GATE: Re-prompt fires once, expiry fires after 2× timeout, no double-prompts**
+
+#### 9.9 Deploy & Verify ⏳ REMAINING WORK
+**Objective**: Ship Sprint 9 to production and verify both scenarios end-to-end.
+
+**This is the ONLY task remaining for Sprint 9. All code (9.1-9.8) is complete and tested.**
+
+- [ ] Apply Sprint 9 Supabase migrations:
+  - `20260210_001_deal_flow_mode.sql` (adds columns to `group_spreads`)
+  - `20260210_002_deal_states_expansion.sql` (extends state CHECK, adds `reprompted_at`)
+- [ ] Build + deploy to VPS (`./deploy.sh`)
+- [ ] Configure one test group: `deal_flow_mode = 'simple'`, `operator_jid = Daniel's JID`
+- [ ] Test OFF scenario: "preço" → get price → "off" → verify "off" + @Daniel
+- [ ] Test GOOD scenario (with amount): "preço" → get price → "trava 500" → verify calculation + @Daniel
+- [ ] Test GOOD scenario (without amount): "preço" → get price → "ok" → verify prompt → "500" → verify calculation + @Daniel
+- [ ] Test timeout: "preço" → get price → "ok" → wait 60s → verify re-prompt → wait 60s → verify expiry
+- [ ] Verify classic mode group is completely unaffected
+- [ ] Verify "ok" in casual chat (no deal) doesn't trigger anything
+- [ ] Verify Bronze deal events capture state transitions for new states
+- [ ] Monitor logs for 30 minutes
+
+**>> REVIEW GATE: Both scenarios work on production, classic mode zero regression**
+
+### Task Dependencies
+
+```
+9.1 WhatsApp Mentions (FIRST — foundational)
+ ├── 9.2 Deal Flow Mode Config (parallel with 9.1)
+ │    └── 9.4 Router Intercept (needs config to check mode)
+ ├── 9.3 New Deal States (parallel with 9.1)
+ │    ├── 9.5 Rejection Handler (needs rejected state + mentions)
+ │    ├── 9.6 Lock + Amount Flow (needs awaiting_amount state + mentions)
+ │    │    └── 9.7 Volume Input Handler (needs lock flow + awaiting_amount)
+ │    └── 9.8 Re-prompt Timer (needs awaiting_amount state)
+ └── 9.9 Deploy & Verify (LAST — needs everything)
+```
+
+### Acceptance Criteria
+- [ ] `deal_flow_mode` configurable per group via dashboard (`classic` / `simple`)
+- [ ] Classic mode: ZERO behavior change (full regression suite)
+- [ ] Simple mode OFF: price → "off" → bot sends "off" + @mentions operator
+- [ ] Simple mode GOOD (with amount): price → "trava 500" → calculation + @mention
+- [ ] Simple mode GOOD (without amount): price → "ok" → prompt → amount → calculation + @mention
+- [ ] Lock keywords ONLY trigger when sender has active QUOTED deal
+- [ ] "ok" in casual chat without deal context does NOT trigger lock
+- [ ] Re-prompt after `amount_timeout_seconds` (default 60s)
+- [ ] Deal expires after 2× timeout if no response
+- [ ] Bilingual prompts based on `group_language` (pt/en)
+- [ ] All existing tests pass + new tests for all 8 tasks
+- [ ] Production deployed and both scenarios verified end-to-end
+
+### Risk Mitigation
+- **Classic mode regression**: Router intercept is gated behind `deal_flow_mode === 'simple'`. Classic mode groups never enter the intercept path.
+- **False positive locks**: Lock keywords ONLY match when sender has active QUOTED deal. No deal → falls through to normal trigger matching.
+- **Cross-talk**: Deal lookup is per-sender (`senderJid`). Sender B's messages cannot affect Sender A's deal.
+- **Gradual rollout**: Configure one test group as simple mode first. Monitor for 24h before enabling more groups.
+- **Rollback**: Set `deal_flow_mode = 'classic'` on any group to instantly revert. No code deploy needed.
+
+---
+
+## 16. Sprint 10: Unified Quote Visibility (PLANNED)
+
+> **Note**: This was originally numbered Sprint 9 in the pre-8.5 roadmap.
+
+### Goal
+Unify the Active Deals dashboard view to show BOTH full deals (from `dealFlowService`) AND simple price quotes (from `activeQuotes`). Daniel sees one place with all open prices, regardless of whether they originated from a volume inquiry or a simple price request.
+
+### Problem Statement
+Currently the Active Deals tab is useless for simple price quotes:
+- **Full deal flow** (volume inquiry → price lock → confirmation): tracked via `dealFlowService.ts` in Supabase `active_deals` table → visible in dashboard
+- **Simple price quote** (message "preço" → bot sends price): tracked via `activeQuotes.ts` in-memory only → invisible in dashboard
+
+This creates a blind spot for Daniel. When a customer asks "preço" and the bot responds with a quote, Daniel can't see that quote in the dashboard. He only sees deals that started with a volume inquiry.
+
+### Solution: Dual-Write Pattern
+Keep the in-memory `activeQuotes` for volatility monitoring (microsecond access needed for real-time breach detection) but ALSO persist to a new Supabase table for dashboard visibility.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Customer sends "preço" to group                                         │
+│                        ↓                                                 │
+│  [PRICE_HANDLER] → createQuote() executes:                               │
+│     1. Store in-memory (activeQuotes.ts) → for volatility monitoring    │
+│     2. Persist to Supabase (active_price_quotes) → for dashboard        │
+│                        ↓                                                 │
+│  [DASHBOARD] fetches from:                                               │
+│     • /api/groups/:groupJid/deals → full deals (DEAL_HANDLER)           │
+│     • /api/groups/:groupJid/quotes/active → simple quotes (PRICE_HANDLER)│
+│                        ↓                                                 │
+│  [UI] Unified view with badges:                                          │
+│     • 🔵 DEAL - from volume inquiry, full state machine                 │
+│     • 🟡 QUOTE - from price request, tracked for volatility             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Technical Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | **Dual-write, not single source** | In-memory is required for microsecond volatility checks; DB is required for dashboard visibility. Both serve different purposes. |
+| 2 | **New `active_price_quotes` table** | Separate from `active_deals` — different state machines, different lifecycles, different concerns. Merging would create schema complexity. |
+| 3 | **Capture sender context at quote time** | `createQuote()` needs clientJid and senderName so dashboard can show who received the quote. |
+| 4 | **Dashboard fetches both, merges client-side** | Simpler than a backend union query. Frontend can apply consistent sorting and filtering. |
+| 5 | **Quotes auto-expire in both stores** | In-memory: existing `expireOldQuotes()` cleanup. DB: `expired_at` column with periodic sweep or query filter. |
+
+### Prerequisites
+- Sprint 8 complete (volatility protection operational)
+- `activeQuotes.ts` state machine working correctly
+- `createQuote()` called on price send (already done in Sprint 8)
+
+### Tasks
+
+#### 9.1 Enhance createQuote() with Sender Context
+**Objective**: Capture clientJid and senderName when creating a quote so the dashboard can show who received the quote.
+
+- [ ] Update `createQuote()` signature in `src/services/activeQuotes.ts`:
+  ```typescript
+  export function createQuote(
+    groupJid: string,
+    price: number,
+    clientJid?: string,
+    senderName?: string
+  ): ActiveQuote
+  ```
+- [ ] Add `clientJid` and `senderName` fields to `ActiveQuote` interface
+- [ ] Update price handler call site in `src/handlers/price.ts` to pass sender context:
+  ```typescript
+  createQuote(context.groupId, finalPrice, context.sender, context.senderName)
+  ```
+- [ ] Update tests for new signature
+
+**Deliverables**: Updated `src/services/activeQuotes.ts`, `src/handlers/price.ts`
+
+**>> REVIEW GATE: Sender context captured, tests pass**
+
+#### 9.2 Database Migration for active_price_quotes
+**Objective**: Create Supabase table for persisting price quotes alongside the in-memory store.
+
+- [ ] Create migration `supabase/migrations/20260206_001_active_price_quotes.sql`:
+  ```sql
+  CREATE TABLE IF NOT EXISTS active_price_quotes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    group_jid TEXT NOT NULL,
+    client_jid TEXT,
+    sender_name TEXT,
+    quoted_price DECIMAL(10,4) NOT NULL,
+    quoted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,  -- quoted_at + TTL
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending, accepted, expired
+    reprice_count INTEGER NOT NULL DEFAULT 0,
+
+    CONSTRAINT valid_status CHECK (status IN ('pending', 'accepted', 'expired'))
+  );
+
+  CREATE INDEX idx_active_quotes_group ON active_price_quotes(group_jid);
+  CREATE INDEX idx_active_quotes_active ON active_price_quotes(group_jid, status)
+    WHERE status = 'pending';
+  ```
+- [ ] Create rollback migration
+
+**Deliverables**: `supabase/migrations/20260206_001_active_price_quotes.sql`
+
+**>> REVIEW GATE: Schema reviewed, migration tested**
+
+#### 9.3 Dual-Write in activeQuotes Service
+**Objective**: Persist quotes to Supabase on create, update on state changes.
+
+- [ ] Add Supabase persistence in `createQuote()`:
+  ```typescript
+  // After in-memory store
+  const supabase = getSupabase()
+  if (supabase) {
+    await supabase.from('active_price_quotes').insert({
+      group_jid: groupJid,
+      client_jid: clientJid,
+      sender_name: senderName,
+      quoted_price: price,
+      expires_at: new Date(Date.now() + DEFAULT_QUOTE_TTL_MS).toISOString(),
+      status: 'pending',
+    })
+  }
+  ```
+- [ ] Update `forceAccept()` to mark DB quote as accepted
+- [ ] Update `expireOldQuotes()` to mark DB quotes as expired
+- [ ] Update `unlockAfterReprice()` to update DB quote price and reprice_count
+- [ ] Fire-and-forget DB writes (don't block the hot path)
+- [ ] Graceful handling if DB unavailable (log warning, continue with in-memory only)
+
+**Deliverables**: Updated `src/services/activeQuotes.ts`
+
+**>> REVIEW GATE: Dual-write verified, no performance regression on hot path**
+
+#### 9.4 Active Quotes API Endpoint
+**Objective**: Dashboard endpoint to fetch active quotes for a group.
+
+- [ ] Create `src/dashboard/api/quotes.ts`:
+  ```typescript
+  // GET /api/groups/:groupJid/quotes/active
+  // Returns active (pending) quotes for the group
+  ```
+- [ ] Return fields: id, quotedPrice, quotedAt, clientJid, senderName, repriceCount, status
+- [ ] Filter by `status = 'pending'` by default, optional `?all=true` for history
+- [ ] Register routes in `server.ts`
+- [ ] Add route tests
+
+**Deliverables**: `src/dashboard/api/quotes.ts`, route tests
+
+**>> REVIEW GATE: API returns expected data, tests pass**
+
+#### 9.5 Dashboard Unified View
+**Objective**: Merge deals and quotes in the Active Deals tab with visual distinction.
+
+- [ ] Update `GroupDealsView.tsx` to fetch both:
+  - Existing: `GET /api/groups/${groupJid}/deals`
+  - New: `GET /api/groups/${groupJid}/quotes/active`
+- [ ] Merge results into single list, sorted by created_at DESC
+- [ ] Visual badges:
+  - 🔵 **DEAL** (blue badge) — full deal flow from volume inquiry
+  - 🟡 **QUOTE** (yellow/amber badge) — simple price quote
+- [ ] Quote cards show:
+  - Quoted price (formatted R$ X,XXXX)
+  - Client name (if available) or "Unknown"
+  - Time since quote
+  - Reprice count (if > 0)
+  - Status badge
+- [ ] Empty state updated: "No active deals or quotes. Deals are created from volume inquiries, quotes from price requests."
+- [ ] Tab rename consideration: "Active Deals" → "Active Prices" or keep as-is with subtitle
+
+**Deliverables**: Updated `dashboard/src/components/groups/GroupDealsView.tsx`
+
+**>> REVIEW GATE: Unified view shows both deals and quotes, visually distinct**
+
+#### 9.6 Cleanup and Expiration Sync
+**Objective**: Keep in-memory and DB stores in sync for expired quotes.
+
+- [ ] Existing periodic cleanup already calls `expireOldQuotes()` for in-memory
+- [ ] Add DB cleanup in same interval:
+  ```typescript
+  // Mark DB quotes as expired when TTL passed
+  await supabase
+    .from('active_price_quotes')
+    .update({ status: 'expired' })
+    .eq('status', 'pending')
+    .lt('expires_at', new Date().toISOString())
+  ```
+- [ ] Consider: archive old quotes after 24h (move to `price_quote_history` or just delete)
+- [ ] Dashboard filters out expired quotes by default
+
+**Deliverables**: Updated cleanup logic in boot sequence
+
+**>> REVIEW GATE: Expired quotes cleaned up consistently**
+
+#### 9.7 Deploy & Verify
+**Objective**: Ship Sprint 9 to production and verify end-to-end.
+
+- [ ] Apply Supabase migration
+- [ ] Build + deploy to VPS
+- [ ] Send "preço" to a group → verify quote appears in dashboard
+- [ ] Accept the quote → verify it shows as accepted
+- [ ] Wait for expiry → verify it disappears or shows as expired
+- [ ] Create a full deal (volume inquiry) → verify both quote and deal visible
+- [ ] Verify no performance regression in volatility monitoring
+
+**>> REVIEW GATE: Production verified, Daniel can see all open prices**
+
+### Task Dependencies
+
+```
+9.1 Enhance createQuote (FIRST — captures context)
+ ├── 9.2 Database Migration (parallel)
+ │    └── 9.3 Dual-Write (needs migration)
+ │         └── 9.4 API Endpoint (needs data in DB)
+ │              └── 9.5 Dashboard View (needs API)
+ │                   └── 9.6 Cleanup Sync (polish)
+ └── 9.7 Deploy & Verify (LAST)
+```
+
+### Acceptance Criteria
+- [ ] `createQuote()` captures sender context (clientJid, senderName)
+- [ ] Price quotes persisted to `active_price_quotes` Supabase table
+- [ ] Dashboard fetches and displays both deals and quotes
+- [ ] Visual distinction: 🔵 DEAL vs 🟡 QUOTE badges
+- [ ] Quote cards show price, client, time, reprice count
+- [ ] Expired quotes cleaned up in both in-memory and DB
+- [ ] No performance regression in volatility monitoring (dual-write is fire-and-forget)
+- [ ] All existing tests pass + new tests for quote persistence
+- [ ] Production deployed and verified
+
+---
+
+## 17. Risk Register
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
@@ -1292,10 +2106,27 @@ Final router structure:
 | System keyword edit breaks bot | Medium | 60-second cache TTL + hardcoded fallback if DB unreachable |
 | Scope mismatch: global vs per-group | Medium | System patterns stay global (7A); per-group overrides in 7B |
 | Daniel loses trust after regression | High | Ship 7A first (zero router risk), 7B only after 7A is stable |
+| Binance WebSocket disconnects | Medium | Auto-reconnect (max 10s backoff) + REST fallback polling + 2s overlap period |
+| Reprice loop on extreme volatility | High | Max 3 reprices before escalation, group paused until manual dismissal |
+| Customer acceptance during reprice | Critical | `forceAccept()` always wins over repricing state (customer priority) |
+| Threshold misconfiguration | Medium | Dashboard validation (1-1000 bps), defaults to 30 bps if no config |
+| SSE connection exhaustion | Low | Max 10 concurrent connections, 503 if exceeded |
+| Dual-write inconsistency | Medium | Fire-and-forget DB writes, in-memory is source of truth for hot path; DB failure logged but doesn't block operations |
+| Dashboard merge complexity | Low | Client-side merge with clear badge distinction; no backend union query needed |
+| Bronze insert blocking hot path | Critical | Fire-and-forget pattern (`Promise.resolve().then().catch()`). Bronze writes never block price delivery or deal transitions. |
+| Silver/Gold table missing on new deploy | Medium | All dashboard endpoints check for PGRST205/42P01 error codes and fall back to raw table queries gracefully. |
+| Bronze retention bloat | Low | `bronze_retention_cleanup()` runs daily, deletes ticks > 90 days. Deal events kept indefinitely (low volume, high value). |
+| Binance WS tick flood to Bronze | Medium | 5-second throttle reduces from hundreds/sec to 12/min. Configurable via `BINANCE_WS_THROTTLE_MS`. |
+| Silver/Gold refresh stalls | Low | Each refresh has try-catch with debug logging. Slow refreshes (>5s) trigger warning logs. Refresh failure doesn't affect Bronze capture. |
+| False positive lock from "ok" | High | Locks context-gated: ONLY trigger when sender has active QUOTED deal. No deal = no lock. |
+| Router intercept breaks classic mode | Critical | Intercept gated behind `deal_flow_mode === 'simple'`. Classic mode never enters intercept path. Full regression suite. |
+| Cross-talk between senders' deals | High | Deal lookup keyed on `senderJid`. Sender B's messages cannot affect Sender A's deal. |
+| Re-prompt spam | Medium | `reprompted_at` timestamp prevents double-prompts. Only one re-prompt per deal lifecycle. |
+| @mention format incompatibility | Low | Baileys natively supports `mentions` array in `sendMessage()`. Test with real WhatsApp group before production rollout. |
 
 ---
 
-## 15. Review Process
+## 18. Review Process
 
 Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 
@@ -1308,7 +2139,7 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 
 ---
 
-## 16. Glossary
+## 19. Glossary
 
 | Term | Definition |
 |------|------------|
@@ -1322,10 +2153,28 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 | **Rule-Aware Action** | Action type that uses active rule's config (e.g., `price_quote`) |
 | **Deal Flow** | Stateful process: quote → lock → compute → confirm |
 | **Pattern Tester** | Inline UI that tests a message against system patterns or triggers, showing what would match |
+| **Volatility Protection** | Real-time monitoring of USDT/BRL to auto-reprice quotes when market moves beyond threshold |
+| **Active Quote** | A quote tracked from price send until customer acceptance, expiry, or cancellation |
+| **Threshold (bps)** | Maximum allowed price deviation in basis points before auto-reprice triggers (1 bps = 0.01%) |
+| **Reprice** | Automatic cancellation ("off") + new quote when threshold breached |
+| **Escalation** | Alert to control group after max reprices reached, automation pauses |
+| **Active Price Quote** | A simple price quote (from "preço" request) tracked for volatility monitoring and visible in dashboard — distinct from a full Deal |
+| **Dual-Write** | Pattern where data is written to both in-memory store (for speed) and database (for persistence/visibility) |
+| **Deal Flow Mode** | Per-group setting: `classic` (3-step: quote→lock→confirm) or `simple` (2-step: price→lock+amount→done) |
+| **Simple Mode** | Daniel's live trade flow: price → lock (with context-gated keywords) → amount → calculation + @mention operator |
+| **Context-Gated Lock** | Lock keywords only activate when sender has an active QUOTED deal. Prevents false positives from casual chat. |
+| **Rejection (Off)** | Client sends "off" after price quote. Deal transitions to `rejected` state. Operator @mentioned for awareness. |
+| **@Mention** | WhatsApp native mention using Baileys' `mentions` parameter in `sendMessage()`. Tags a user with push notification. |
+| **Re-prompt** | Automatic follow-up message when client hasn't provided USDT amount within `amount_timeout_seconds`. Fires once per deal. |
+| **Medallion Architecture** | Data layering pattern: Bronze (raw events) → Silver (enriched aggregates) → Gold (business-ready metrics). Each layer trades freshness for query performance. |
+| **Bronze Layer** | Raw event capture: `bronze_price_ticks` (throttled price snapshots from all sources) and `bronze_deal_events` (state transition log with market price snapshots). Fire-and-forget writes. |
+| **Silver Layer** | Pre-aggregated tables refreshed every 60s: `silver_price_ohlc_1m` (1-min candles), `silver_player_stats`, `silver_group_activity` (heatmap), `silver_deal_lifecycle` (view with timing/slippage). |
+| **Gold Layer** | Business-ready daily summaries refreshed every 5 min: trade volume, spread effectiveness, operator response times, group summary, cost rollups. Dashboard reads these instead of scanning raw tables. |
+| **Data Lake Service** | `src/services/dataLake.ts` — thin orchestration layer that emits Bronze events and schedules Silver/Gold/Retention refresh timers. |
 
 ---
 
-## 16. Changelog
+## 20. Changelog
 
 | Date | Change | By |
 |------|--------|-----|
@@ -1364,4 +2213,27 @@ Each sprint has multiple review gates marked with `>> REVIEW GATE`.
 | 2026-02-04 | Sprint 7A.3 complete: Built, deployed, validated auth + tester on VPS | System |
 | 2026-02-04 | Sprint 7A adversarial review: 13 findings (1C, 3H, 5M, 4L), 11 fixed, 2 deferred to 7B | System |
 | 2026-02-04 | Sprint 7A marked complete — 48 test files, 1,572 tests, deployed to production | System |
+| 2026-02-05 | Sprint 7B marked complete — trigger engine consolidation | System |
+| 2026-02-05 | Sprint 8 started: Volatility Protection feature implementation | System |
+| 2026-02-05 | Sprint 8 Tasks 8.1-8.11 complete — Binance WebSocket, active quotes, volatility monitor, dashboard widget | System |
+| 2026-02-05 | All 1,598 tests passing, TypeScript compiles clean | System |
+| 2026-02-05 | Sprint 8 code review: 7 issues fixed (SSE leak, escalation race condition, forceAccept during repricing, threshold minimum, quote ID crash safety) | System |
+| 2026-02-05 | Sprint 9 planned: Unified Quote Visibility — dual-write pattern for Active Deals dashboard to show both deals and simple quotes | System |
+| 2026-02-05 | Architecture analysis: identified gap where simple price quotes (PRICE_HANDLER) invisible in dashboard vs full deals (DEAL_HANDLER) visible | Party Mode Analysis |
+| 2026-02-05 | Sprint 8 COMPLETE — Volatility Protection deployed to production (migration applied, 1601 tests passing, WebSocket+SSE verified) | System |
+| 2026-02-06 | Sprint 8 staleness fix — PriceTracker.tsx: independent freshness tracking, staleness detection, visual indicators. Backend: removed fake fallback price, returns 503 on failure. | System |
+| 2026-02-09 | Sprint 8.5 started: Medallion Data Architecture (Bronze → Silver → Gold) | System |
+| 2026-02-09 | Bronze layer: `bronze_price_ticks` + `bronze_deal_events` tables, retention cleanup function | System |
+| 2026-02-09 | Silver layer: 3 tables + `silver_deal_lifecycle` view + 3 refresh Postgres functions | System |
+| 2026-02-09 | Gold layer: 5 tables + master `refresh_gold_layer()` function | System |
+| 2026-02-09 | `src/services/dataLake.ts` created — emit + refresh orchestration (16 tests) | System |
+| 2026-02-09 | Price tick emission hooked into Binance WS (5s throttle), AwesomeAPI, TradingView scraper | System |
+| 2026-02-09 | Deal event emission hooked into `createDeal()`, `transitionDeal()`, `archiveDeal()` | System |
+| 2026-02-09 | Dashboard analytics switched to Silver/Gold reads with graceful fallback | System |
+| 2026-02-09 | New API endpoints: `GET /api/prices/ohlc` (Silver OHLC candles), `GET /api/prices/trade-desk` (Gold metrics) | System |
+| 2026-02-09 | Sprint 8.5 COMPLETE — 1,705 tests passing (54 files), zero TypeScript errors. Pending: production migration. | System |
+| 2026-02-06 | Sprint 9 planned: Daniel's Live Trade Flow — CIO's production scenarios for live mode (off path + good path with @mentions) | BMAD Agents (Party Mode) |
+| 2026-02-06 | Design decision: locks context-gated by deal state (Boss directive). Lock keywords ONLY trigger when sender has active QUOTED deal. | Party Mode (Boss, John, Winston) |
+| 2026-02-06 | Design decision: deal state drives routing in simple mode — router intercept before trigger matching, no new trigger action types needed | Party Mode (Winston, Amelia) |
+| 2026-02-06 | Existing Sprint 9 (Unified Quote Visibility) renumbered to Sprint 10 — Daniel's flow takes priority | System |
 

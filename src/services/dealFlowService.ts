@@ -20,25 +20,28 @@ import { logger } from '../utils/logger.js'
 import { ok, err, type Result } from '../utils/result.js'
 import type { GroupRule, PricingSource, SpreadMode } from './ruleService.js'
 import type { SpreadConfig, TradeSide } from './groupSpreadService.js'
+import { emitDealEvent } from './dataLake.js'
 
 // ============================================================================
 // Types
 // ============================================================================
 
 /** Deal states */
-export type DealState = 'quoted' | 'locked' | 'computing' | 'completed' | 'expired' | 'cancelled'
+export type DealState = 'quoted' | 'locked' | 'awaiting_amount' | 'computing' | 'completed' | 'expired' | 'cancelled' | 'rejected'
 
 /** Terminal states — deals in these states cannot transition further */
-const TERMINAL_STATES: DealState[] = ['completed', 'expired', 'cancelled']
+const TERMINAL_STATES: DealState[] = ['completed', 'expired', 'cancelled', 'rejected']
 
 /** Valid state transitions */
 const VALID_TRANSITIONS: Record<DealState, DealState[]> = {
-  quoted: ['locked', 'expired', 'cancelled'],
-  locked: ['computing', 'expired', 'cancelled'],
+  quoted: ['locked', 'expired', 'cancelled', 'rejected'],
+  locked: ['awaiting_amount', 'computing', 'expired', 'cancelled'],
+  awaiting_amount: ['computing', 'expired', 'cancelled'],
   computing: ['completed', 'cancelled'],
   completed: [],
   expired: [],
   cancelled: [],
+  rejected: [],
 }
 
 /** Completion reasons for terminal states */
@@ -47,6 +50,7 @@ export type CompletionReason =
   | 'expired'
   | 'cancelled_by_client'
   | 'cancelled_by_operator'
+  | 'rejected_by_client'
 
 /** Active deal record */
 export interface ActiveDeal {
@@ -69,6 +73,8 @@ export interface ActiveDeal {
   spreadMode: SpreadMode
   sellSpread: number
   buySpread: number
+  /** Sprint 9: When the awaiting_amount re-prompt was sent */
+  repromptedAt: Date | null
   metadata: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
@@ -123,6 +129,7 @@ interface ActiveDealRow {
   spread_mode: string
   sell_spread: number
   buy_spread: number
+  reprompted_at: string | null
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
@@ -242,6 +249,7 @@ function rowToDeal(row: ActiveDealRow): ActiveDeal {
     spreadMode: row.spread_mode as SpreadMode,
     sellSpread: Number(row.sell_spread),
     buySpread: Number(row.buy_spread),
+    repromptedAt: row.reprompted_at ? new Date(row.reprompted_at) : null,
     metadata: row.metadata || {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
@@ -283,7 +291,7 @@ function rowToHistory(row: DealHistoryRow): DealHistoryRecord {
 // ============================================================================
 
 /** Valid deal states */
-const VALID_STATES: DealState[] = ['quoted', 'locked', 'computing', 'completed', 'expired', 'cancelled']
+const VALID_STATES: DealState[] = ['quoted', 'locked', 'awaiting_amount', 'computing', 'completed', 'expired', 'cancelled', 'rejected']
 
 /** Valid trade sides */
 const VALID_SIDES: TradeSide[] = ['client_buys_usdt', 'client_sells_usdt']
@@ -333,7 +341,7 @@ export async function createDeal(input: CreateDealInput): Promise<Result<ActiveD
       .select('id, state')
       .eq('group_jid', input.groupJid)
       .eq('client_jid', input.clientJid)
-      .not('state', 'in', '("completed","expired","cancelled")')
+      .not('state', 'in', '("completed","expired","cancelled","rejected")')
       .limit(1)
 
     if (checkError) {
@@ -408,6 +416,17 @@ export async function createDeal(input: CreateDealInput): Promise<Result<ActiveD
       ttlExpiresAt: deal.ttlExpiresAt.toISOString(),
     })
 
+    // Bronze layer: emit deal creation event
+    emitDealEvent({
+      dealId: deal.id,
+      groupJid: deal.groupJid,
+      clientJid: deal.clientJid,
+      fromState: null,
+      toState: 'quoted',
+      eventType: 'created',
+      dealSnapshot: data as Record<string, unknown>,
+    })
+
     return ok(deal)
   } catch (e) {
     return err(`Unexpected error creating deal: ${e instanceof Error ? e.message : String(e)}`)
@@ -434,7 +453,7 @@ export async function getActiveDeals(groupJid: string): Promise<Result<ActiveDea
       .from('active_deals')
       .select('*')
       .eq('group_jid', groupJid)
-      .not('state', 'in', '("completed","expired","cancelled")')
+      .not('state', 'in', '("completed","expired","cancelled","rejected")')
       .order('created_at', { ascending: false })
 
     if (error) {
@@ -456,6 +475,17 @@ export async function getActiveDeals(groupJid: string): Promise<Result<ActiveDea
   } catch (e) {
     return err(`Unexpected error loading deals: ${e instanceof Error ? e.message : String(e)}`)
   }
+}
+
+/**
+ * Get a sender's active (non-terminal) deal in a group, if any.
+ * Used by the simple-mode router intercept to check deal state before trigger matching.
+ */
+export async function getActiveDealForSender(groupJid: string, senderJid: string): Promise<Result<ActiveDeal | null>> {
+  const result = await getActiveDeals(groupJid)
+  if (!result.ok) return err(result.error)
+  const deal = result.data.find((d) => d.clientJid === senderJid) ?? null
+  return ok(deal)
 }
 
 /**
@@ -536,7 +566,7 @@ export async function findClientDeal(
       .select('*')
       .eq('group_jid', groupJid)
       .eq('client_jid', clientJid)
-      .not('state', 'in', '("completed","expired","cancelled")')
+      .not('state', 'in', '("completed","expired","cancelled","rejected")')
       .order('created_at', { ascending: false })
       .limit(1)
 
@@ -641,6 +671,17 @@ async function transitionDeal(
       toState,
     })
 
+    // Bronze layer: emit deal transition event
+    emitDealEvent({
+      dealId,
+      groupJid,
+      clientJid: deal.clientJid,
+      fromState: deal.state,
+      toState,
+      eventType: toState,
+      dealSnapshot: data as Record<string, unknown>,
+    })
+
     return ok(updated)
   } catch (e) {
     return err(`Unexpected error transitioning deal: ${e instanceof Error ? e.message : String(e)}`)
@@ -723,6 +764,34 @@ export async function completeDeal(
 }
 
 /**
+ * Transition to awaiting amount: LOCKED → AWAITING_AMOUNT
+ * Used in simple mode when lock has no inline amount.
+ */
+export async function startAwaitingAmount(
+  dealId: string,
+  groupJid: string
+): Promise<Result<ActiveDeal>> {
+  return transitionDeal(dealId, groupJid, 'awaiting_amount', {}, 'deal_awaiting_amount')
+}
+
+/**
+ * Reject a deal: QUOTED → REJECTED
+ * Client sent "off" to decline the quoted price.
+ */
+export async function rejectDeal(
+  dealId: string,
+  groupJid: string
+): Promise<Result<ActiveDeal>> {
+  return transitionDeal(
+    dealId,
+    groupJid,
+    'rejected',
+    { metadata: { completion_reason: 'rejected_by_client' } },
+    'deal_rejected'
+  )
+}
+
+/**
  * Cancel a deal: any non-terminal state → CANCELLED
  */
 export async function cancelDeal(
@@ -740,7 +809,7 @@ export async function cancelDeal(
 }
 
 /**
- * Expire a deal: QUOTED or LOCKED → EXPIRED
+ * Expire a deal: QUOTED, LOCKED, or AWAITING_AMOUNT → EXPIRED
  * Called by TTL sweeper or on-demand when deal is accessed after TTL.
  */
 export async function expireDeal(
@@ -815,8 +884,94 @@ export async function extendDealTtl(
 }
 
 // ============================================================================
-// TTL Sweep
+// TTL Sweep & Re-prompt
 // ============================================================================
+
+/** Info about an awaiting_amount deal that needs a re-prompt or expiry */
+export interface AwaitingAmountDealInfo {
+  id: string
+  groupJid: string
+  clientJid: string
+  lockedRate: number | null
+  quotedRate: number
+  repromptedAt: Date | null
+  lockedAt: Date | null
+}
+
+/**
+ * Sprint 9: Find awaiting_amount deals that need re-prompt or expiry.
+ * Returns deals grouped by action needed.
+ */
+export async function getDealsNeedingReprompt(): Promise<Result<{
+  needsReprompt: AwaitingAmountDealInfo[]
+  needsExpiry: AwaitingAmountDealInfo[]
+}>> {
+  const supabase = getSupabase()
+  if (!supabase) return err('Supabase not initialized')
+
+  try {
+    const { data, error } = await supabase
+      .from('active_deals')
+      .select('id, group_jid, client_jid, locked_rate, quoted_rate, reprompted_at, locked_at')
+      .eq('state', 'awaiting_amount')
+      .limit(50)
+
+    if (error) return err(`Failed to query awaiting_amount deals: ${error.message}`)
+    if (!data || data.length === 0) return ok({ needsReprompt: [], needsExpiry: [] })
+
+    const needsReprompt: AwaitingAmountDealInfo[] = []
+    const needsExpiry: AwaitingAmountDealInfo[] = []
+
+    for (const row of data) {
+      const info: AwaitingAmountDealInfo = {
+        id: row.id,
+        groupJid: row.group_jid,
+        clientJid: row.client_jid,
+        lockedRate: row.locked_rate,
+        quotedRate: row.quoted_rate,
+        repromptedAt: row.reprompted_at ? new Date(row.reprompted_at) : null,
+        lockedAt: row.locked_at ? new Date(row.locked_at) : null,
+      }
+
+      // Age is measured from locked_at (when the deal entered locked/awaiting state)
+      const lockedAt = info.lockedAt ?? new Date()
+      const ageSeconds = (Date.now() - lockedAt.getTime()) / 1000
+
+      // We use a default timeout; the handler layer will check group-specific config
+      // For classification, use a generous threshold
+      if (info.repromptedAt !== null) {
+        // Already reprompted — check if enough time for expiry (2× timeout)
+        // The handler layer will validate against group-specific timeout
+        needsExpiry.push(info)
+      } else if (ageSeconds > 30) {
+        // Not yet reprompted and at least 30s old — might need reprompt
+        // The handler layer will validate against group-specific amount_timeout_seconds
+        needsReprompt.push(info)
+      }
+    }
+
+    return ok({ needsReprompt, needsExpiry })
+  } catch (e) {
+    return err(`Unexpected error in getDealsNeedingReprompt: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+/**
+ * Sprint 9: Mark a deal as reprompted (set reprompted_at = NOW()).
+ * Prevents double-prompts.
+ */
+export async function markReprompted(dealId: string): Promise<Result<void>> {
+  const supabase = getSupabase()
+  if (!supabase) return err('Supabase not initialized')
+
+  const { error } = await supabase
+    .from('active_deals')
+    .update({ reprompted_at: new Date().toISOString() })
+    .eq('id', dealId)
+
+  if (error) return err(`Failed to mark reprompted: ${error.message}`)
+  return ok(undefined)
+}
 
 /**
  * Sweep expired deals: find deals past TTL and transition to EXPIRED.
@@ -830,11 +985,11 @@ export async function sweepExpiredDeals(): Promise<Result<number>> {
   try {
     const now = new Date().toISOString()
 
-    // Find all expired deals in quotable/lockable states
+    // Find all expired deals in quotable/lockable/awaiting states
     const { data, error } = await supabase
       .from('active_deals')
       .select('id, group_jid')
-      .in('state', ['quoted', 'locked'])
+      .in('state', ['quoted', 'locked', 'awaiting_amount'])
       .lt('ttl_expires_at', now)
       .limit(50)
 
@@ -905,6 +1060,7 @@ export async function archiveDeal(
       ? deal.metadata.completion_reason
       : deal.state === 'completed' ? 'confirmed'
       : deal.state === 'expired' ? 'expired'
+      : deal.state === 'rejected' ? 'rejected_by_client'
       : null
 
     // Insert into deal_history
@@ -980,6 +1136,18 @@ export async function archiveDeal(
       groupJid,
       finalState: deal.state,
       completionReason,
+    })
+
+    // Bronze layer: emit archive event
+    emitDealEvent({
+      dealId,
+      groupJid,
+      clientJid: deal.clientJid,
+      fromState: deal.state,
+      toState: 'archived',
+      eventType: 'archived',
+      dealSnapshot: historyRow as Record<string, unknown>,
+      metadata: { completionReason },
     })
 
     return ok(historyRecord)

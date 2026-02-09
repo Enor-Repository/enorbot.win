@@ -31,6 +31,7 @@ vi.mock('./logger.js', () => ({
 import {
   sendWithAntiDetection,
   getTypingDuration,
+  formatMention,
   MIN_TYPING_MS,
   MAX_TYPING_MS,
 } from './messaging.js'
@@ -58,6 +59,32 @@ describe('getTypingDuration', () => {
     const uniqueDurations = new Set(durations)
     // Should have some variation (not all same value)
     expect(uniqueDurations.size).toBeGreaterThan(1)
+  })
+})
+
+describe('formatMention', () => {
+  it('returns textSegment with display name when provided', () => {
+    const result = formatMention('5511999999999@s.whatsapp.net', 'Daniel Hon')
+    expect(result.textSegment).toBe('@Daniel Hon')
+    expect(result.jid).toBe('5511999999999@s.whatsapp.net')
+  })
+
+  it('extracts phone number from JID when no display name provided', () => {
+    const result = formatMention('5511999999999@s.whatsapp.net')
+    expect(result.textSegment).toBe('@5511999999999')
+    expect(result.jid).toBe('5511999999999@s.whatsapp.net')
+  })
+
+  it('handles group JID format', () => {
+    const result = formatMention('120363123456789@g.us', 'Group Name')
+    expect(result.textSegment).toBe('@Group Name')
+    expect(result.jid).toBe('120363123456789@g.us')
+  })
+
+  it('preserves the full JID unchanged', () => {
+    const jid = '5511999999999@s.whatsapp.net'
+    const result = formatMention(jid, 'Test')
+    expect(result.jid).toBe(jid)
   })
 })
 
@@ -358,6 +385,87 @@ describe('sendWithAntiDetection', () => {
       jid: 'group@g.us',
       error: 'Send failed',
     })
+  })
+
+  it('sends message WITHOUT mentions when not provided (backward compat)', async () => {
+    const promise = sendWithAntiDetection(
+      mockSocket as never,
+      'group@g.us',
+      'Hello world'
+    )
+    await vi.runAllTimersAsync()
+    await promise
+
+    expect(mockSocket.sendMessage).toHaveBeenCalledWith('group@g.us', {
+      text: 'Hello world',
+    })
+    // Verify mentions key is NOT in the payload
+    const payload = mockSocket.sendMessage.mock.calls[0][1]
+    expect(payload).not.toHaveProperty('mentions')
+  })
+
+  it('sends message WITH mentions when provided', async () => {
+    const mentions = ['5511999999999@s.whatsapp.net']
+    const promise = sendWithAntiDetection(
+      mockSocket as never,
+      'group@g.us',
+      '@Daniel Hon deal completed',
+      mentions
+    )
+    await vi.runAllTimersAsync()
+    await promise
+
+    expect(mockSocket.sendMessage).toHaveBeenCalledWith('group@g.us', {
+      text: '@Daniel Hon deal completed',
+      mentions: ['5511999999999@s.whatsapp.net'],
+    })
+  })
+
+  it('sends message WITH multiple mentions', async () => {
+    const mentions = [
+      '5511999999999@s.whatsapp.net',
+      '5511888888888@s.whatsapp.net',
+    ]
+    const promise = sendWithAntiDetection(
+      mockSocket as never,
+      'group@g.us',
+      '@Daniel @Davi deal confirmed',
+      mentions
+    )
+    await vi.runAllTimersAsync()
+    await promise
+
+    const payload = mockSocket.sendMessage.mock.calls[0][1]
+    expect(payload.mentions).toEqual(mentions)
+    expect(payload.mentions).toHaveLength(2)
+  })
+
+  it('ignores empty mentions array (no mentions key in payload)', async () => {
+    const promise = sendWithAntiDetection(
+      mockSocket as never,
+      'group@g.us',
+      'Hello',
+      []
+    )
+    await vi.runAllTimersAsync()
+    await promise
+
+    const payload = mockSocket.sendMessage.mock.calls[0][1]
+    expect(payload).not.toHaveProperty('mentions')
+  })
+
+  it('ignores undefined mentions (backward compat)', async () => {
+    const promise = sendWithAntiDetection(
+      mockSocket as never,
+      'group@g.us',
+      'Hello',
+      undefined
+    )
+    await vi.runAllTimersAsync()
+    await promise
+
+    const payload = mockSocket.sendMessage.mock.calls[0][1]
+    expect(payload).not.toHaveProperty('mentions')
   })
 
   it('never throws exceptions (AC3)', async () => {

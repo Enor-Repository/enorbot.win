@@ -306,36 +306,21 @@ npm run build
 
 ### Deploy to VPS
 
-**Quick deploy with rsync (recommended):**
+**Automated deploy (recommended):**
 
 ```bash
-# Sync to staging, build, copy to production, restart
-sshpass -p 'OugwCu(RVUex-xbR5(@9' rsync -avz \
-  --exclude 'node_modules' --exclude '.git' --exclude '.env' \
-  --exclude 'auth_info_baileys' --exclude '*.log' --exclude '.claude' \
-  --exclude '_bmad' --exclude 'supabase/.temp' \
-  -e ssh ./ root@181.215.135.75:/root/eNorBOT/ && \
-sshpass -p 'OugwCu(RVUex-xbR5(@9' ssh root@181.215.135.75 \
-  "cd /root/eNorBOT && npm install && npm run build && \
-   cp -r dist/* /opt/enorbot/dist/ && pm2 restart enorbot"
+./deploy.sh          # Full deploy (bot + dashboard)
+./deploy.sh bot      # Bot only (skip dashboard build)
+./deploy.sh dash     # Dashboard only (skip bot build)
 ```
 
-**Manual deploy:**
+This builds locally, runs tests, rsyncs `dist/` + `package.json` + `ecosystem.config.cjs` to `/opt/enorbot/` on the VPS, installs deps, restarts PM2, and health-checks.
 
-```bash
-# Build locally
-npm run build
+**Dashboard URL:** https://enorbot.win (via Cloudflare Tunnel → `localhost:3004`)
 
-# Copy to VPS staging
-scp -r dist package.json package-lock.json ecosystem.config.cjs root@181.215.135.75:/root/eNorBOT/
+**SSH access:** `ssh -i ~/.ssh/hostinger_vps root@181.215.135.75`
 
-# On VPS: copy to production and restart
-ssh root@181.215.135.75 "cp -r /root/eNorBOT/dist/* /opt/enorbot/dist/ && pm2 restart enorbot"
-```
-
-**Important:** PM2 runs from `/opt/enorbot/` (production). The staging build happens in `/root/eNorBOT/`.
-
-**VPS Details:** See `docs/credentials.md` for host, user, and password.
+**VPS Details:** See `docs/credentials.md` for host, credentials, and tunnel config.
 
 ### PM2 Commands
 

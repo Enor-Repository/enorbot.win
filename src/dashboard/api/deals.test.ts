@@ -77,6 +77,7 @@ function makeMockDeal(overrides: Partial<ActiveDeal> = {}): ActiveDeal {
     spreadMode: 'bps',
     sellSpread: 0,
     buySpread: 0,
+    repromptedAt: null,
     metadata: { pricing_source: 'usdt_binance' },
     createdAt: new Date('2026-02-03T12:00:00Z'),
     updatedAt: new Date('2026-02-03T12:00:00Z'),

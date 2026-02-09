@@ -15,6 +15,8 @@ import {
   type TradeSide,
   type Currency,
   type Language,
+  type DealFlowMode,
+  type GroupLanguage,
 } from '../../services/groupSpreadService.js'
 import { getSupabase } from '../../services/supabase.js'
 
@@ -46,6 +48,20 @@ function isValidCurrency(currency: unknown): currency is Currency {
  */
 function isValidLanguage(lang: unknown): lang is Language {
   return lang === 'pt-BR' || lang === 'en'
+}
+
+/**
+ * Validate deal flow mode (Sprint 9)
+ */
+function isValidDealFlowMode(mode: unknown): mode is DealFlowMode {
+  return mode === 'classic' || mode === 'simple'
+}
+
+/**
+ * Validate group language (Sprint 9)
+ */
+function isValidGroupLanguage(lang: unknown): lang is GroupLanguage {
+  return lang === 'pt' || lang === 'en'
 }
 
 /**
@@ -127,6 +143,10 @@ spreadsRouter.put('/:groupJid', async (req: Request, res: Response) => {
       defaultSide,
       defaultCurrency,
       language,
+      dealFlowMode,
+      operatorJid,
+      amountTimeoutSeconds,
+      groupLanguage,
     } = req.body
 
     if (!groupJid) {
@@ -187,6 +207,37 @@ spreadsRouter.put('/:groupJid', async (req: Request, res: Response) => {
       }
     }
 
+    // Sprint 9: Validate new deal flow fields
+    if (dealFlowMode !== undefined && !isValidDealFlowMode(dealFlowMode)) {
+      return res.status(400).json({
+        error: 'Invalid dealFlowMode',
+        message: 'dealFlowMode must be "classic" or "simple"',
+      })
+    }
+
+    if (operatorJid !== undefined && operatorJid !== null && typeof operatorJid !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid operatorJid',
+        message: 'operatorJid must be a string or null',
+      })
+    }
+
+    if (amountTimeoutSeconds !== undefined) {
+      if (typeof amountTimeoutSeconds !== 'number' || amountTimeoutSeconds < 30 || amountTimeoutSeconds > 300) {
+        return res.status(400).json({
+          error: 'Invalid amountTimeoutSeconds',
+          message: 'amountTimeoutSeconds must be a number between 30 and 300',
+        })
+      }
+    }
+
+    if (groupLanguage !== undefined && !isValidGroupLanguage(groupLanguage)) {
+      return res.status(400).json({
+        error: 'Invalid groupLanguage',
+        message: 'groupLanguage must be "pt" or "en"',
+      })
+    }
+
     // Build config object with only provided fields
     const config: Partial<SpreadConfig> & { groupJid: string } = { groupJid }
 
@@ -197,6 +248,10 @@ spreadsRouter.put('/:groupJid', async (req: Request, res: Response) => {
     if (defaultSide !== undefined) config.defaultSide = defaultSide
     if (defaultCurrency !== undefined) config.defaultCurrency = defaultCurrency
     if (language !== undefined) config.language = language
+    if (dealFlowMode !== undefined) config.dealFlowMode = dealFlowMode
+    if (operatorJid !== undefined) config.operatorJid = operatorJid
+    if (amountTimeoutSeconds !== undefined) config.amountTimeoutSeconds = amountTimeoutSeconds
+    if (groupLanguage !== undefined) config.groupLanguage = groupLanguage
 
     const result = await upsertSpreadConfig(config)
 
@@ -305,7 +360,7 @@ spreadsRouter.post('/preview', async (req: Request, res: Response) => {
 
     // M3 fix: Use top-level import instead of dynamic import
     // Create temporary config for calculation
-    const tempConfig = {
+    const tempConfig: SpreadConfig = {
       groupJid: 'preview',
       spreadMode: mode,
       sellSpread: sell,
@@ -314,6 +369,10 @@ spreadsRouter.post('/preview', async (req: Request, res: Response) => {
       defaultSide: 'client_buys_usdt' as TradeSide,
       defaultCurrency: 'BRL' as Currency,
       language: 'pt-BR' as Language,
+      dealFlowMode: 'classic',
+      operatorJid: null,
+      amountTimeoutSeconds: 60,
+      groupLanguage: 'pt',
       createdAt: new Date(),
       updatedAt: new Date(),
     }

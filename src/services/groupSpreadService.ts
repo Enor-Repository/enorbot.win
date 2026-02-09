@@ -29,6 +29,12 @@ export type Currency = 'BRL' | 'USDT'
 /** Language for response formatting */
 export type Language = 'pt-BR' | 'en'
 
+/** Deal flow mode */
+export type DealFlowMode = 'classic' | 'simple'
+
+/** Group language for bilingual prompts (simpler than Language) */
+export type GroupLanguage = 'pt' | 'en'
+
 /** Spread configuration for a group */
 export interface SpreadConfig {
   groupJid: string
@@ -39,6 +45,14 @@ export interface SpreadConfig {
   defaultSide: TradeSide
   defaultCurrency: Currency
   language: Language
+  /** Sprint 9: Deal flow mode — 'classic' (3-step) or 'simple' (Daniel's 2-step) */
+  dealFlowMode: DealFlowMode
+  /** Sprint 9: Operator JID to @mention on deal completion/rejection */
+  operatorJid: string | null
+  /** Sprint 9: Seconds to wait for USDT amount after lock in simple mode */
+  amountTimeoutSeconds: number
+  /** Sprint 9: Language for bilingual prompts ('pt' or 'en') */
+  groupLanguage: GroupLanguage
   createdAt: Date
   updatedAt: Date
 }
@@ -53,6 +67,10 @@ interface SpreadConfigRow {
   default_side: TradeSide
   default_currency: Currency
   language: Language
+  deal_flow_mode: DealFlowMode
+  operator_jid: string | null
+  amount_timeout_seconds: number
+  group_language: GroupLanguage
   created_at: string
   updated_at: string
 }
@@ -66,6 +84,10 @@ const DEFAULT_CONFIG: Omit<SpreadConfig, 'groupJid' | 'createdAt' | 'updatedAt'>
   defaultSide: 'client_buys_usdt',
   defaultCurrency: 'BRL',
   language: 'pt-BR',
+  dealFlowMode: 'classic',
+  operatorJid: null,
+  amountTimeoutSeconds: 60,
+  groupLanguage: 'pt',
 }
 
 // ============================================================================
@@ -152,6 +174,10 @@ function rowToConfig(row: SpreadConfigRow): SpreadConfig {
     defaultSide: row.default_side,
     defaultCurrency: row.default_currency,
     language: row.language,
+    dealFlowMode: row.deal_flow_mode ?? 'classic',
+    operatorJid: row.operator_jid ?? null,
+    amountTimeoutSeconds: row.amount_timeout_seconds ?? 60,
+    groupLanguage: row.group_language ?? 'pt',
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   }
@@ -172,6 +198,10 @@ function configToRow(config: Partial<SpreadConfig> & { groupJid: string }): Part
   if (config.defaultSide !== undefined) row.default_side = config.defaultSide
   if (config.defaultCurrency !== undefined) row.default_currency = config.defaultCurrency
   if (config.language !== undefined) row.language = config.language
+  if (config.dealFlowMode !== undefined) row.deal_flow_mode = config.dealFlowMode
+  if (config.operatorJid !== undefined) row.operator_jid = config.operatorJid
+  if (config.amountTimeoutSeconds !== undefined) row.amount_timeout_seconds = config.amountTimeoutSeconds
+  if (config.groupLanguage !== undefined) row.group_language = config.groupLanguage
 
   return row
 }

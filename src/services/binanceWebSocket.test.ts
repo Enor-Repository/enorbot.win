@@ -13,6 +13,11 @@ const mockFetchPrice = vi.hoisted(() => vi.fn())
 vi.mock('../utils/logger.js', () => ({ logger: mockLogger }))
 vi.mock('./binance.js', () => ({ fetchPrice: mockFetchPrice }))
 
+// Mock data lake to prevent bronze tick side effects during tests
+vi.mock('./dataLake.js', () => ({
+  emitPriceTick: vi.fn(),
+}))
+
 // Mock WebSocket - must be a class-like constructor
 const mockWsInstance = {
   on: vi.fn(),

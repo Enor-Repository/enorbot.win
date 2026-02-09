@@ -24,14 +24,24 @@ vi.mock('../services/dealFlowService.js', () => ({
   startComputation: vi.fn(),
   completeDeal: vi.fn(),
   cancelDeal: vi.fn(),
+  rejectDeal: vi.fn(),
+  startAwaitingAmount: vi.fn(),
   sweepExpiredDeals: vi.fn(),
   archiveDeal: vi.fn(),
+  getDealsNeedingReprompt: vi.fn(),
+  markReprompted: vi.fn(),
+  expireDeal: vi.fn(),
+}))
+
+vi.mock('../bot/connection.js', () => ({
+  getSocket: vi.fn(),
 }))
 
 // Mock dealComputation
 vi.mock('../services/dealComputation.js', () => ({
   extractBrlAmount: vi.fn(),
   extractUsdtAmount: vi.fn(),
+  parseBrazilianNumber: vi.fn(),
   computeBrlToUsdt: vi.fn(),
   computeUsdtToBrl: vi.fn(),
   formatBrl: (v: number) => `R$ ${v.toFixed(2)}`,
@@ -93,8 +103,8 @@ vi.mock('../services/systemPatternService.js', () => ({
 }))
 
 // Import mocked modules
-import { findClientDeal, createDeal, lockDeal, startComputation, completeDeal, cancelDeal, archiveDeal } from '../services/dealFlowService.js'
-import { extractBrlAmount, extractUsdtAmount, computeBrlToUsdt, computeUsdtToBrl } from '../services/dealComputation.js'
+import { findClientDeal, createDeal, lockDeal, startComputation, completeDeal, cancelDeal, rejectDeal, startAwaitingAmount, archiveDeal } from '../services/dealFlowService.js'
+import { extractBrlAmount, extractUsdtAmount, parseBrazilianNumber, computeBrlToUsdt, computeUsdtToBrl } from '../services/dealComputation.js'
 import { fetchPrice } from '../services/binance.js'
 import { getSpreadConfig } from '../services/groupSpreadService.js'
 import { getActiveRule } from '../services/ruleService.js'
@@ -106,6 +116,8 @@ import {
   handlePriceLock,
   handleConfirmation,
   handleDealCancellation,
+  handleRejection,
+  handleVolumeInput,
 } from './deal.js'
 
 // ============================================================================
@@ -148,6 +160,7 @@ const MOCK_DEAL = {
   spreadMode: 'bps' as const,
   sellSpread: 50,
   buySpread: 30,
+  repromptedAt: null,
   metadata: {},
   createdAt: new Date(),
   updatedAt: new Date(),
@@ -540,6 +553,323 @@ describe('handleDealCancellation', () => {
       expect(result.data.action).toBe('no_action')
     }
     expect(cancelDeal).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// handleRejection Tests (Sprint 9)
+// ============================================================================
+
+describe('handleRejection', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(sendWithAntiDetection).mockResolvedValue({ ok: true, data: undefined })
+    vi.mocked(archiveDeal).mockResolvedValue({ ok: true, data: undefined as never })
+  })
+
+  it('rejects a QUOTED deal, sends "off" with @mention, and archives', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'quoted' } })
+    vi.mocked(rejectDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'rejected' } })
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { operatorJid: '5511888888888@s.whatsapp.net' } as never,
+    })
+
+    const context = createTestContext({ message: 'off' })
+    const result = await handleRejection(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_rejected')
+      expect(result.data.dealId).toBe('deal-uuid-1')
+    }
+    expect(rejectDeal).toHaveBeenCalledWith('deal-uuid-1', 'group-123@g.us')
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      'off @5511888888888',
+      ['5511888888888@s.whatsapp.net']
+    )
+  })
+
+  it('sends "off" without mention when no operator configured', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'quoted' } })
+    vi.mocked(rejectDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'rejected' } })
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { operatorJid: null } as never,
+    })
+
+    const context = createTestContext({ message: 'off' })
+    const result = await handleRejection(context)
+
+    expect(result.ok).toBe(true)
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      'off',
+      []
+    )
+  })
+
+  it('returns no_action when no active deal exists', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: null })
+
+    const context = createTestContext({ message: 'off' })
+    const result = await handleRejection(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('no_action')
+    }
+    expect(rejectDeal).not.toHaveBeenCalled()
+  })
+
+  it('returns no_action when deal is not in quoted state', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'locked' } })
+
+    const context = createTestContext({ message: 'off' })
+    const result = await handleRejection(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('no_action')
+    }
+    expect(rejectDeal).not.toHaveBeenCalled()
+  })
+
+  it('returns error when rejectDeal fails', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'quoted' } })
+    vi.mocked(rejectDeal).mockResolvedValue({ ok: false, error: 'DB error' })
+
+    const context = createTestContext({ message: 'off' })
+    const result = await handleRejection(context)
+
+    expect(result.ok).toBe(false)
+  })
+})
+
+// ============================================================================
+// handlePriceLock — Simple Mode Tests (Sprint 9, Task 9.6)
+// ============================================================================
+
+describe('handlePriceLock simple mode', () => {
+  const LOCKED_DEAL = { ...MOCK_DEAL, state: 'locked' as const, lockedRate: 5.25 }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(sendWithAntiDetection).mockResolvedValue({ ok: true, data: undefined })
+    vi.mocked(archiveDeal).mockResolvedValue({ ok: true, data: undefined as never })
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'quoted' } })
+    vi.mocked(lockDeal).mockResolvedValue({ ok: true, data: LOCKED_DEAL })
+    vi.mocked(extractBrlAmount).mockReturnValue(null)
+    vi.mocked(extractUsdtAmount).mockReturnValue(null)
+    vi.mocked(parseBrazilianNumber).mockReturnValue(null)
+  })
+
+  it('simple mode with inline amount: locks, computes, completes, sends calc + @mention', async () => {
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { dealFlowMode: 'simple', operatorJid: '5511888888888@s.whatsapp.net', groupLanguage: 'pt' } as never,
+    })
+    vi.mocked(parseBrazilianNumber).mockImplementation((input: string) => {
+      if (input === '5000') return 5000
+      return null
+    })
+    vi.mocked(computeUsdtToBrl).mockReturnValue({
+      ok: true,
+      data: { amountBrl: 26250, amountUsdt: 5000, rate: 5.25, display: '', formatted: { brl: '', usdt: '', rate: '' } },
+    })
+    vi.mocked(startComputation).mockResolvedValue({ ok: true, data: LOCKED_DEAL as never })
+    vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...LOCKED_DEAL, state: 'completed' } as never })
+
+    const context = createTestContext({ message: 'trava 5000' })
+    const result = await handlePriceLock(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_computed')
+    }
+    expect(startComputation).toHaveBeenCalled()
+    expect(completeDeal).toHaveBeenCalled()
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('×'),
+      ['5511888888888@s.whatsapp.net']
+    )
+  })
+
+  it('simple mode without amount: locks, transitions to awaiting_amount, sends prompt (PT)', async () => {
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { dealFlowMode: 'simple', operatorJid: null, groupLanguage: 'pt' } as never,
+    })
+    vi.mocked(startAwaitingAmount).mockResolvedValue({ ok: true, data: { ...LOCKED_DEAL, state: 'awaiting_amount' } as never })
+
+    const context = createTestContext({ message: 'ok' })
+    const result = await handlePriceLock(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_locked')
+      expect(result.data.message).toContain('Taxa travada')
+      expect(result.data.message).toContain('USDTs')
+    }
+    expect(startAwaitingAmount).toHaveBeenCalledWith('deal-uuid-1', 'group-123@g.us')
+  })
+
+  it('simple mode without amount: sends EN prompt when group language is EN', async () => {
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { dealFlowMode: 'simple', operatorJid: null, groupLanguage: 'en' } as never,
+    })
+    vi.mocked(startAwaitingAmount).mockResolvedValue({ ok: true, data: { ...LOCKED_DEAL, state: 'awaiting_amount' } as never })
+
+    const context = createTestContext({ message: 'ok' })
+    const result = await handlePriceLock(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.message).toContain('Rate locked')
+      expect(result.data.message).toContain('USDT')
+    }
+  })
+
+  it('classic mode: existing behavior unchanged (no simple mode branching)', async () => {
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { dealFlowMode: 'classic', operatorJid: null, groupLanguage: 'pt' } as never,
+    })
+
+    const context = createTestContext({ message: 'trava' })
+    const result = await handlePriceLock(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_locked')
+      expect(result.data.message).toContain('Taxa Travada')
+    }
+    expect(startAwaitingAmount).not.toHaveBeenCalled()
+    expect(startComputation).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// handleVolumeInput Tests (Sprint 9, Task 9.7)
+// ============================================================================
+
+describe('handleVolumeInput', () => {
+  const AWAITING_DEAL = { ...MOCK_DEAL, state: 'awaiting_amount' as const, lockedRate: 5.25 }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(sendWithAntiDetection).mockResolvedValue({ ok: true, data: undefined })
+    vi.mocked(archiveDeal).mockResolvedValue({ ok: true, data: undefined as never })
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: AWAITING_DEAL })
+    vi.mocked(extractUsdtAmount).mockReturnValue(null)
+    vi.mocked(parseBrazilianNumber).mockReturnValue(null)
+  })
+
+  it('parses amount, computes, completes deal, sends calc + @mention', async () => {
+    vi.mocked(extractUsdtAmount).mockReturnValue(5000)
+    vi.mocked(computeUsdtToBrl).mockReturnValue({
+      ok: true,
+      data: { amountBrl: 26250, amountUsdt: 5000, rate: 5.25, display: '', formatted: { brl: '', usdt: '', rate: '' } },
+    })
+    vi.mocked(startComputation).mockResolvedValue({ ok: true, data: AWAITING_DEAL as never })
+    vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...AWAITING_DEAL, state: 'completed' } as never })
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { operatorJid: '5511888888888@s.whatsapp.net', groupLanguage: 'pt' } as never,
+    })
+
+    const context = createTestContext({ message: '5000' })
+    const result = await handleVolumeInput(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_computed')
+      expect(result.data.message).toContain('×')
+    }
+    expect(startComputation).toHaveBeenCalled()
+    expect(completeDeal).toHaveBeenCalledWith('deal-uuid-1', 'group-123@g.us', {
+      amountBrl: 26250,
+      amountUsdt: 5000,
+    })
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('@5511888888888'),
+      ['5511888888888@s.whatsapp.net']
+    )
+  })
+
+  it('uses parseBrazilianNumber as fallback when extractUsdtAmount returns null', async () => {
+    vi.mocked(extractUsdtAmount).mockReturnValue(null)
+    vi.mocked(parseBrazilianNumber).mockReturnValue(10000)
+    vi.mocked(computeUsdtToBrl).mockReturnValue({
+      ok: true,
+      data: { amountBrl: 52500, amountUsdt: 10000, rate: 5.25, display: '', formatted: { brl: '', usdt: '', rate: '' } },
+    })
+    vi.mocked(startComputation).mockResolvedValue({ ok: true, data: AWAITING_DEAL as never })
+    vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...AWAITING_DEAL, state: 'completed' } as never })
+    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { operatorJid: null, groupLanguage: 'pt' } as never })
+
+    const context = createTestContext({ message: '10k' })
+    const result = await handleVolumeInput(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_computed')
+    }
+  })
+
+  it('sends gentle error message when amount cannot be parsed (PT)', async () => {
+    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { operatorJid: null, groupLanguage: 'pt' } as never })
+
+    const context = createTestContext({ message: 'abc' })
+    const result = await handleVolumeInput(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('no_action')
+    }
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('Não entendi')
+    )
+  })
+
+  it('sends gentle error message when amount cannot be parsed (EN)', async () => {
+    vi.mocked(getSpreadConfig).mockResolvedValue({ ok: true, data: { operatorJid: null, groupLanguage: 'en' } as never })
+
+    const context = createTestContext({ message: 'abc' })
+    const result = await handleVolumeInput(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('no_action')
+    }
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining("Couldn't understand")
+    )
+  })
+
+  it('returns no_action when no deal in awaiting_amount state', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: null })
+
+    const context = createTestContext({ message: '5000' })
+    const result = await handleVolumeInput(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('no_action')
+    }
+    expect(startComputation).not.toHaveBeenCalled()
   })
 })
 

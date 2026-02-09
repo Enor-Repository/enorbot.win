@@ -343,6 +343,10 @@ async function sendPriceResponse(
       defaultSide: 'client_buys_usdt' as const,
       defaultCurrency: 'BRL' as const,
       language: 'pt-BR' as const,
+      dealFlowMode: 'classic' as const,
+      operatorJid: null,
+      amountTimeoutSeconds: 60,
+      groupLanguage: 'pt' as const,
       createdAt: now,
       updatedAt: now,
     }
