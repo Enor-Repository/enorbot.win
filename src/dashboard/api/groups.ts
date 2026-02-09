@@ -422,7 +422,7 @@ groupsRouter.put('/:groupJid/players/:playerJid/role', async (req: Request, res:
       return res.status(400).json({ error: 'Invalid group JID format' })
     }
 
-    if (!playerJid || !/^\d+@s\.whatsapp\.net$/.test(playerJid)) {
+    if (!playerJid || !/^\d+@(s\.whatsapp\.net|lid)$/.test(playerJid)) {
       return res.status(400).json({ error: 'Invalid player JID format' })
     }
 
