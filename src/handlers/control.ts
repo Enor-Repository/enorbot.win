@@ -15,6 +15,7 @@ import { ok, type Result } from '../utils/result.js'
 import type { RouterContext } from '../bot/router.js'
 import { sendWithAntiDetection, formatMention } from '../utils/messaging.js'
 import { getActiveDeals, cancelDeal, archiveDeal } from '../services/dealFlowService.js'
+import { cancelQuote } from '../services/activeQuotes.js'
 // Story 7.4: Bot message logging to Supabase
 import { logBotMessage } from '../services/messageHistory.js'
 import {
@@ -1098,40 +1099,51 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
     return
   }
 
-  // "off off" → cancel deals + send off to active-mode groups that have deals
+  // "off off" → broadcast off to ALL active-mode groups + cancel any deals/quotes
   if (args[0].toLowerCase() === 'off') {
     const configs = await getAllGroupConfigs()
     const targetGroups: Array<{ groupJid: string; groupName: string }> = []
     let totalCancelled = 0
+    let quotesCleared = 0
 
-    // Only target active-mode groups with active deals
     for (const config of configs.values()) {
       if (config.mode !== 'active') continue
 
-      const dealsResult = await getActiveDeals(config.groupJid)
-      if (!dealsResult.ok || dealsResult.data.length === 0) continue
-
       targetGroups.push({ groupJid: config.groupJid, groupName: config.groupName })
 
-      for (const deal of dealsResult.data) {
-        const cancelResult = await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator')
-        if (cancelResult.ok) {
-          totalCancelled++
-          archiveDeal(deal.id, config.groupJid).catch(() => {})
+      // Cancel active deals (Supabase)
+      const dealsResult = await getActiveDeals(config.groupJid)
+      if (dealsResult.ok) {
+        for (const deal of dealsResult.data) {
+          const cancelResult = await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator')
+          if (cancelResult.ok) {
+            totalCancelled++
+            archiveDeal(deal.id, config.groupJid).catch(() => {})
+          }
         }
+      }
+
+      // Cancel active quote (in-memory)
+      if (cancelQuote(config.groupJid)) {
+        quotesCleared++
       }
     }
 
     if (targetGroups.length === 0) {
-      await sendControlResponse(context, 'Nenhum deal ativo em nenhum grupo.')
+      await sendControlResponse(context, 'Nenhum grupo ativo.')
       return
     }
 
     // Reply to CONTROLE first (instant feedback)
     const groupNames = targetGroups.map(g => g.groupName).join(', ')
+    const details: string[] = []
+    if (totalCancelled > 0) details.push(`${totalCancelled} deal(s) cancelados`)
+    if (quotesCleared > 0) details.push(`${quotesCleared} cotação(ões) cancelada(s)`)
+    const detailStr = details.length > 0 ? ' ' + details.join(', ') + '.' : ''
+
     await sendControlResponse(
       context,
-      `off enviado para ${targetGroups.length} grupo(s): ${groupNames}. ${totalCancelled} deal(s) cancelados.`
+      `off enviado para ${targetGroups.length} grupo(s): ${groupNames}.${detailStr}`
     )
 
     // Then send "off @operator" to each target group (with anti-detection)
@@ -1143,6 +1155,7 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
       event: 'off_all_processed',
       groupCount: targetGroups.length,
       totalCancelled,
+      quotesCleared,
       triggeredBy: context.sender,
     })
     return
@@ -1174,10 +1187,15 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
     }
   }
 
+  // Cancel active quote if any (in-memory)
+  const quoteCancelled = cancelQuote(match.groupId)
+
   // Reply to CONTROLE first (instant feedback)
-  const dealMsg = cancelledCount > 0
-    ? `${cancelledCount} deal(s) cancelados.`
-    : 'Nenhum deal ativo.'
+  const details: string[] = []
+  if (cancelledCount > 0) details.push(`${cancelledCount} deal(s) cancelados`)
+  if (quoteCancelled) details.push('cotação cancelada')
+  if (details.length === 0) details.push('Nenhum deal ativo')
+  const dealMsg = details.join(', ') + '.'
   await sendControlResponse(context, `off enviado para ${match.groupName}. ${dealMsg}`)
 
   // Then send "off @operator" to the target group (with anti-detection)

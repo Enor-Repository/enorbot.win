@@ -27,15 +27,27 @@ const mockGetPendingRecoveryReason = vi.hoisted(() => vi.fn().mockReturnValue(nu
 const mockGetQueueLength = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true, data: 0 }))
 const mockLogBotMessage = vi.hoisted(() => vi.fn())
 
+// Mock dealFlowService
+const mockGetActiveDeals = vi.hoisted(() => vi.fn())
+const mockCancelDeal = vi.hoisted(() => vi.fn())
+const mockArchiveDeal = vi.hoisted(() => vi.fn())
+
+// Mock activeQuotes
+const mockCancelQuote = vi.hoisted(() => vi.fn())
+
 // Mock groupConfig service
 const mockSetGroupMode = vi.hoisted(() => vi.fn())
 const mockGetAllGroupConfigs = vi.hoisted(() => vi.fn())
 const mockGetGroupModeStats = vi.hoisted(() => vi.fn())
 const mockFindGroupByName = vi.hoisted(() => vi.fn())
 const mockGetGroupsByMode = vi.hoisted(() => vi.fn())
+const mockResolveOperatorJid = vi.hoisted(() => vi.fn())
+const mockGetGroupModeSync = vi.hoisted(() => vi.fn())
+const mockFormatMention = vi.hoisted(() => vi.fn())
 
 vi.mock('../utils/messaging.js', () => ({
   sendWithAntiDetection: mockSendWithAntiDetection,
+  formatMention: mockFormatMention,
 }))
 
 vi.mock('../utils/logger.js', () => ({
@@ -63,6 +75,18 @@ vi.mock('../services/groupConfig.js', () => ({
   getGroupModeStats: mockGetGroupModeStats,
   findGroupByName: mockFindGroupByName,
   getGroupsByMode: mockGetGroupsByMode,
+  resolveOperatorJid: mockResolveOperatorJid,
+  getGroupModeSync: mockGetGroupModeSync,
+}))
+
+vi.mock('../services/dealFlowService.js', () => ({
+  getActiveDeals: mockGetActiveDeals,
+  cancelDeal: mockCancelDeal,
+  archiveDeal: mockArchiveDeal,
+}))
+
+vi.mock('../services/activeQuotes.js', () => ({
+  cancelQuote: mockCancelQuote,
 }))
 
 import {
@@ -134,6 +158,16 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
     setConnectionStatus('connected')
     mockSendWithAntiDetection.mockResolvedValue({ ok: true, data: undefined })
     mockSetGroupMode.mockResolvedValue({ ok: true, data: undefined })
+    mockGetActiveDeals.mockResolvedValue({ ok: true, data: [] })
+    mockCancelDeal.mockResolvedValue({ ok: true, data: undefined })
+    mockArchiveDeal.mockResolvedValue({ ok: true, data: undefined })
+    mockCancelQuote.mockReturnValue(false)
+    mockResolveOperatorJid.mockReturnValue(null)
+    mockGetGroupModeSync.mockReturnValue('active')
+    mockFormatMention.mockImplementation((jid: string) => ({
+      jid,
+      textSegment: `@${jid.replace('@s.whatsapp.net', '')}`,
+    }))
     mockGetAllGroupConfigs.mockResolvedValue(mockGroupConfigs)
     mockGetGroupModeStats.mockReturnValue({ learning: 1, assisted: 0, active: 1, paused: 0 })
     mockGetGroupsByMode.mockImplementation((mode: string) => {
@@ -682,6 +716,109 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
           })
         )
       })
+    })
+  })
+
+  // ==========================================================================
+  // Off Command Handler Tests
+  // ==========================================================================
+  describe('Off Command Handler', () => {
+    it('"off off" sends to all active-mode groups even without deals or quotes', async () => {
+      const context = { ...baseContext, message: 'off off' }
+
+      await handleControlMessage(context)
+
+      // Should send to otc@g.us (active mode) but not binance@g.us (learning)
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        'control-group@g.us',
+        { text: expect.stringContaining('off enviado para 1 grupo(s): Crypto OTC Brasil') }
+      )
+    })
+
+    it('"off off" cancels active quotes found along the way', async () => {
+      mockCancelQuote.mockImplementation((groupJid: string) => groupJid === 'otc@g.us')
+
+      const context = { ...baseContext, message: 'off off' }
+      await handleControlMessage(context)
+
+      expect(mockCancelQuote).toHaveBeenCalledWith('otc@g.us')
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        'control-group@g.us',
+        { text: expect.stringContaining('cotação') }
+      )
+    })
+
+    it('"off off" cancels active deals found along the way', async () => {
+      mockGetActiveDeals.mockResolvedValue({
+        ok: true,
+        data: [{ id: 'deal_1', group_jid: 'otc@g.us' }],
+      })
+
+      const context = { ...baseContext, message: 'off off' }
+      await handleControlMessage(context)
+
+      expect(mockCancelDeal).toHaveBeenCalledWith('deal_1', 'otc@g.us', 'cancelled_by_operator')
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        'control-group@g.us',
+        { text: expect.stringContaining('1 deal(s) cancelados') }
+      )
+    })
+
+    it('"off off" with no active-mode groups replies accordingly', async () => {
+      mockGetAllGroupConfigs.mockResolvedValueOnce(new Map([
+        ['binance@g.us', { ...mockGroupConfigs.get('binance@g.us')!, mode: 'learning' }],
+      ]))
+
+      const context = { ...baseContext, message: 'off off' }
+      await handleControlMessage(context)
+
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        'control-group@g.us',
+        { text: 'Nenhum grupo ativo.' }
+      )
+    })
+
+    it('"off <group>" cancels both deals and quotes', async () => {
+      mockGetActiveDeals.mockResolvedValue({
+        ok: true,
+        data: [{ id: 'deal_1', group_jid: 'otc@g.us' }],
+      })
+      mockCancelDeal.mockResolvedValue({ ok: true, data: undefined })
+      mockCancelQuote.mockReturnValue(true)
+
+      const context = { ...baseContext, message: 'off otc' }
+      await handleControlMessage(context)
+
+      expect(mockCancelDeal).toHaveBeenCalledWith('deal_1', 'otc@g.us', 'cancelled_by_operator')
+      expect(mockCancelQuote).toHaveBeenCalledWith('otc@g.us')
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        'control-group@g.us',
+        { text: expect.stringContaining('off enviado para Crypto OTC Brasil') }
+      )
+    })
+
+    it('"off <group>" reports quote cancelled when only quote active', async () => {
+      mockCancelQuote.mockReturnValue(true)
+
+      const context = { ...baseContext, message: 'off otc' }
+      await handleControlMessage(context)
+
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        'control-group@g.us',
+        { text: expect.stringContaining('cotação cancelada') }
+      )
+    })
+
+    it('"off <group>" with unknown group shows guidance', async () => {
+      mockFindGroupByName.mockReturnValueOnce(null)
+
+      const context = { ...baseContext, message: 'off nonexistent' }
+      await handleControlMessage(context)
+
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(
+        'control-group@g.us',
+        { text: expect.stringContaining('Grupo não encontrado') }
+      )
     })
   })
 

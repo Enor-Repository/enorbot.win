@@ -250,6 +250,31 @@ export function forceAccept(groupJid: string): void {
 }
 
 /**
+ * Cancel an active quote for a group (e.g., via "off" command).
+ * Removes the quote from the in-memory store.
+ * Returns true if a quote was found and cancelled.
+ */
+export function cancelQuote(groupJid: string): boolean {
+  const quote = quotes.get(groupJid)
+  if (!quote) return false
+
+  // Terminal states are already done
+  if (quote.status === 'accepted' || quote.status === 'expired') return false
+
+  const previousStatus = quote.status
+  quotes.delete(groupJid)
+
+  logger.info('Quote cancelled', {
+    event: 'quote_cancelled',
+    quoteId: quote.id,
+    groupJid,
+    previousStatus,
+  })
+
+  return true
+}
+
+/**
  * Clear pre-stated volume after consumption (prevents double-use on retry).
  */
 export function clearPreStatedVolume(groupJid: string): void {
