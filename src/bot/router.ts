@@ -264,6 +264,19 @@ async function trySimpleModeIntercept(
         context: { ...enrichedContext, dealAction: 'price_lock' },
       }
     }
+
+    // QUOTED + anything else (e.g., "consegue melhor?", "abaixa um pouco") → tag operator
+    logger.info('Simple mode intercept: unrecognized input in quoted state, tagging operator', {
+      event: 'simple_mode_intercept',
+      action: 'unrecognized_input',
+      groupId: enrichedContext.groupId,
+      sender: enrichedContext.sender,
+      dealId: deal.id,
+    })
+    return {
+      destination: 'DEAL_HANDLER',
+      context: { ...enrichedContext, dealAction: 'unrecognized_input' },
+    }
   }
 
   if (deal.state === 'locked') {

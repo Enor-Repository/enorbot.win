@@ -105,11 +105,6 @@ function buildQuoteMessage(deal: ActiveDeal, amountBrl: number | null, amountUsd
     lines.push('Responda *trava* para travar essa taxa.')
   }
 
-  const ttlMinutes = Math.ceil((deal.ttlExpiresAt.getTime() - Date.now()) / 60000)
-  if (ttlMinutes > 0) {
-    lines.push(`⏱️ Válido por ${ttlMinutes} min.`)
-  }
-
   return lines.join('\n')
 }
 
@@ -129,11 +124,6 @@ function buildLockMessage(deal: ActiveDeal): string {
 
   lines.push('')
   lines.push('Responda *fechado* para confirmar a operação.')
-
-  const ttlMinutes = Math.ceil((deal.ttlExpiresAt.getTime() - Date.now()) / 60000)
-  if (ttlMinutes > 0) {
-    lines.push(`⏱️ Válido por ${ttlMinutes} min.`)
-  }
 
   return lines.join('\n')
 }
@@ -255,9 +245,10 @@ async function getQuoteContext(groupJid: string): Promise<Result<{
 async function sendDealMessage(
   context: RouterContext,
   message: string,
-  messageType: BotMessageType
+  messageType: BotMessageType,
+  mentions?: string[]
 ): Promise<Result<void>> {
-  const result = await sendWithAntiDetection(context.sock, context.groupId, message)
+  const result = await sendWithAntiDetection(context.sock, context.groupId, message, mentions)
 
   if (result.ok) {
     logBotMessage({
@@ -1637,6 +1628,32 @@ async function handleUnrecognizedInput(
       groupId,
       clientJid: sender,
       message: 'Sent awaiting_amount feedback for unrecognized input',
+    })
+  }
+
+  // For quoted/locked states: tag the operator so the client isn't left hanging
+  // This covers negotiation attempts ("consegue melhor?"), questions, etc.
+  if (deal.state === 'quoted' || deal.state === 'locked') {
+    const operatorJid = resolveOperatorJid(groupId)
+    if (operatorJid) {
+      const mentionNumber = operatorJid.replace('@s.whatsapp.net', '')
+      await sendDealMessage(context, `@${mentionNumber}`, 'deal_state_hint', [operatorJid])
+    }
+
+    logger.info('Unrecognized input during active deal, operator tagged', {
+      event: 'deal_unrecognized_operator_tag',
+      dealState: deal.state,
+      dealId: deal.id,
+      groupId,
+      sender,
+    })
+
+    return ok({
+      action: 'no_action',
+      dealId: deal.id,
+      groupId,
+      clientJid: sender,
+      message: 'Unrecognized input, operator tagged',
     })
   }
 

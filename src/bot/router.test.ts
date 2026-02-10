@@ -705,11 +705,11 @@ describe('routeMessage simple mode intercept', () => {
       expect(result.context.dealAction).toBe('price_lock')
     })
 
-    it('does not intercept unrelated messages → falls through to normal routing', async () => {
+    it('intercepts unrelated messages in quoted state → tags operator via deal handler', async () => {
       const context = { ...baseContext, message: 'hello world' }
       const result = await routeMessage(context)
-      expect(result.destination).toBe('IGNORE')
-      expect(result.context.dealAction).toBeUndefined()
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('unrecognized_input')
     })
 
     it('intercepts a number ≥ 100 in QUOTED state → price_lock (auto-lock shortcut)', async () => {

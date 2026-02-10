@@ -850,7 +850,8 @@ describe('handleVolumeInput', () => {
     expect(sendWithAntiDetection).toHaveBeenCalledWith(
       expect.anything(),
       'group-123@g.us',
-      expect.stringContaining('Não entendi')
+      expect.stringContaining('Não entendi'),
+      undefined
     )
   })
 
@@ -867,7 +868,8 @@ describe('handleVolumeInput', () => {
     expect(sendWithAntiDetection).toHaveBeenCalledWith(
       expect.anything(),
       'group-123@g.us',
-      expect.stringContaining("Couldn't understand")
+      expect.stringContaining("Couldn't understand"),
+      undefined
     )
   })
 
@@ -1041,7 +1043,8 @@ describe('handlePriceLock — lock with no quote', () => {
     expect(sendWithAntiDetection).toHaveBeenCalledWith(
       expect.anything(),
       'group-123@g.us',
-      expect.stringContaining('cotação ativa')
+      expect.stringContaining('cotação ativa'),
+      undefined
     )
   })
 })
