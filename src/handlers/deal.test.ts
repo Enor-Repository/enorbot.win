@@ -625,8 +625,8 @@ describe('handleRejection', () => {
     expect(rejectDeal).not.toHaveBeenCalled()
   })
 
-  it('returns no_action when deal is not in quoted state', async () => {
-    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'locked' } })
+  it('returns no_action when deal is not in quoted or locked state', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'computing' } })
 
     const context = createTestContext({ message: 'off' })
     const result = await handleRejection(context)

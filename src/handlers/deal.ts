@@ -339,26 +339,69 @@ export async function handleVolumeInquiry(
     // Use active quote rate if available (persists from price response),
     // otherwise fetch fresh rate from Binance
     let quotedRate: number
+    let baseRate: number
     const activeQuote = getActiveQuote(groupId)
     if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
       quotedRate = activeQuote.quotedPrice
+      baseRate = activeQuote.basePrice
     } else {
       const quoteCtx = await getQuoteContext(groupId)
       if (!quoteCtx.ok) {
         return err(quoteCtx.error)
       }
       quotedRate = quoteCtx.data.quotedRate
+      baseRate = quoteCtx.data.baseRate
     }
     const comp = computeUsdtToBrl(bareAmount, quotedRate)
     if (!comp.ok) {
       return err(`Computation failed: ${comp.error}`)
     }
 
+    // Cancel any existing deal (client is superseding with a new amount)
+    const priorResult = await findClientDeal(groupId, sender)
+    if (priorResult.ok && priorResult.data !== null) {
+      await cancelDeal(priorResult.data.id, groupId, 'cancelled_by_client').catch(() => {})
+      archiveDeal(priorResult.data.id, groupId).catch(() => {})
+    }
+
+    // Create a LOCKED deal so "off" and "fechado" work on this rate
+    const cfgResult = await getSpreadConfig(groupId)
+    const side = cfgResult.ok ? cfgResult.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
+    const ttlSeconds = cfgResult.ok ? cfgResult.data.quoteTtlSeconds ?? 180 : 180
+
+    const dealResult = await createDeal({
+      groupJid: groupId,
+      clientJid: sender,
+      side,
+      quotedRate,
+      baseRate,
+      ttlSeconds,
+      spreadConfig: cfgResult.ok ? cfgResult.data : undefined,
+      amountUsdt: bareAmount,
+      amountBrl: comp.data.amountBrl,
+      metadata: {
+        senderName: context.senderName ?? null,
+        originalMessage: message.substring(0, 200),
+        flow: 'calculator_lock',
+      },
+    })
+
+    let dealId: string | undefined
+    if (dealResult.ok) {
+      dealId = dealResult.data.id
+      await lockDeal(dealId, groupId, {
+        lockedRate: quotedRate,
+        amountUsdt: bareAmount,
+        amountBrl: comp.data.amountBrl,
+      })
+    }
+
     const shortMsg = `📊 US$ 1,00 = R$ ${formatRate(quotedRate)}\n\n${formatUsdt(bareAmount)} → ${formatBrl(comp.data.amountBrl)}`
     await sendDealMessage(context, shortMsg, 'deal_quote')
 
-    logger.info('Bare-number shortcut: treated as USDT', {
-      event: 'deal_bare_number_usdt',
+    logger.info('Calculator lock: LOCKED deal created', {
+      event: 'deal_calculator_lock',
+      dealId,
       groupId,
       sender,
       quotedRate,
@@ -367,7 +410,8 @@ export async function handleVolumeInquiry(
     })
 
     return ok({
-      action: 'deal_quoted',
+      action: 'deal_locked',
+      dealId,
       groupId,
       clientJid: sender,
       message: shortMsg,
@@ -537,11 +581,51 @@ export async function handlePriceLock(
         const comp = computeUsdtToBrl(inlineAmount, rate)
         if (!comp.ok) return err(`Computation failed: ${comp.error}`)
 
+        // Cancel any existing deal (superseded by new calculation)
+        const priorResult = await findClientDeal(groupId, sender)
+        if (priorResult.ok && priorResult.data !== null) {
+          await cancelDeal(priorResult.data.id, groupId, 'cancelled_by_client').catch(() => {})
+          archiveDeal(priorResult.data.id, groupId).catch(() => {})
+        }
+
+        // Create a LOCKED deal so "off"/"fechado" work on this rate
+        const bridgeCfg = await getSpreadConfig(groupId)
+        const bridgeSide = bridgeCfg.ok ? bridgeCfg.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
+        const bridgeTtl = bridgeCfg.ok ? bridgeCfg.data.quoteTtlSeconds ?? 180 : 180
+
+        const bridgeDealResult = await createDeal({
+          groupJid: groupId,
+          clientJid: sender,
+          side: bridgeSide,
+          quotedRate: rate,
+          baseRate: activeQuote.basePrice,
+          ttlSeconds: bridgeTtl,
+          spreadConfig: bridgeCfg.ok ? bridgeCfg.data : undefined,
+          amountUsdt: inlineAmount,
+          amountBrl: comp.data.amountBrl,
+          metadata: {
+            senderName: context.senderName ?? null,
+            originalMessage: message.substring(0, 200),
+            flow: 'calculator_lock',
+          },
+        })
+
+        let bridgeDealId: string | undefined
+        if (bridgeDealResult.ok) {
+          bridgeDealId = bridgeDealResult.data.id
+          await lockDeal(bridgeDealId, groupId, {
+            lockedRate: rate,
+            amountUsdt: inlineAmount,
+            amountBrl: comp.data.amountBrl,
+          })
+        }
+
         const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(inlineAmount)} → ${formatBrl(comp.data.amountBrl)}`
         await sendDealMessage(context, calcMsg, 'deal_quote')
 
-        logger.info('Price lock with amount: calculator response (active quote preserved)', {
+        logger.info('Price lock with amount: LOCKED deal created (active quote preserved)', {
           event: 'deal_lock_calc',
+          dealId: bridgeDealId,
           groupId,
           sender,
           rate,
@@ -550,7 +634,8 @@ export async function handlePriceLock(
         })
 
         return ok({
-          action: 'deal_quoted',
+          action: 'deal_locked',
+          dealId: bridgeDealId,
           groupId,
           clientJid: sender,
           message: calcMsg,
@@ -902,11 +987,17 @@ export async function handleConfirmation(
       return err(completeResult.error)
     }
 
-    const completedDeal = completeResult.data
+    // Send confirmation with operator @tag
+    const operatorJid = resolveOperatorJid(groupId)
+    const mentions = operatorJid ? [operatorJid] : []
+    const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
+    const confirmMsg = `✅ US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(finalUsdt)} → ${formatBrl(finalBrl)}${mentionSuffix}`
 
-    // Send completion message
-    const completeMsg = buildCompletionMessage(completedDeal)
-    await sendDealMessage(context, completeMsg, 'deal_completed')
+    const sendResult = await sendWithAntiDetection(context.sock, groupId, confirmMsg, mentions)
+    if (sendResult.ok) {
+      logBotMessage({ groupJid: groupId, content: confirmMsg, messageType: 'deal_completed', isControlGroup: false })
+      recordMessageSent(groupId)
+    }
 
     // Archive the deal (fire-and-forget)
     archiveDeal(deal.id, groupId).catch((e) => {
@@ -917,7 +1008,17 @@ export async function handleConfirmation(
       })
     })
 
-    logger.info('Deal completed', {
+    // Log to Excel (fire-and-forget)
+    logDealToExcel({
+      groupId,
+      groupName: context.groupName,
+      clientIdentifier: context.senderName ?? sender,
+      volumeBrl: finalBrl,
+      quote: rate,
+      acquiredUsdt: finalUsdt,
+    })
+
+    logger.info('Deal completed with operator tag', {
       event: 'deal_completed',
       dealId: deal.id,
       groupId,
@@ -925,6 +1026,7 @@ export async function handleConfirmation(
       rate,
       amountBrl: finalBrl,
       amountUsdt: finalUsdt,
+      operatorMentioned: !!operatorJid,
     })
 
     return ok({
@@ -932,7 +1034,7 @@ export async function handleConfirmation(
       dealId: deal.id,
       groupId,
       clientJid: sender,
-      message: completeMsg,
+      message: confirmMsg,
     })
   }
 
@@ -1033,8 +1135,8 @@ export async function handleRejection(
     })
   }
 
-  if (deal.state !== 'quoted') {
-    logger.warn('Rejection attempted on non-quoted deal', {
+  if (deal.state !== 'quoted' && deal.state !== 'locked') {
+    logger.warn('Rejection attempted on non-rejectable deal', {
       event: 'deal_rejection_wrong_state',
       dealId: deal.id,
       groupId,
@@ -1049,8 +1151,12 @@ export async function handleRejection(
     })
   }
 
-  // Transition: QUOTED → REJECTED
-  const rejectResult = await rejectDeal(deal.id, groupId)
+  // Transition: QUOTED/LOCKED → REJECTED
+  // For LOCKED deals, cancel first then reject
+  const rejectFn = deal.state === 'locked'
+    ? cancelDeal(deal.id, groupId, 'cancelled_by_client')
+    : rejectDeal(deal.id, groupId)
+  const rejectResult = await rejectFn
   if (!rejectResult.ok) {
     return err(rejectResult.error)
   }
@@ -1270,12 +1376,52 @@ export async function handleDirectAmount(
     return err(`Computation failed: ${comp.error}`)
   }
 
+  // Cancel any existing deal (superseded by new calculation)
+  const priorResult = await findClientDeal(groupId, sender)
+  if (priorResult.ok && priorResult.data !== null) {
+    await cancelDeal(priorResult.data.id, groupId, 'cancelled_by_client').catch(() => {})
+    archiveDeal(priorResult.data.id, groupId).catch(() => {})
+  }
+
+  // Create a LOCKED deal so "off"/"fechado" work on this rate
+  const configResult = await getSpreadConfig(groupId)
+  const side = configResult.ok ? configResult.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
+  const ttlSeconds = configResult.ok ? configResult.data.quoteTtlSeconds ?? 180 : 180
+
+  const dealResult = await createDeal({
+    groupJid: groupId,
+    clientJid: sender,
+    side,
+    quotedRate: rate,
+    baseRate: activeQuote.basePrice,
+    ttlSeconds,
+    spreadConfig: configResult.ok ? configResult.data : undefined,
+    amountUsdt: amount,
+    amountBrl: comp.data.amountBrl,
+    metadata: {
+      senderName: context.senderName ?? null,
+      originalMessage: message.substring(0, 200),
+      flow: 'calculator_lock',
+    },
+  })
+
+  let dealId: string | undefined
+  if (dealResult.ok) {
+    dealId = dealResult.data.id
+    await lockDeal(dealId, groupId, {
+      lockedRate: rate,
+      amountUsdt: amount,
+      amountBrl: comp.data.amountBrl,
+    })
+  }
+
   // Send in standard format — active quote is NOT consumed so rate persists
   const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(amount)} → ${formatBrl(comp.data.amountBrl)}`
   await sendDealMessage(context, calcMsg, 'deal_quote')
 
-  logger.info('Direct amount calculator response (active quote preserved)', {
+  logger.info('Direct amount: LOCKED deal created (active quote preserved)', {
     event: 'deal_direct_amount_calc',
+    dealId,
     groupId,
     sender,
     rate,
@@ -1284,7 +1430,8 @@ export async function handleDirectAmount(
   })
 
   return ok({
-    action: 'deal_quoted',
+    action: 'deal_locked',
+    dealId,
     groupId,
     clientJid: sender,
     message: calcMsg,

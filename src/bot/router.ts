@@ -266,6 +266,42 @@ async function trySimpleModeIntercept(
     }
   }
 
+  if (deal.state === 'locked') {
+    // LOCKED + "off" → rejection (cancel the locked deal)
+    if (matchesKeyword(message, OFF_KEYWORDS)) {
+      logger.info('Simple mode intercept: rejection (locked + off)', {
+        event: 'simple_mode_intercept',
+        action: 'rejection',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'rejection' },
+      }
+    }
+
+    // LOCKED + confirmation keyword (fechado, ok, fecha) → confirmation
+    const confirmKeywords = [...getKeywordsForPatternSync('deal_confirmation'), ...EXTRA_LOCK_KEYWORDS]
+    if (matchesKeyword(message, confirmKeywords)) {
+      logger.info('Simple mode intercept: confirmation (locked)', {
+        event: 'simple_mode_intercept',
+        action: 'confirmation',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'confirmation' },
+      }
+    }
+
+    // LOCKED + bare number → fall through to normal routing
+    // (bare-number shortcut in handleVolumeInquiry will supersede the deal)
+  }
+
   if (deal.state === 'awaiting_amount') {
     // AWAITING_AMOUNT + cancel keyword → cancellation
     if (matchesKeyword(message, CANCEL_KEYWORDS_SYNC())) {
