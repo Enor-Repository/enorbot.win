@@ -336,11 +336,19 @@ export async function handleVolumeInquiry(
   const hasExplicitBrlMarker = /(?:R\$|reais|\bbrl\b)/i.test(message)
 
   if (bareAmount !== null && explicitUsdt === null && !hasExplicitBrlMarker) {
-    const quoteCtx = await getQuoteContext(groupId)
-    if (!quoteCtx.ok) {
-      return err(quoteCtx.error)
+    // Use active quote rate if available (persists from price response),
+    // otherwise fetch fresh rate from Binance
+    let quotedRate: number
+    const activeQuote = getActiveQuote(groupId)
+    if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+      quotedRate = activeQuote.quotedPrice
+    } else {
+      const quoteCtx = await getQuoteContext(groupId)
+      if (!quoteCtx.ok) {
+        return err(quoteCtx.error)
+      }
+      quotedRate = quoteCtx.data.quotedRate
     }
-    const { quotedRate } = quoteCtx.data
     const comp = computeUsdtToBrl(bareAmount, quotedRate)
     if (!comp.ok) {
       return err(`Computation failed: ${comp.error}`)
@@ -512,7 +520,44 @@ export async function handlePriceLock(
     // No deal — check for active quote bridge (price response → trava flow)
     const activeQuote = getActiveQuote(groupId)
     if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
-      // Bridge: create deal from active quote, then lock it
+      // Check for inline amount (e.g., "trava 3000", "2500 trava pfv")
+      // If found, just compute and respond — don't create a deal or consume the quote
+      let inlineAmount: number | null = null
+      const lockWords = message.trim().split(/\s+/)
+      for (const word of lockWords) {
+        const parsed = parseBrazilianNumber(word)
+        if (parsed !== null && parsed > 0) {
+          inlineAmount = parsed
+          break
+        }
+      }
+
+      if (inlineAmount !== null) {
+        const rate = activeQuote.quotedPrice
+        const comp = computeUsdtToBrl(inlineAmount, rate)
+        if (!comp.ok) return err(`Computation failed: ${comp.error}`)
+
+        const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(inlineAmount)} → ${formatBrl(comp.data.amountBrl)}`
+        await sendDealMessage(context, calcMsg, 'deal_quote')
+
+        logger.info('Price lock with amount: calculator response (active quote preserved)', {
+          event: 'deal_lock_calc',
+          groupId,
+          sender,
+          rate,
+          amountUsdt: inlineAmount,
+          amountBrl: comp.data.amountBrl,
+        })
+
+        return ok({
+          action: 'deal_quoted',
+          groupId,
+          clientJid: sender,
+          message: calcMsg,
+        })
+      }
+
+      // No inline amount — create deal from quote for lock flow
       forceAccept(groupId) // Close volatility monitoring
 
       const bridgeConfig = await getSpreadConfig(groupId)
@@ -1175,30 +1220,25 @@ export async function handleVolumeInput(
 // ============================================================================
 
 /**
- * Sprint 9.1: Handle direct USDT amount when an active quote exists but no deal.
- * This is the CIO's ideal flow:
- *   1. Client asks "price" → Bot sends rate (handled by price handler)
- *   2. Client sends USDT amount → This function handles it:
- *      - Computes USDT × rate = BRL
- *      - @mentions operator
- *      - Creates + archives deal for audit trail
- *      - Logs to Excel
+ * Handle direct USDT amount when an active quote exists but no deal.
+ * Calculator mode: uses the active quote rate, responds with standard format,
+ * and preserves the active quote so subsequent calculations use the same rate.
  */
 export async function handleDirectAmount(
   context: RouterContext
 ): Promise<Result<DealHandlerResult>> {
   const { groupId, sender, message } = context
 
-  logger.info('Direct amount detected (CIO flow)', {
+  logger.info('Direct amount detected', {
     event: 'deal_direct_amount',
     groupId,
     sender,
     messageLength: message.length,
   })
 
-  // 1. Get active quote (has rate from price response)
+  // Get active quote (has rate from price response)
   const activeQuote = getActiveQuote(groupId)
-  if (!activeQuote || activeQuote.status !== 'pending') {
+  if (!activeQuote || (activeQuote.status !== 'pending' && activeQuote.status !== 'repricing')) {
     logger.warn('Direct amount: no active quote found', {
       event: 'deal_direct_amount_no_quote',
       groupId,
@@ -1212,7 +1252,7 @@ export async function handleDirectAmount(
     })
   }
 
-  // 2. Parse USDT amount
+  // Parse USDT amount
   const amount = parseBrazilianNumber(message.trim())
   if (amount === null || amount < 100) {
     return ok({
@@ -1223,85 +1263,28 @@ export async function handleDirectAmount(
     })
   }
 
-  // 3. Compute USDT × quotedPrice = BRL
+  // Compute USDT × quotedPrice = BRL
   const rate = activeQuote.quotedPrice
   const comp = computeUsdtToBrl(amount, rate)
   if (!comp.ok) {
     return err(`Computation failed: ${comp.error}`)
   }
 
-  // 4. Resolve operator from playerRoles (set via `role` command)
-  const configResult = await getSpreadConfig(groupId)
-  const operatorJid = resolveOperatorJid(groupId)
-  const mentions = operatorJid ? [operatorJid] : []
+  // Send in standard format — active quote is NOT consumed so rate persists
+  const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(amount)} → ${formatBrl(comp.data.amountBrl)}`
+  await sendDealMessage(context, calcMsg, 'deal_quote')
 
-  // 5. Send terse calculation message: "5.000,00 USDT x 5,2234 = R$ 26.117,00 @operator"
-  const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
-  const calcMsg = `${formatUsdt(amount)} x ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}${mentionSuffix}`
-
-  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
-  if (sendResult.ok) {
-    logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
-    recordMessageSent(groupId)
-  }
-
-  // 6. Accept the quote (closes volatility monitoring)
-  forceAccept(groupId)
-
-  // 7. Create deal → compute → complete → archive (audit trail)
-  const side = configResult.ok ? configResult.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
-  const ttlSeconds = configResult.ok ? configResult.data.quoteTtlSeconds ?? 180 : 180
-
-  const dealResult = await createDeal({
-    groupJid: groupId,
-    clientJid: sender,
-    side,
-    quotedRate: rate,
-    baseRate: activeQuote.basePrice,
-    ttlSeconds,
-    spreadConfig: configResult.ok ? configResult.data : undefined,
-    amountUsdt: amount,
-    amountBrl: comp.data.amountBrl,
-    metadata: {
-      senderName: context.senderName ?? null,
-      originalMessage: message.substring(0, 200),
-      flow: 'direct_amount',
-    },
-  })
-
-  if (dealResult.ok) {
-    const deal = dealResult.data
-    // Fast-track: lock → compute → complete → archive
-    await lockDeal(deal.id, groupId, { lockedRate: rate, amountUsdt: amount, amountBrl: comp.data.amountBrl })
-    await startComputation(deal.id, groupId)
-    await completeDeal(deal.id, groupId, { amountBrl: comp.data.amountBrl, amountUsdt: amount })
-    archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
-  }
-
-  // 8. Log to Excel (fire-and-forget)
-  logDealToExcel({
-    groupId,
-    groupName: context.groupName,
-    clientIdentifier: context.senderName ?? sender,
-    volumeBrl: comp.data.amountBrl,
-    quote: rate,
-    acquiredUsdt: amount,
-  })
-
-  logger.info('Direct amount deal completed (CIO flow)', {
-    event: 'deal_direct_amount_completed',
-    dealId: dealResult.ok ? dealResult.data.id : null,
+  logger.info('Direct amount calculator response (active quote preserved)', {
+    event: 'deal_direct_amount_calc',
     groupId,
     sender,
     rate,
     amountUsdt: amount,
     amountBrl: comp.data.amountBrl,
-    operatorMentioned: !!operatorJid,
   })
 
   return ok({
-    action: 'deal_computed',
-    dealId: dealResult.ok ? dealResult.data.id : undefined,
+    action: 'deal_quoted',
     groupId,
     clientJid: sender,
     message: calcMsg,
