@@ -71,9 +71,13 @@ vi.mock('../services/ruleService.js', () => ({
 }))
 
 // Mock messaging
-vi.mock('../utils/messaging.js', () => ({
-  sendWithAntiDetection: vi.fn(),
-}))
+vi.mock('../utils/messaging.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/messaging.js')>()
+  return {
+    ...actual,
+    sendWithAntiDetection: vi.fn(),
+  }
+})
 
 // Mock messageHistory
 vi.mock('../services/messageHistory.js', () => ({
@@ -1196,6 +1200,32 @@ describe('handleDealRouted — unrecognized input with active quote (Phase 3)', 
       'group-123@g.us',
       '@5511888888888',
       ['5511888888888@s.whatsapp.net']
+    )
+  })
+
+  it('correctly formats LID-based operator JID (strips @lid suffix)', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue(MOCK_ACTIVE_QUOTE)
+    vi.mocked(resolveOperatorJid).mockReturnValue('178537680085165@lid')
+    vi.mocked(classifyOTCMessage).mockResolvedValue({
+      messageType: 'negotiation',
+      confidence: 'medium',
+      triggerPattern: 'melhorar',
+      volumeBrl: null,
+      volumeUsdt: null,
+      source: 'rules',
+      processingTimeMs: 1,
+      aiUsed: false,
+    })
+
+    const context = createTestContext({ message: 'melhorar?', dealAction: 'unrecognized_input' })
+    await handleDealRouted(context)
+
+    // formatMention strips @lid → "@178537680085165" (not "@178537680085165@lid")
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      '@178537680085165',
+      ['178537680085165@lid']
     )
   })
 })

@@ -22,7 +22,7 @@
 import { logger } from '../utils/logger.js'
 import { ok, err, type Result } from '../utils/result.js'
 import type { RouterContext } from '../bot/router.js'
-import { sendWithAntiDetection } from '../utils/messaging.js'
+import { sendWithAntiDetection, formatMention } from '../utils/messaging.js'
 import { logBotMessage } from '../services/messageHistory.js'
 import { recordMessageSent } from '../bot/state.js'
 import {
@@ -1655,8 +1655,8 @@ async function handleUnrecognizedInput(
       const operatorJid = resolveOperatorJid(groupId)
       const operatorTagged = !!operatorJid
       if (operatorJid) {
-        const mentionNumber = operatorJid.replace('@s.whatsapp.net', '')
-        await sendDealMessage(context, `@${mentionNumber}`, 'deal_state_hint', [operatorJid])
+        const mention = formatMention(operatorJid)
+        await sendDealMessage(context, mention.textSegment, 'deal_state_hint', [mention.jid])
       }
 
       return ok({
@@ -1695,8 +1695,8 @@ async function handleUnrecognizedInput(
   if (deal.state === 'quoted' || deal.state === 'locked') {
     const operatorJid = resolveOperatorJid(groupId)
     if (operatorJid) {
-      const mentionNumber = operatorJid.replace('@s.whatsapp.net', '')
-      await sendDealMessage(context, `@${mentionNumber}`, 'deal_state_hint', [operatorJid])
+      const mention = formatMention(operatorJid)
+      await sendDealMessage(context, mention.textSegment, 'deal_state_hint', [mention.jid])
     }
 
     logger.info('Unrecognized input during active deal, operator tagged', {
