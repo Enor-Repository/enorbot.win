@@ -1099,7 +1099,7 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
     return
   }
 
-  // "off off" → broadcast off to ALL active-mode groups + cancel any deals/quotes
+  // "off off" → cancel deals/quotes + send off ONLY to groups that had something active
   if (args[0].toLowerCase() === 'off') {
     const configs = await getAllGroupConfigs()
     const targetGroups: Array<{ groupJid: string; groupName: string }> = []
@@ -1109,11 +1109,22 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
     for (const config of configs.values()) {
       if (config.mode !== 'active') continue
 
+      // Check for active deals (Supabase)
+      const dealsResult = await getActiveDeals(config.groupJid)
+      const hasDeals = dealsResult.ok && dealsResult.data.length > 0
+
+      // Cancel active quote (in-memory) — returns true if one existed
+      const hadQuote = cancelQuote(config.groupJid)
+
+      // Only target groups that had something to cancel
+      if (!hasDeals && !hadQuote) continue
+
       targetGroups.push({ groupJid: config.groupJid, groupName: config.groupName })
 
-      // Cancel active deals (Supabase)
-      const dealsResult = await getActiveDeals(config.groupJid)
-      if (dealsResult.ok) {
+      if (hadQuote) quotesCleared++
+
+      // Cancel active deals
+      if (hasDeals) {
         for (const deal of dealsResult.data) {
           const cancelResult = await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator')
           if (cancelResult.ok) {
@@ -1122,15 +1133,10 @@ async function handleOffCommand(context: RouterContext, args: string[]): Promise
           }
         }
       }
-
-      // Cancel active quote (in-memory)
-      if (cancelQuote(config.groupJid)) {
-        quotesCleared++
-      }
     }
 
     if (targetGroups.length === 0) {
-      await sendControlResponse(context, 'Nenhum grupo ativo.')
+      await sendControlResponse(context, 'Nenhum deal ou cotação ativa em nenhum grupo.')
       return
     }
 

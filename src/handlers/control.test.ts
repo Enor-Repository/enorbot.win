@@ -723,15 +723,15 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
   // Off Command Handler Tests
   // ==========================================================================
   describe('Off Command Handler', () => {
-    it('"off off" sends to all active-mode groups even without deals or quotes', async () => {
+    it('"off off" skips active groups with no deals or quotes', async () => {
       const context = { ...baseContext, message: 'off off' }
 
       await handleControlMessage(context)
 
-      // Should send to otc@g.us (active mode) but not binance@g.us (learning)
+      // No deals, no quotes → nothing to cancel
       expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        { text: expect.stringContaining('off enviado para 1 grupo(s): Crypto OTC Brasil') }
+        { text: 'Nenhum deal ou cotação ativa em nenhum grupo.' }
       )
     })
 
@@ -774,7 +774,7 @@ describe('Control Handler - Epic 4 + Group Modes', () => {
 
       expect(mockSock.sendMessage).toHaveBeenCalledWith(
         'control-group@g.us',
-        { text: 'Nenhum grupo ativo.' }
+        { text: 'Nenhum deal ou cotação ativa em nenhum grupo.' }
       )
     })
 
