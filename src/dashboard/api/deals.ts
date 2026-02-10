@@ -178,10 +178,10 @@ dealsRouter.post('/sweep', async (req: Request, res: Response) => {
     logger.info('Manual deal sweep triggered', {
       event: 'manual_deal_sweep',
       groupJid,
-      expiredCount: result.data,
+      expiredCount: result.data.length,
     })
 
-    return res.json({ expired: result.data })
+    return res.json({ expired: result.data.length })
   } catch (e) {
     logger.error('Unexpected error in POST /deals/sweep', {
       event: 'deals_sweep_api_error',

@@ -309,16 +309,13 @@ Daniel sent `off off` from CONTROLE_eNorBOT. The command parsed correctly (`comm
 
 **Impact:** All control commands (status, pause, resume, mode, modes, config, off) now respond instantly.
 
-#### Fix 2 — "off off" broadcasts to ALL non-paused groups
+#### Fix 2 — "off off" broadcasts to non-paused groups
 
 **Before:** "off off" only iterated groups that had active deals. No deals → no groups → "Nenhum deal ativo em nenhum grupo" → no off signals sent.
 
-**After:** "off off" now iterates ALL registered groups where `mode !== 'paused'`. It cancels any active deals found along the way, but always sends "off @operator" to every non-paused group regardless of deal state.
+**After:** "off off" now iterates all registered groups where `mode !== 'paused'`. Cancels any active deals found along the way and sends "off @operator" to each group.
 
-- Groups with active deals: deals cancelled + off signal sent
-- Groups with no deals: off signal still sent (operator awareness)
-- Paused groups: skipped (already inactive)
-- No non-paused groups: "Nenhum grupo ativo encontrado."
+> **⚠️ This was further restricted in Round 3d** — see below. The `mode !== 'paused'` filter was too broad and included learning mode groups. Round 3d changed it to `mode === 'active'` AND requires active deals.
 
 #### Fix 3 — Reply-first pattern for CIO feedback
 
@@ -341,7 +338,7 @@ Added structured logging to `handleOffCommand`:
 
 | File | Change |
 |------|--------|
-| `src/handlers/control.ts` | `sendControlResponse` uses `sock.sendMessage` directly; "off off" iterates all non-paused groups; reply-first pattern; better logging |
+| `src/handlers/control.ts` | `sendControlResponse` uses `sock.sendMessage` directly; "off off" iterates non-paused groups (later restricted in 3d); reply-first pattern; better logging |
 | `src/handlers/control.test.ts` | Updated 17 test assertions from `mockSendWithAntiDetection` to `mockSock.sendMessage` for control responses |
 
 ### Test results (Round 3b)
@@ -402,3 +399,136 @@ Without `-i 1`, PM2 uses fork mode (default). Fork mode runs the process directl
 ### Note on in-memory state
 
 Active quotes (`activeQuotes` map) live only in process memory. When PM2 restarts, they're lost. This is acceptable for now (quotes have a 3-minute TTL anyway), but it means deploys during active conversations will lose quote context. Future improvement: persist quotes to Supabase.
+
+---
+
+## Round 3d — CRITICAL: Learning Mode Protection (2026-02-09)
+
+### What happened — Production incident
+
+After deploying Round 3b, Daniel sent `off off` from the control group. The command worked as coded — but **sent "off @operator" to ALL 11 learning mode groups**. Learning mode groups are observe-only; the bot must NEVER send messages to them. This was a serious breach of the safety model.
+
+The root cause: Round 3b Fix 2 used `mode !== 'paused'` as the filter, which included `learning`, `assisted`, and `active` groups. There were 11 learning mode groups and only 1 active group in production.
+
+### Fixes applied (Round 3d) — 3 layers of defense
+
+#### Fix 6 — Global learning mode guard in `sendWithAntiDetection`
+
+**The nuclear option.** Added an absolute block at the messaging layer itself — the last line of defense before any outbound message reaches WhatsApp.
+
+```typescript
+// SAFETY: Block outbound messages to learning mode groups
+if (jid.endsWith('@g.us')) {
+  const mode = getGroupModeSync(jid)
+  if (mode === 'learning') {
+    logger.warn('BLOCKED: outbound message to learning mode group', {
+      event: 'learning_mode_blocked', jid, mode,
+    })
+    return err('Blocked: cannot send messages to learning mode groups')
+  }
+}
+```
+
+This guard fires for EVERY outbound group message, regardless of which handler initiated it. Even if a bug elsewhere tries to send to a learning group, this blocks it.
+
+**Important:** `getGroupModeSync()` defaults to `'learning'` for unknown groups, so unknown/unregistered groups are also blocked by default.
+
+#### Fix 7 — `sendOffToGroup` learning mode guard
+
+Added an explicit check in `sendOffToGroup` before attempting to send:
+
+```typescript
+const mode = getGroupModeSync(groupJid)
+if (mode === 'learning') {
+  logger.warn('Blocked off message to learning mode group', {
+    event: 'off_blocked_learning', groupJid, groupName,
+  })
+  return
+}
+```
+
+Defense-in-depth: even if the global guard (Fix 6) were somehow bypassed, this handler-level check would still block.
+
+#### Fix 8 — "off off" restricted to active-mode groups with active deals
+
+**Before (Round 3b):** `mode !== 'paused'` — included learning, assisted, active.
+
+**After:** `mode === 'active'` AND group must have ≥1 active deal.
+
+```typescript
+for (const config of configs.values()) {
+  if (config.mode !== 'active') continue
+  const dealsResult = await getActiveDeals(config.groupJid)
+  if (!dealsResult.ok || dealsResult.data.length === 0) continue
+  // ... cancel deals, send off, add to targetGroups
+}
+```
+
+No active deals in any active group → "Nenhum deal ativo em nenhum grupo."
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/utils/messaging.ts` | Added `getGroupModeSync` import; global learning mode guard after input validation |
+| `src/utils/messaging.test.ts` | Added `vi.mock('../services/groupConfig.js', () => ({ getGroupModeSync: () => 'active' }))` so test JIDs aren't blocked |
+| `src/handlers/control.ts` | `sendOffToGroup` learning guard; "off off" changed from `!== 'paused'` to `=== 'active'` + requires active deals |
+
+### Test results (Round 3d)
+- `npx tsc --noEmit` — 0 errors
+- `npx vitest run` — **1714 passed**, 0 failed (54 test files)
+
+### Safety model (current)
+
+Messages to learning mode groups are blocked at **3 independent layers**:
+
+1. **`sendWithAntiDetection`** — global guard, blocks ALL outbound to learning groups
+2. **`sendOffToGroup`** — handler guard, blocks off signals to learning groups
+3. **"off off" iteration** — only considers `mode === 'active'` groups with deals
+
+If any single layer fails, the other two still protect. Unknown groups default to `'learning'` and are also blocked.
+
+---
+
+## Round 3e — Dashboard Auth Fix (2026-02-09)
+
+### What happened
+
+After bringing the bot back online, Daniel tried to change CONTROLE_eNorBOT from learning mode to active mode via the dashboard (enorbot.win). Got error: **"Unauthorized — invalid or missing X-Dashboard-Key header"**.
+
+### Root cause: Stale Vite bundle on VPS
+
+The dashboard's `VITE_DASHBOARD_SECRET` is embedded at build time via `import.meta.env.VITE_DASHBOARD_SECRET`. The VPS had a stale Vite bundle (`index-rxFQ1bAW.js`) that was built before `VITE_DASHBOARD_SECRET` was configured in `.env`.
+
+Additionally, the local `dist/dashboard/` directory had accumulated **49 old asset bundles** because Vite doesn't clean `outDir` when it's outside the Vite project root (`dashboard/` → `../dist/dashboard/`). The `--delete` flag on rsync only syncs what's in `dist/dashboard/`, but if local has stale files, they get synced too.
+
+### Fix applied
+
+1. Deleted local `dist/dashboard/` entirely
+2. Rebuilt dashboard with `VITE_DASHBOARD_SECRET` properly injected
+3. Redeployed — rsync `--delete` cleaned stale bundles on VPS
+4. Verified the new VPS bundle (`index-D8pNKvk3.js`) contains the secret
+
+### Files changed
+
+No code changes — build/deploy artifact issue only.
+
+---
+---
+
+# Pre-Round 4 Checklist
+
+**Bot status:** Running (fork mode, instance 17, connected to WhatsApp)
+**Dashboard:** Live at enorbot.win, auth working
+**Commits this session:** `7a85736`, `c35f584`, `4a8cd9a`
+
+### Active safety rules
+- Learning mode groups: BLOCKED at messaging layer (3 layers)
+- Control group responses: instant (no anti-detection delay)
+- PM2: fork mode (no double-restart)
+- `getGroupModeSync` defaults to `'learning'` for unknown groups
+
+### Known limitations
+- Active quotes are in-memory only (lost on restart)
+- Anti-detection delays (3-15s) still apply to trading group messages (by design)
+- `off off` only targets active groups with deals (not all groups — by design after incident)

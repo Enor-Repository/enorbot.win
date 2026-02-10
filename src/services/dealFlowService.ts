@@ -887,6 +887,13 @@ export async function extendDealTtl(
 // TTL Sweep & Re-prompt
 // ============================================================================
 
+/** Info about a deal that was expired by the TTL sweep */
+export interface ExpiredDealInfo {
+  id: string
+  groupJid: string
+  state: string
+}
+
 /** Info about an awaiting_amount deal that needs a re-prompt or expiry */
 export interface AwaitingAmountDealInfo {
   id: string
@@ -976,9 +983,9 @@ export async function markReprompted(dealId: string): Promise<Result<void>> {
 /**
  * Sweep expired deals: find deals past TTL and transition to EXPIRED.
  * Should be called periodically (e.g., every 30 seconds).
- * Returns count of deals expired.
+ * Returns list of expired deals (with state info for notification purposes).
  */
-export async function sweepExpiredDeals(): Promise<Result<number>> {
+export async function sweepExpiredDeals(): Promise<Result<ExpiredDealInfo[]>> {
   const supabase = getSupabase()
   if (!supabase) return err('Supabase not initialized')
 
@@ -988,7 +995,7 @@ export async function sweepExpiredDeals(): Promise<Result<number>> {
     // Find all expired deals in quotable/lockable/awaiting states
     const { data, error } = await supabase
       .from('active_deals')
-      .select('id, group_jid')
+      .select('id, group_jid, state')
       .in('state', ['quoted', 'locked', 'awaiting_amount'])
       .lt('ttl_expires_at', now)
       .limit(50)
@@ -1001,13 +1008,13 @@ export async function sweepExpiredDeals(): Promise<Result<number>> {
       return err(`Sweep failed: ${error.message}`)
     }
 
-    if (!data || data.length === 0) return ok(0)
+    if (!data || data.length === 0) return ok([])
 
-    let expiredCount = 0
+    const expiredDeals: ExpiredDealInfo[] = []
     for (const row of data) {
       const result = await expireDeal(row.id, row.group_jid)
       if (result.ok) {
-        expiredCount++
+        expiredDeals.push({ id: row.id, groupJid: row.group_jid, state: row.state })
       } else {
         logger.warn('Failed to expire deal during sweep', {
           event: 'deal_sweep_expire_error',
@@ -1017,15 +1024,15 @@ export async function sweepExpiredDeals(): Promise<Result<number>> {
       }
     }
 
-    if (expiredCount > 0) {
+    if (expiredDeals.length > 0) {
       logger.info('Deal sweep completed', {
         event: 'deal_sweep_complete',
-        expired: expiredCount,
+        expired: expiredDeals.length,
         total: data.length,
       })
     }
 
-    return ok(expiredCount)
+    return ok(expiredDeals)
   } catch (e) {
     return err(`Unexpected error during sweep: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -1200,5 +1207,31 @@ export async function getDealHistory(
     return ok(history)
   } catch (e) {
     return err(`Unexpected error: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+// ============================================================================
+// Active Deal Check (for quote expiration guard)
+// ============================================================================
+
+/**
+ * Check if a group has any active (non-terminal) deal.
+ * Used by expireOldQuotes() to preserve quotes while deals are live.
+ */
+export async function hasActiveDealForGroup(groupJid: string): Promise<boolean> {
+  try {
+    const supabase = getSupabase()
+    if (!supabase) return false
+
+    const { data } = await supabase
+      .from('active_deals')
+      .select('id')
+      .eq('group_jid', groupJid)
+      .in('state', ['quoted', 'locked', 'awaiting_amount', 'computing'])
+      .limit(1)
+
+    return (data?.length ?? 0) > 0
+  } catch {
+    return false
   }
 }

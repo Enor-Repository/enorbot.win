@@ -9,6 +9,10 @@ const mockLogger = vi.hoisted(() => ({
 
 vi.mock('../utils/logger.js', () => ({ logger: mockLogger }))
 
+vi.mock('./dealFlowService.js', () => ({
+  hasActiveDealForGroup: vi.fn().mockResolvedValue(false),
+}))
+
 import {
   createQuote,
   getActiveQuote,
@@ -257,14 +261,14 @@ describe('activeQuotes', () => {
   })
 
   describe('expireOldQuotes', () => {
-    it('expires quotes older than TTL', () => {
+    it('expires quotes older than TTL', async () => {
       createQuote('group1@g.us', 5.2650)
       const quote = getActiveQuote('group1@g.us')!
 
       // Set quotedAt to past
       quote.quotedAt = new Date(Date.now() - 6 * 60 * 1000) // 6 minutes ago
 
-      expireOldQuotes(5 * 60 * 1000) // 5 minute TTL
+      await expireOldQuotes(5 * 60 * 1000) // 5 minute TTL
 
       expect(getActiveQuote('group1@g.us')).toBeNull()
       expect(mockLogger.info).toHaveBeenCalledWith(
@@ -273,21 +277,21 @@ describe('activeQuotes', () => {
       )
     })
 
-    it('does not expire quotes within TTL', () => {
+    it('does not expire quotes within TTL', async () => {
       createQuote('group1@g.us', 5.2650)
 
-      expireOldQuotes(5 * 60 * 1000)
+      await expireOldQuotes(5 * 60 * 1000)
 
       expect(getActiveQuote('group1@g.us')).not.toBeNull()
     })
 
-    it('does not expire quotes in repricing state', () => {
+    it('does not expire quotes in repricing state', async () => {
       createQuote('group1@g.us', 5.2650)
       const quote = getActiveQuote('group1@g.us')!
       quote.quotedAt = new Date(Date.now() - 6 * 60 * 1000)
       tryLockForReprice('group1@g.us')
 
-      expireOldQuotes(5 * 60 * 1000)
+      await expireOldQuotes(5 * 60 * 1000)
 
       expect(getActiveQuote('group1@g.us')).not.toBeNull()
     })

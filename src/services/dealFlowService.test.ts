@@ -615,14 +615,14 @@ describe('dealFlowService', () => {
   // ============================================================
 
   describe('sweepExpiredDeals', () => {
-    it('returns 0 when no expired deals', async () => {
+    it('returns empty array when no expired deals', async () => {
       setupChain({ data: [], error: null })
 
       const result = await sweepExpiredDeals()
 
       expect(result.ok).toBe(true)
       if (result.ok) {
-        expect(result.data).toBe(0)
+        expect(result.data).toEqual([])
       }
     })
 

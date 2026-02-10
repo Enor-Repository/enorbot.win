@@ -41,6 +41,7 @@ import {
   expireDeal,
   type ActiveDeal,
   type CreateDealInput,
+  type ExpiredDealInfo,
 } from '../services/dealFlowService.js'
 import { getSocket } from '../bot/connection.js'
 import type { BotMessageType } from '../services/messageHistory.js'
@@ -643,7 +644,8 @@ export async function handlePriceLock(
       }
 
       // No inline amount — create deal from quote for lock flow
-      forceAccept(groupId) // Close volatility monitoring
+      // Note: active quote is preserved (not consumed) so dashboard shows
+      // threshold line and volatility monitoring continues during the deal
 
       const bridgeConfig = await getSpreadConfig(groupId)
       const side = bridgeConfig.ok ? bridgeConfig.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
@@ -797,6 +799,9 @@ export async function handlePriceLock(
 
       // Archive (fire-and-forget)
       archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+      // Clear active quote now that deal reached terminal state
+      forceAccept(groupId)
 
       // Sprint 9.1: Log to Excel (fire-and-forget)
       logDealToExcel({
@@ -1008,6 +1013,9 @@ export async function handleConfirmation(
       })
     })
 
+    // Clear active quote now that deal reached terminal state
+    forceAccept(groupId)
+
     // Log to Excel (fire-and-forget)
     logDealToExcel({
       groupId,
@@ -1087,6 +1095,9 @@ export async function handleDealCancellation(
 
   // Archive (fire-and-forget)
   archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+  // Clear active quote now that deal reached terminal state
+  forceAccept(groupId)
 
   logger.info('Deal cancelled by client', {
     event: 'deal_cancelled_by_client',
@@ -1185,6 +1196,9 @@ export async function handleRejection(
 
   // Archive deal (fire-and-forget)
   archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+  // Clear active quote now that deal reached terminal state
+  forceAccept(groupId)
 
   logger.info('Deal rejected by client', {
     event: 'deal_rejected_by_client',
@@ -1291,6 +1305,9 @@ export async function handleVolumeInput(
 
   // Archive (fire-and-forget)
   archiveDeal(deal.id, groupId).catch(() => { /* logged internally */ })
+
+  // Clear active quote now that deal reached terminal state
+  forceAccept(groupId)
 
   // Sprint 9.1: Log to Excel (fire-and-forget)
   logDealToExcel({
@@ -1530,7 +1547,7 @@ let sweepTimer: ReturnType<typeof setInterval> | null = null
  * Run the deal expiration sweep.
  * Returns the number of deals expired.
  */
-export async function runDealSweep(): Promise<Result<number>> {
+export async function runDealSweep(): Promise<Result<ExpiredDealInfo[]>> {
   return sweepExpiredDeals()
 }
 
@@ -1616,11 +1633,36 @@ export function startDealSweepTimer(): void {
   sweepTimer = setInterval(async () => {
     try {
       const result = await sweepExpiredDeals()
-      if (result.ok && result.data > 0) {
+      if (result.ok && result.data.length > 0) {
         logger.info('Periodic deal sweep expired deals', {
           event: 'deal_sweep_periodic',
-          expired: result.data,
+          expired: result.data.length,
         })
+
+        // Send "off" notification for locked/quoted deals that expired
+        const sock = getSocket()
+        if (sock) {
+          for (const expired of result.data) {
+            if (expired.state === 'locked' || expired.state === 'quoted') {
+              const operatorJid = resolveOperatorJid(expired.groupJid)
+              const mentions = operatorJid ? [operatorJid] : []
+              const offMsg = operatorJid ? `off @${operatorJid.replace(/@.*/, '')}` : 'off'
+              await sendWithAntiDetection(sock, expired.groupJid, offMsg, mentions)
+              logBotMessage({ groupJid: expired.groupJid, content: offMsg, messageType: 'deal_expired', isControlGroup: false })
+              recordMessageSent(expired.groupJid)
+              // Clear active quote for this group
+              forceAccept(expired.groupJid)
+
+              logger.info('Sent expiry "off" notification', {
+                event: 'deal_expiry_off_sent',
+                dealId: expired.id,
+                groupJid: expired.groupJid,
+                state: expired.state,
+                operatorMentioned: !!operatorJid,
+              })
+            }
+          }
+        }
       }
     } catch (e) {
       logger.error('Periodic deal sweep failed', {

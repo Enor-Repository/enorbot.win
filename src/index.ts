@@ -102,7 +102,7 @@ async function main(): Promise<void> {
 
   // Volatility Protection: Periodic cleanup of expired quotes (every 60s)
   quoteCleanupInterval = setInterval(() => {
-    expireOldQuotes()
+    expireOldQuotes().catch(() => { /* logged internally */ })
   }, QUOTE_CLEANUP_INTERVAL_MS)
 
   logger.info('Volatility protection services started', {

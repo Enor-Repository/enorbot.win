@@ -4,6 +4,7 @@
  * Speed-critical: in-memory store with formal state machine for race condition safety.
  */
 import { logger } from '../utils/logger.js'
+import { hasActiveDealForGroup } from './dealFlowService.js'
 
 /**
  * Quote status states - formal state machine.
@@ -259,8 +260,9 @@ export function incrementRepriceCount(groupJid: string): number {
 /**
  * Expire old quotes based on TTL.
  * Called periodically from boot sequence.
+ * Skips groups that have an active deal (quote persists while deal is live).
  */
-export function expireOldQuotes(ttlMs: number = DEFAULT_QUOTE_TTL_MS): void {
+export async function expireOldQuotes(ttlMs: number = DEFAULT_QUOTE_TTL_MS): Promise<void> {
   const now = Date.now()
   let expiredCount = 0
 
@@ -272,6 +274,14 @@ export function expireOldQuotes(ttlMs: number = DEFAULT_QUOTE_TTL_MS): void {
 
     const age = now - quote.quotedAt.getTime()
     if (age >= ttlMs) {
+      // Check for active deal — keep quote alive while deal is in progress
+      const activeDeal = await hasActiveDealForGroup(groupJid)
+      if (activeDeal) {
+        // Refresh timestamp to prevent re-checking every cycle
+        quote.quotedAt = new Date()
+        continue
+      }
+
       quote.status = 'expired'
       expiredCount++
 

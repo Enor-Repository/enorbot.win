@@ -33,6 +33,8 @@ jobs:
         run: |
           cd dashboard
           npx vite build --outDir ../dist/dashboard
+        env:
+          VITE_DASHBOARD_SECRET: ${{ secrets.DASHBOARD_SECRET }}
 
       - name: Setup SSH key
         run: |

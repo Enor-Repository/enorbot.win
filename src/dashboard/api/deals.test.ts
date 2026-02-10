@@ -352,7 +352,11 @@ describe('POST /deals/sweep - Manual sweep', () => {
   }
 
   it('triggers sweep and returns expired count', async () => {
-    vi.mocked(sweepExpiredDeals).mockResolvedValue({ ok: true, data: 3 })
+    vi.mocked(sweepExpiredDeals).mockResolvedValue({ ok: true, data: [
+      { id: '1', groupJid: GROUP_JID, state: 'locked' },
+      { id: '2', groupJid: GROUP_JID, state: 'quoted' },
+      { id: '3', groupJid: GROUP_JID, state: 'awaiting_amount' },
+    ] })
     const res = await callHandler(GROUP_JID)
 
     expect(res.statusCode).toBe(200)
@@ -360,7 +364,7 @@ describe('POST /deals/sweep - Manual sweep', () => {
   })
 
   it('returns zero when no deals expired', async () => {
-    vi.mocked(sweepExpiredDeals).mockResolvedValue({ ok: true, data: 0 })
+    vi.mocked(sweepExpiredDeals).mockResolvedValue({ ok: true, data: [] })
     const res = await callHandler(GROUP_JID)
 
     expect(res.statusCode).toBe(200)
