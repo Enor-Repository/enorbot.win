@@ -52,7 +52,8 @@ import { queueObservationEntry } from '../services/logQueue.js'
 import { isObservationLoggingConfigured } from '../types/config.js'
 import type { OTCMessageType } from '../services/messageClassifier.js'
 // Volatility Protection: Track active quotes for threshold monitoring
-import { createQuote } from '../services/activeQuotes.js'
+import { createQuote, MIN_VOLUME_USDT } from '../services/activeQuotes.js'
+import { parseBrazilianNumber } from '../services/dealComputation.js'
 
 // Story 2.4: Retry Constants (Task 1)
 /** Maximum number of retry attempts after initial failure */
@@ -438,11 +439,32 @@ async function sendPriceResponse(
   // Record bot response for suppression cooldown tracking
   recordBotResponse(context.groupId)
 
+  // Extract pre-stated volume from price request (e.g., "cotação pra 30000")
+  // MIN_VOLUME_USDT threshold avoids capturing rate fragments (e.g., "5,25")
+  let preStatedVolume: number | undefined
+  const priceWords = context.message.trim().split(/\s+/)
+  for (const word of priceWords) {
+    const parsed = parseBrazilianNumber(word)
+    if (parsed !== null && parsed >= MIN_VOLUME_USDT) {
+      preStatedVolume = parsed
+      break
+    }
+  }
+
+  if (preStatedVolume) {
+    logger.info('Pre-stated volume extracted from price request', {
+      event: 'price_pre_stated_volume',
+      groupId: context.groupId,
+      preStatedVolume,
+    })
+  }
+
   // Volatility Protection: Create active quote for threshold monitoring
   // Pass price source and base price so volatility monitor checks the correct API
   createQuote(context.groupId, finalPrice, {
     priceSource: pricingSource === 'commercial_dollar' ? 'commercial_dollar' : 'usdt_brl',
     basePrice: price, // Raw price before spread
+    preStatedVolume,
   })
 
   // Log bot response to observations (fire-and-forget)

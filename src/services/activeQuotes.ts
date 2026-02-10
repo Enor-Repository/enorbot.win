@@ -35,6 +35,8 @@ export interface ActiveQuote {
   priceSource: PriceSource
   /** The raw base price before spread was applied */
   basePrice: number
+  /** Pre-stated USDT volume from price request (e.g., "cotação pra 30000" → 30000) */
+  preStatedVolume?: number
 }
 
 /**
@@ -59,6 +61,12 @@ const VALID_TRANSITIONS: Record<QuoteStatus, QuoteStatus[]> = {
  */
 const DEFAULT_QUOTE_TTL_MS = 5 * 60 * 1000
 
+/**
+ * Minimum USDT volume threshold for pre-stated volume extraction.
+ * Prevents capturing rate fragments (e.g., "5,25") as volume.
+ */
+export const MIN_VOLUME_USDT = 100
+
 // In-memory store: one quote per group
 const quotes = new Map<string, ActiveQuote>()
 
@@ -81,6 +89,8 @@ export interface CreateQuoteOptions {
   priceSource?: PriceSource
   /** The raw base price before spread was applied (defaults to quotedPrice) */
   basePrice?: number
+  /** Pre-stated USDT volume from price request message */
+  preStatedVolume?: number
 }
 
 /**
@@ -104,6 +114,7 @@ export function createQuote(groupJid: string, price: number, options?: CreateQuo
     status: 'pending',
     priceSource,
     basePrice,
+    preStatedVolume: options?.preStatedVolume,
   }
 
   quotes.set(groupJid, quote)
@@ -236,6 +247,16 @@ export function forceAccept(groupJid: string): void {
 
   // Remove from active quotes - deal is done
   quotes.delete(groupJid)
+}
+
+/**
+ * Clear pre-stated volume after consumption (prevents double-use on retry).
+ */
+export function clearPreStatedVolume(groupJid: string): void {
+  const quote = quotes.get(groupJid)
+  if (quote) {
+    quote.preStatedVolume = undefined
+  }
 }
 
 /**

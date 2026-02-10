@@ -95,6 +95,15 @@ vi.mock('../utils/logger.js', () => ({
   },
 }))
 
+// Mock activeQuotes
+vi.mock('../services/activeQuotes.js', () => ({
+  getActiveQuote: vi.fn().mockReturnValue(null),
+  forceAccept: vi.fn(),
+  createQuote: vi.fn(),
+  clearPreStatedVolume: vi.fn(),
+  MIN_VOLUME_USDT: 100,
+}))
+
 // Mock systemPatternService - return default keywords
 vi.mock('../services/systemPatternService.js', () => ({
   getKeywordsForPattern: vi.fn((key: string) => {
@@ -115,6 +124,7 @@ import { getSpreadConfig } from '../services/groupSpreadService.js'
 import { resolveOperatorJid } from '../services/groupConfig.js'
 import { getActiveRule } from '../services/ruleService.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
+import { getActiveQuote, createQuote, clearPreStatedVolume } from '../services/activeQuotes.js'
 
 // Import handlers under test
 import {
@@ -872,6 +882,167 @@ describe('handleVolumeInput', () => {
       expect(result.data.action).toBe('no_action')
     }
     expect(startComputation).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// handlePriceLock — Pre-stated Volume Path (Phase 1)
+// ============================================================================
+
+describe('handlePriceLock — pre-stated volume', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(sendWithAntiDetection).mockResolvedValue({ ok: true, data: undefined })
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: null })
+    vi.mocked(parseBrazilianNumber).mockReturnValue(null)
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { defaultSide: 'client_buys_usdt', quoteTtlSeconds: 180 } as never,
+    })
+  })
+
+  it('consumes preStatedVolume from quote and creates locked deal', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue({
+      groupJid: 'group-123@g.us',
+      quotedPrice: 5.25,
+      basePrice: 5.20,
+      status: 'pending',
+      preStatedVolume: 30000,
+      quotedAt: new Date(),
+      repriceCount: 0,
+      priceSource: 'usdt_brl',
+    } as never)
+    vi.mocked(computeUsdtToBrl).mockReturnValue({
+      ok: true,
+      data: { amountBrl: 157500, amountUsdt: 30000, rate: 5.25, display: '', formatted: { brl: '', usdt: '', rate: '' } },
+    })
+    vi.mocked(createDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, id: 'deal-pre-stated' } })
+    vi.mocked(lockDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+
+    const context = createTestContext({ message: 'trava' })
+    const result = await handlePriceLock(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_locked')
+    }
+    expect(clearPreStatedVolume).toHaveBeenCalledWith('group-123@g.us')
+    expect(createDeal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amountUsdt: 30000,
+        metadata: expect.objectContaining({ flow: 'calculator_lock' }),
+      })
+    )
+    expect(lockDeal).toHaveBeenCalled()
+    expect(sendWithAntiDetection).toHaveBeenCalled()
+  })
+
+  it('skips preStatedVolume path when quote has no volume', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue({
+      groupJid: 'group-123@g.us',
+      quotedPrice: 5.25,
+      basePrice: 5.20,
+      status: 'pending',
+      preStatedVolume: undefined,
+      quotedAt: new Date(),
+      repriceCount: 0,
+      priceSource: 'usdt_brl',
+    } as never)
+    vi.mocked(createDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL })
+
+    const context = createTestContext({ message: 'trava' })
+    const result = await handlePriceLock(context)
+
+    // Should proceed to bare-lock path (creates deal from quote)
+    expect(result.ok).toBe(true)
+    expect(clearPreStatedVolume).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// handlePriceLock — Lock with No Quote Path (Phase 1)
+// ============================================================================
+
+describe('handlePriceLock — lock with no quote', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(sendWithAntiDetection).mockResolvedValue({ ok: true, data: undefined })
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: null })
+    vi.mocked(getActiveQuote).mockReturnValue(null)
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { defaultSide: 'client_buys_usdt', quoteTtlSeconds: 180 } as never,
+    })
+    vi.mocked(getActiveRule).mockResolvedValue({ ok: true, data: null })
+  })
+
+  it('fetches fresh rate and creates locked deal when inline amount present', async () => {
+    vi.mocked(parseBrazilianNumber).mockImplementation((input: string) => {
+      if (input === '19226') return 19226
+      return null
+    })
+    vi.mocked(fetchPrice).mockResolvedValue({ ok: true, data: 5.20 })
+    vi.mocked(computeUsdtToBrl).mockReturnValue({
+      ok: true,
+      data: { amountBrl: 99975.20, amountUsdt: 19226, rate: 5.20, display: '', formatted: { brl: '', usdt: '', rate: '' } },
+    })
+    vi.mocked(createDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, id: 'deal-no-quote' } })
+    vi.mocked(lockDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+
+    const context = createTestContext({ message: 'travar 19226' })
+    const result = await handlePriceLock(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_locked')
+    }
+    expect(fetchPrice).toHaveBeenCalled()
+    expect(createQuote).toHaveBeenCalledWith(
+      'group-123@g.us',
+      expect.any(Number),
+      expect.objectContaining({ priceSource: 'usdt_brl' })
+    )
+    expect(createDeal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amountUsdt: 19226,
+        metadata: expect.objectContaining({ flow: 'calculator_lock' }),
+      })
+    )
+    expect(lockDeal).toHaveBeenCalled()
+  })
+
+  it('rejects amounts below MIN_VOLUME_USDT threshold', async () => {
+    vi.mocked(parseBrazilianNumber).mockImplementation((input: string) => {
+      if (input === '50') return 50
+      return null
+    })
+
+    const context = createTestContext({ message: 'travar 50' })
+    const result = await handlePriceLock(context)
+
+    // 50 < MIN_VOLUME_USDT (100), so falls through to "no quote" message
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('no_action')
+    }
+    expect(createDeal).not.toHaveBeenCalled()
+  })
+
+  it('shows "no active quote" message when bare trava with no amount and no quote', async () => {
+    vi.mocked(parseBrazilianNumber).mockReturnValue(null)
+
+    const context = createTestContext({ message: 'trava' })
+    const result = await handlePriceLock(context)
+
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('no_action')
+    }
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('cotação ativa')
+    )
   })
 })
 

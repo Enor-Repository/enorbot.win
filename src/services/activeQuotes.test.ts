@@ -20,10 +20,12 @@ import {
   tryLockForReprice,
   unlockAfterReprice,
   forceAccept,
+  clearPreStatedVolume,
   incrementRepriceCount,
   expireOldQuotes,
   getActiveQuoteCount,
   getAllActiveQuotes,
+  MIN_VOLUME_USDT,
   _resetForTesting,
 } from './activeQuotes.js'
 
@@ -82,6 +84,69 @@ describe('activeQuotes', () => {
           basePrice: 5.26,
         })
       )
+    })
+
+    it('stores preStatedVolume when provided', () => {
+      const quote = createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+
+      expect(quote.preStatedVolume).toBe(30000)
+      expect(getActiveQuote('group1@g.us')?.preStatedVolume).toBe(30000)
+    })
+
+    it('leaves preStatedVolume undefined when not provided', () => {
+      const quote = createQuote('group1@g.us', 5.2650)
+
+      expect(quote.preStatedVolume).toBeUndefined()
+    })
+
+    it('stores preStatedVolume with k suffix (15000)', () => {
+      const quote = createQuote('group1@g.us', 5.2650, { preStatedVolume: 15000 })
+
+      expect(quote.preStatedVolume).toBe(15000)
+    })
+  })
+
+  describe('clearPreStatedVolume', () => {
+    it('clears preStatedVolume on existing quote', () => {
+      createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+      clearPreStatedVolume('group1@g.us')
+
+      expect(getActiveQuote('group1@g.us')?.preStatedVolume).toBeUndefined()
+    })
+
+    it('does nothing for nonexistent group', () => {
+      clearPreStatedVolume('nonexistent@g.us')
+      // Should not throw
+    })
+
+    it('prevents double consumption', () => {
+      createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+
+      // First consumption
+      const vol = getActiveQuote('group1@g.us')?.preStatedVolume
+      expect(vol).toBe(30000)
+      clearPreStatedVolume('group1@g.us')
+
+      // Second read — should be cleared
+      expect(getActiveQuote('group1@g.us')?.preStatedVolume).toBeUndefined()
+    })
+  })
+
+  describe('MIN_VOLUME_USDT', () => {
+    it('is 100', () => {
+      expect(MIN_VOLUME_USDT).toBe(100)
+    })
+  })
+
+  describe('preStatedVolume expiry', () => {
+    it('preStatedVolume is gone after quote expires', async () => {
+      createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+      const quote = getActiveQuote('group1@g.us')!
+      quote.quotedAt = new Date(Date.now() - 6 * 60 * 1000)
+
+      await expireOldQuotes(5 * 60 * 1000)
+
+      expect(getActiveQuote('group1@g.us')).toBeNull()
     })
   })
 

@@ -87,6 +87,27 @@ vi.mock('../services/responseSuppression.js', () => ({
   recordBotResponse: vi.fn(),
 }))
 
+// Phase 1: Mock activeQuotes for preStatedVolume testing
+const mockCreateQuote = vi.fn().mockReturnValue({
+  groupJid: '123456789@g.us',
+  quotedPrice: 5.8234,
+  basePrice: 5.8234,
+  status: 'pending',
+  quotedAt: new Date(),
+  repriceCount: 0,
+  priceSource: 'usdt_brl',
+})
+vi.mock('../services/activeQuotes.js', () => ({
+  createQuote: (...args: unknown[]) => mockCreateQuote(...args),
+  MIN_VOLUME_USDT: 100,
+}))
+
+// Phase 1: Mock parseBrazilianNumber from dealComputation
+const mockParseBrazilianNumber = vi.fn().mockReturnValue(null)
+vi.mock('../services/dealComputation.js', () => ({
+  parseBrazilianNumber: (...args: unknown[]) => mockParseBrazilianNumber(...args),
+}))
+
 import { fetchPrice } from '../services/binance.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { logger } from '../utils/logger.js'
@@ -1096,6 +1117,64 @@ describe('handlePriceMessage', () => {
       await promise
 
       expect(mockRecordBotResponse).not.toHaveBeenCalled()
+    })
+  })
+
+  // ==========================================================================
+  // Phase 1: Pre-stated Volume Extraction
+  // ==========================================================================
+
+  describe('preStatedVolume extraction', () => {
+    it('passes preStatedVolume to createQuote when message contains amount >= 100', async () => {
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.2500 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+      mockParseBrazilianNumber.mockImplementation((word: string) => {
+        if (word === '30000') return 30000
+        return null
+      })
+
+      const context = { ...baseContext, message: 'cotação pra 30000' }
+      await handlePriceMessage(context)
+
+      expect(mockCreateQuote).toHaveBeenCalledWith(
+        '123456789@g.us',
+        expect.any(Number),
+        expect.objectContaining({ preStatedVolume: 30000 })
+      )
+    })
+
+    it('does not set preStatedVolume when no amount in message', async () => {
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.2500 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+      mockParseBrazilianNumber.mockReturnValue(null)
+
+      const context = { ...baseContext, message: 'preço' }
+      await handlePriceMessage(context)
+
+      expect(mockCreateQuote).toHaveBeenCalledWith(
+        '123456789@g.us',
+        expect.any(Number),
+        expect.objectContaining({ preStatedVolume: undefined })
+      )
+    })
+
+    it('ignores amounts below MIN_VOLUME_USDT (100)', async () => {
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.2500 })
+      mockSend.mockResolvedValue({ ok: true, data: undefined })
+      mockParseBrazilianNumber.mockImplementation((word: string) => {
+        // "5,25" parsed as 5.25 — below threshold
+        if (word === '5,25') return 5.25
+        return null
+      })
+
+      const context = { ...baseContext, message: 'cotação 5,25' }
+      await handlePriceMessage(context)
+
+      expect(mockCreateQuote).toHaveBeenCalledWith(
+        '123456789@g.us',
+        expect.any(Number),
+        expect.objectContaining({ preStatedVolume: undefined })
+      )
     })
   })
 })

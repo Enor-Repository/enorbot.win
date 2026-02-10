@@ -59,7 +59,7 @@ import { fetchPrice } from '../services/binance.js'
 import { getSpreadConfig, calculateQuote, type SpreadConfig } from '../services/groupSpreadService.js'
 import { getActiveRule, type GroupRule } from '../services/ruleService.js'
 // Sprint 9.1: Active quote bridge + operator resolution + Excel logging
-import { getActiveQuote, forceAccept } from '../services/activeQuotes.js'
+import { getActiveQuote, forceAccept, createQuote, clearPreStatedVolume, MIN_VOLUME_USDT } from '../services/activeQuotes.js'
 import { resolveOperatorJid } from '../services/groupConfig.js'
 import { logPriceQuote, type LogEntry } from '../services/excel.js'
 
@@ -571,7 +571,7 @@ export async function handlePriceLock(
       const lockWords = message.trim().split(/\s+/)
       for (const word of lockWords) {
         const parsed = parseBrazilianNumber(word)
-        if (parsed !== null && parsed > 0) {
+        if (parsed !== null && parsed >= MIN_VOLUME_USDT) {
           inlineAmount = parsed
           break
         }
@@ -643,7 +643,70 @@ export async function handlePriceLock(
         })
       }
 
-      // No inline amount — create deal from quote for lock flow
+      // No inline amount — check for pre-stated volume from price request
+      if (activeQuote.preStatedVolume) {
+        const preVol = activeQuote.preStatedVolume
+        clearPreStatedVolume(groupId)
+
+        const rate = activeQuote.quotedPrice
+        const comp = computeUsdtToBrl(preVol, rate)
+        if (!comp.ok) return err(`Computation failed: ${comp.error}`)
+
+        // No need to cancel prior deal — we're inside `deal === null` branch
+        const bridgeCfg = await getSpreadConfig(groupId)
+        const bridgeSide = bridgeCfg.ok ? bridgeCfg.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
+        const bridgeTtl = bridgeCfg.ok ? bridgeCfg.data.quoteTtlSeconds ?? 180 : 180
+
+        const bridgeDealResult = await createDeal({
+          groupJid: groupId,
+          clientJid: sender,
+          side: bridgeSide,
+          quotedRate: rate,
+          baseRate: activeQuote.basePrice,
+          ttlSeconds: bridgeTtl,
+          spreadConfig: bridgeCfg.ok ? bridgeCfg.data : undefined,
+          amountUsdt: preVol,
+          amountBrl: comp.data.amountBrl,
+          metadata: {
+            senderName: context.senderName ?? null,
+            originalMessage: message.substring(0, 200),
+            flow: 'calculator_lock',
+          },
+        })
+
+        let bridgeDealId: string | undefined
+        if (bridgeDealResult.ok) {
+          bridgeDealId = bridgeDealResult.data.id
+          await lockDeal(bridgeDealId, groupId, {
+            lockedRate: rate,
+            amountUsdt: preVol,
+            amountBrl: comp.data.amountBrl,
+          })
+        }
+
+        const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(preVol)} → ${formatBrl(comp.data.amountBrl)}`
+        await sendDealMessage(context, calcMsg, 'deal_quote')
+
+        logger.info('Price lock with pre-stated volume: LOCKED deal created', {
+          event: 'deal_lock_pre_stated',
+          dealId: bridgeDealId,
+          groupId,
+          sender,
+          rate,
+          amountUsdt: preVol,
+          amountBrl: comp.data.amountBrl,
+        })
+
+        return ok({
+          action: 'deal_locked',
+          dealId: bridgeDealId,
+          groupId,
+          clientJid: sender,
+          message: calcMsg,
+        })
+      }
+
+      // No inline amount, no pre-stated volume — create deal from quote for lock flow
       // Note: active quote is preserved (not consumed) so dashboard shows
       // threshold line and volatility monitoring continues during the deal
 
@@ -686,7 +749,90 @@ export async function handlePriceLock(
         quotedRate: activeQuote.quotedPrice,
       })
     } else {
-      // No active deal or quote — suggest creating one
+      // No active deal or quote — check for inline amount (e.g., "travar 19226")
+      let noQuoteAmount: number | null = null
+      const words = message.trim().split(/\s+/)
+      for (const word of words) {
+        const parsed = parseBrazilianNumber(word)
+        if (parsed !== null && parsed >= MIN_VOLUME_USDT) {
+          noQuoteAmount = parsed
+          break
+        }
+      }
+
+      if (noQuoteAmount !== null) {
+        // Fetch fresh rate (mirrors handleVolumeInquiry bare-amount path)
+        const quoteCtx = await getQuoteContext(groupId)
+        if (!quoteCtx.ok) {
+          return err(quoteCtx.error)
+        }
+
+        const { quotedRate, baseRate } = quoteCtx.data
+        const comp = computeUsdtToBrl(noQuoteAmount, quotedRate)
+        if (!comp.ok) return err(`Computation failed: ${comp.error}`)
+
+        // Create active quote for dashboard + volatility monitor
+        createQuote(groupId, quotedRate, {
+          priceSource: 'usdt_brl',
+          basePrice: baseRate,
+        })
+
+        // No need to cancel prior deal — we're inside `deal === null` branch
+        // Create LOCKED deal
+        const cfgResult = await getSpreadConfig(groupId)
+        const side = cfgResult.ok ? cfgResult.data.defaultSide ?? 'client_buys_usdt' : 'client_buys_usdt'
+        const ttlSeconds = cfgResult.ok ? cfgResult.data.quoteTtlSeconds ?? 180 : 180
+
+        const dealResult = await createDeal({
+          groupJid: groupId,
+          clientJid: sender,
+          side,
+          quotedRate,
+          baseRate,
+          ttlSeconds,
+          spreadConfig: cfgResult.ok ? cfgResult.data : undefined,
+          amountUsdt: noQuoteAmount,
+          amountBrl: comp.data.amountBrl,
+          metadata: {
+            senderName: context.senderName ?? null,
+            originalMessage: message.substring(0, 200),
+            flow: 'calculator_lock',
+          },
+        })
+
+        let dealId: string | undefined
+        if (dealResult.ok) {
+          dealId = dealResult.data.id
+          await lockDeal(dealId, groupId, {
+            lockedRate: quotedRate,
+            amountUsdt: noQuoteAmount,
+            amountBrl: comp.data.amountBrl,
+          })
+        }
+
+        const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(quotedRate)}\n\n${formatUsdt(noQuoteAmount)} → ${formatBrl(comp.data.amountBrl)}`
+        await sendDealMessage(context, calcMsg, 'deal_quote')
+
+        logger.info('Lock with no quote: fresh rate fetched, LOCKED deal created', {
+          event: 'deal_lock_no_quote',
+          dealId,
+          groupId,
+          sender,
+          quotedRate,
+          amountUsdt: noQuoteAmount,
+          amountBrl: comp.data.amountBrl,
+        })
+
+        return ok({
+          action: 'deal_locked',
+          dealId,
+          groupId,
+          clientJid: sender,
+          message: calcMsg,
+        })
+      }
+
+      // No amount at all — suggest creating a quote
       await sendDealMessage(
         context,
         'Você não tem cotação ativa. Envie o valor desejado para receber uma cotação.',
