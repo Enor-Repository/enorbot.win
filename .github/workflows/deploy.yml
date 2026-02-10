@@ -62,7 +62,7 @@ jobs:
 
           # Install production deps & restart
           $SSH $VPS "cd $VPS_PATH && npm ci --omit=dev --ignore-scripts"
-          $SSH $VPS "pm2 delete enorbot 2>/dev/null || true; cd $VPS_PATH && pm2 start dist/index.js --name enorbot -i 1 --cwd $VPS_PATH && pm2 save"
+          $SSH $VPS "pm2 delete enorbot 2>/dev/null || true; cd $VPS_PATH && pm2 start dist/index.js --name enorbot --cwd $VPS_PATH && pm2 save"
 
           # Health check
           for i in $(seq 1 15); do
