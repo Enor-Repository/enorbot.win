@@ -49,6 +49,8 @@ import { isExcelLoggingConfigured, isObservationLoggingConfigured } from '../typ
 import { initMessageHistory, logMessageToHistory } from '../services/messageHistory.js'
 // Sprint 5: Response suppression (cooldown + dedup)
 import { shouldSuppressResponse } from '../services/responseSuppression.js'
+// Phase 3 extension: redirect suppressed price to deal handler during active quotes
+import { getActiveQuote } from '../services/activeQuotes.js'
 // Story 8.6: Observation logging services
 import { classifyMessage, inferPlayerRole } from '../services/messageClassifier.js'
 import { resolveThreadId } from '../services/conversationTracker.js'
@@ -491,6 +493,23 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
               reason: suppression.reason,
               explanation: suppression.explanation,
             })
+
+            // Phase 3 extension: don't go silent during active quotes.
+            // The trigger match was incidental (e.g., "preço" inside "preço ruim melhora p/ mim").
+            // Route to deal handler so operator gets tagged.
+            const activeQuote = getActiveQuote(groupId)
+            if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+              logger.info('Suppressed price redirected to deal handler (active quote)', {
+                event: 'suppressed_price_active_quote_redirect',
+                groupId,
+                sender,
+                quoteId: activeQuote.id,
+                suppressionReason: suppression.reason,
+              })
+              const { handleDealRouted } = await import('../handlers/deal.js')
+              await handleDealRouted({ ...route.context, dealAction: 'unrecognized_input' })
+            }
+
             return // Suppress silently — don't send duplicate response
           }
         }
