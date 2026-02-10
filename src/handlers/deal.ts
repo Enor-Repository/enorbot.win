@@ -328,49 +328,42 @@ export async function handleVolumeInquiry(
     messageLength: message.length,
   })
 
-  // "Trava {amount}" shortcut: treat amount as USDT, respond with price + math only
-  if (/\btrava\b/i.test(message)) {
-    let travaUsdt: number | null = null
-    const words = message.trim().split(/\s+/)
-    for (const word of words) {
-      if (/^trava$/i.test(word)) continue
-      const parsed = parseBrazilianNumber(word)
-      if (parsed !== null && parsed > 0) {
-        travaUsdt = parsed
-        break
-      }
+  // Bare-number shortcut: when no explicit currency marker (R$/reais/usdt/US$),
+  // treat the number as USDT and respond with price + math only.
+  // Covers "Trava 20400", "Faz 14000", "Compro 5000", bare "20000", etc.
+  const bareAmount = extractBrlAmount(message)
+  const explicitUsdt = extractUsdtAmount(message)
+  const hasExplicitBrlMarker = /(?:R\$|reais|\bbrl\b)/i.test(message)
+
+  if (bareAmount !== null && explicitUsdt === null && !hasExplicitBrlMarker) {
+    const quoteCtx = await getQuoteContext(groupId)
+    if (!quoteCtx.ok) {
+      return err(quoteCtx.error)
+    }
+    const { quotedRate } = quoteCtx.data
+    const comp = computeUsdtToBrl(bareAmount, quotedRate)
+    if (!comp.ok) {
+      return err(`Computation failed: ${comp.error}`)
     }
 
-    if (travaUsdt !== null) {
-      const travaQuoteCtx = await getQuoteContext(groupId)
-      if (!travaQuoteCtx.ok) {
-        return err(travaQuoteCtx.error)
-      }
-      const { quotedRate: travaRate } = travaQuoteCtx.data
-      const travaComp = computeUsdtToBrl(travaUsdt, travaRate)
-      if (!travaComp.ok) {
-        return err(`Computation failed: ${travaComp.error}`)
-      }
+    const shortMsg = `📊 US$ 1,00 = R$ ${formatRate(quotedRate)}\n\n${formatUsdt(bareAmount)} → ${formatBrl(comp.data.amountBrl)}`
+    await sendDealMessage(context, shortMsg, 'deal_quote')
 
-      const travaMsg = `📊 US$ 1,00 = R$ ${formatRate(travaRate)}\n\n${formatUsdt(travaUsdt)} → ${formatBrl(travaComp.data.amountBrl)}`
-      await sendDealMessage(context, travaMsg, 'deal_quote')
+    logger.info('Bare-number shortcut: treated as USDT', {
+      event: 'deal_bare_number_usdt',
+      groupId,
+      sender,
+      quotedRate,
+      amountUsdt: bareAmount,
+      amountBrl: comp.data.amountBrl,
+    })
 
-      logger.info('Trava shortcut responded with price + math', {
-        event: 'deal_trava_shortcut',
-        groupId,
-        sender,
-        quotedRate: travaRate,
-        amountUsdt: travaUsdt,
-        amountBrl: travaComp.data.amountBrl,
-      })
-
-      return ok({
-        action: 'deal_quoted',
-        groupId,
-        clientJid: sender,
-        message: travaMsg,
-      })
-    }
+    return ok({
+      action: 'deal_quoted',
+      groupId,
+      clientJid: sender,
+      message: shortMsg,
+    })
   }
 
   // Check for existing active deal

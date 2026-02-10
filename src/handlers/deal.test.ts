@@ -195,7 +195,7 @@ describe('handleVolumeInquiry', () => {
     })
     vi.mocked(createDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL })
 
-    const context = createTestContext({ message: 'compro 10k' })
+    const context = createTestContext({ message: 'tenho R$ 10.000' })
     const result = await handleVolumeInquiry(context)
 
     expect(result.ok).toBe(true)
@@ -210,7 +210,7 @@ describe('handleVolumeInquiry', () => {
   it('sends reminder when client already has an active deal', async () => {
     vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL })
 
-    const context = createTestContext({ message: 'compro 20k' })
+    const context = createTestContext({ message: 'tenho R$ 20.000' })
     const result = await handleVolumeInquiry(context)
 
     expect(result.ok).toBe(true)
