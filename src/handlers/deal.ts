@@ -62,6 +62,8 @@ import { getActiveRule, type GroupRule } from '../services/ruleService.js'
 import { getActiveQuote, forceAccept, createQuote, clearPreStatedVolume, MIN_VOLUME_USDT } from '../services/activeQuotes.js'
 import { resolveOperatorJid } from '../services/groupConfig.js'
 import { logPriceQuote, type LogEntry } from '../services/excel.js'
+// Phase 3: AI classification for active quote unrecognized input
+import { classifyOTCMessage, type EnhancedClassificationResult } from '../services/classificationEngine.js'
 
 // ============================================================================
 // Types
@@ -1597,9 +1599,13 @@ export async function handleDirectAmount(
 // ============================================================================
 
 /**
- * Handle unrecognized input during an active deal in simple mode.
- * Sends contextual feedback based on the deal state so the client
- * knows what the bot expects instead of silent drops.
+ * Handle unrecognized input during deal flow.
+ *
+ * Two paths:
+ * 1. No Supabase deal + active quote (Phase 3): classify message for observability,
+ *    tag operator so client isn't left hanging. Covers "melhorar?", "consegue melhor?", etc.
+ * 2. Active deal in simple mode: send contextual feedback based on deal state
+ *    (awaiting_amount prompt, quoted/locked operator tag).
  */
 async function handleUnrecognizedInput(
   context: RouterContext
@@ -1608,6 +1614,59 @@ async function handleUnrecognizedInput(
 
   const existingResult = await findClientDeal(groupId, sender)
   if (!existingResult.ok || !existingResult.data) {
+    // No Supabase deal (or DB failure) — check for active quote (Phase 3)
+    // On DB failure we still try to tag operator; safer than silence.
+    const activeQuote = getActiveQuote(groupId)
+    if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+      // Classify message for observability (rules first, then AI if ambiguous)
+      let classification: EnhancedClassificationResult | null = null
+      try {
+        classification = await classifyOTCMessage({
+          message: context.message,
+          groupId,
+          senderJid: sender,
+          isFromBot: false,
+          hasReceipt: false,
+          hasTronscan: false,
+          hasPriceTrigger: false,
+          inActiveThread: true,
+        })
+      } catch (e) {
+        logger.warn('Classification failed during active quote unrecognized input', {
+          event: 'active_quote_classification_error',
+          groupId,
+          sender,
+          error: e instanceof Error ? e.message : String(e),
+        })
+      }
+
+      logger.info('Unrecognized input during active quote — tagging operator', {
+        event: 'active_quote_unrecognized_operator_tag',
+        groupId,
+        sender,
+        quoteId: activeQuote.id,
+        messageType: classification?.messageType ?? 'unknown',
+        confidence: classification?.confidence ?? 'unknown',
+        aiUsed: classification?.aiUsed ?? false,
+        source: classification?.source ?? 'none',
+      })
+
+      // Tag operator so client isn't left hanging
+      const operatorJid = resolveOperatorJid(groupId)
+      const operatorTagged = !!operatorJid
+      if (operatorJid) {
+        const mentionNumber = operatorJid.replace('@s.whatsapp.net', '')
+        await sendDealMessage(context, `@${mentionNumber}`, 'deal_state_hint', [operatorJid])
+      }
+
+      return ok({
+        action: 'no_action',
+        groupId,
+        clientJid: sender,
+        message: `Unrecognized input during active quote, operator ${operatorTagged ? 'tagged' : 'not configured'} (classified: ${classification?.messageType ?? 'unknown'})`,
+      })
+    }
+
     return ok({ action: 'no_action', groupId, clientJid: sender, message: 'No active deal' })
   }
 

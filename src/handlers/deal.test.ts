@@ -104,6 +104,11 @@ vi.mock('../services/activeQuotes.js', () => ({
   MIN_VOLUME_USDT: 100,
 }))
 
+// Mock classificationEngine (Phase 3)
+vi.mock('../services/classificationEngine.js', () => ({
+  classifyOTCMessage: vi.fn(),
+}))
+
 // Mock systemPatternService - return default keywords
 vi.mock('../services/systemPatternService.js', () => ({
   getKeywordsForPattern: vi.fn((key: string) => {
@@ -125,6 +130,7 @@ import { resolveOperatorJid } from '../services/groupConfig.js'
 import { getActiveRule } from '../services/ruleService.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { getActiveQuote, createQuote, clearPreStatedVolume } from '../services/activeQuotes.js'
+import { classifyOTCMessage } from '../services/classificationEngine.js'
 
 // Import handlers under test
 import {
@@ -134,6 +140,7 @@ import {
   handleDealCancellation,
   handleRejection,
   handleVolumeInput,
+  handleDealRouted,
 } from './deal.js'
 
 // ============================================================================
@@ -1045,6 +1052,150 @@ describe('handlePriceLock — lock with no quote', () => {
       'group-123@g.us',
       expect.stringContaining('cotação ativa'),
       undefined
+    )
+  })
+})
+
+// ============================================================================
+// Phase 3: handleUnrecognizedInput with active quote (via handleDealRouted)
+// ============================================================================
+
+describe('handleDealRouted — unrecognized input with active quote (Phase 3)', () => {
+  const MOCK_ACTIVE_QUOTE = {
+    id: 'quote-1',
+    groupJid: 'group-123@g.us',
+    quotedPrice: 5.25,
+    basePrice: 5.20,
+    status: 'pending' as const,
+    quotedAt: new Date(),
+    repriceCount: 0,
+    priceSource: 'usdt_brl' as const,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(sendWithAntiDetection).mockResolvedValue({ ok: true, data: undefined })
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: null })
+    vi.mocked(getActiveQuote).mockReturnValue(null)
+  })
+
+  it('tags operator when active quote exists, no deal, message classified as negotiation', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue(MOCK_ACTIVE_QUOTE)
+    vi.mocked(resolveOperatorJid).mockReturnValue('5511888888888@s.whatsapp.net')
+    vi.mocked(classifyOTCMessage).mockResolvedValue({
+      messageType: 'negotiation',
+      confidence: 'medium',
+      triggerPattern: 'melhorar',
+      volumeBrl: null,
+      volumeUsdt: null,
+      source: 'rules',
+      processingTimeMs: 2,
+      aiUsed: false,
+    })
+
+    const context = createTestContext({ message: 'melhorar?', dealAction: 'unrecognized_input' })
+    await handleDealRouted(context)
+
+    expect(classifyOTCMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'melhorar?',
+        inActiveThread: true,
+      })
+    )
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      '@5511888888888',
+      ['5511888888888@s.whatsapp.net']
+    )
+  })
+
+  it('still tags operator when classification fails', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue(MOCK_ACTIVE_QUOTE)
+    vi.mocked(resolveOperatorJid).mockReturnValue('5511888888888@s.whatsapp.net')
+    vi.mocked(classifyOTCMessage).mockRejectedValue(new Error('AI service unavailable'))
+
+    const context = createTestContext({ message: 'consegue melhor?', dealAction: 'unrecognized_input' })
+    await handleDealRouted(context)
+
+    // Operator should still be tagged despite classification failure
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      '@5511888888888',
+      ['5511888888888@s.whatsapp.net']
+    )
+  })
+
+  it('does not tag operator when no active quote and no deal', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue(null)
+
+    const context = createTestContext({ message: 'hello', dealAction: 'unrecognized_input' })
+    await handleDealRouted(context)
+
+    // No operator tag — falls through to 'No active deal'
+    expect(sendWithAntiDetection).not.toHaveBeenCalled()
+    expect(classifyOTCMessage).not.toHaveBeenCalled()
+  })
+
+  it('does not tag operator when active quote is in terminal state', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue({ ...MOCK_ACTIVE_QUOTE, status: 'accepted' })
+
+    const context = createTestContext({ message: 'hello', dealAction: 'unrecognized_input' })
+    await handleDealRouted(context)
+
+    expect(sendWithAntiDetection).not.toHaveBeenCalled()
+    expect(classifyOTCMessage).not.toHaveBeenCalled()
+  })
+
+  it('classifies but does not send message when no operator configured', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue(MOCK_ACTIVE_QUOTE)
+    vi.mocked(resolveOperatorJid).mockReturnValue(null)
+    vi.mocked(classifyOTCMessage).mockResolvedValue({
+      messageType: 'negotiation',
+      confidence: 'medium',
+      triggerPattern: 'melhorar',
+      volumeBrl: null,
+      volumeUsdt: null,
+      source: 'rules',
+      processingTimeMs: 1,
+      aiUsed: false,
+    })
+
+    const context = createTestContext({ message: 'melhorar?', dealAction: 'unrecognized_input' })
+    await handleDealRouted(context)
+
+    // Classification still runs for observability
+    expect(classifyOTCMessage).toHaveBeenCalled()
+    // But no message sent — no operator to tag
+    expect(sendWithAntiDetection).not.toHaveBeenCalled()
+  })
+
+  it('falls into active quote path when findClientDeal returns error', async () => {
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: false, error: 'DB connection failed' })
+    vi.mocked(getActiveQuote).mockReturnValue(MOCK_ACTIVE_QUOTE)
+    vi.mocked(resolveOperatorJid).mockReturnValue('5511888888888@s.whatsapp.net')
+    vi.mocked(classifyOTCMessage).mockResolvedValue({
+      messageType: 'general',
+      confidence: 'low',
+      triggerPattern: null,
+      volumeBrl: null,
+      volumeUsdt: null,
+      source: 'rules',
+      processingTimeMs: 1,
+      aiUsed: false,
+    })
+
+    const context = createTestContext({ message: 'consegue melhor?', dealAction: 'unrecognized_input' })
+    await handleDealRouted(context)
+
+    // DB failure treated as "no deal" — operator still tagged (safer than silence)
+    expect(classifyOTCMessage).toHaveBeenCalled()
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      '@5511888888888',
+      ['5511888888888@s.whatsapp.net']
     )
   })
 })

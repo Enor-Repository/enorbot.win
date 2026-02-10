@@ -505,7 +505,9 @@ export async function routeMessage(
       groupId: context.groupId,
       error: e instanceof Error ? e.message : String(e),
     })
-    // OBSERVE_ONLY instead of IGNORE so the message is still logged for later replay
+    // OBSERVE_ONLY instead of IGNORE so the message is still logged for later replay.
+    // Note: this skips the Phase 3 active-quote catch-all below — acceptable because
+    // if the DB is down we can't be sure triggers wouldn't have matched.
     return { destination: 'OBSERVE_ONLY', context: enrichedContext }
   }
 
@@ -513,6 +515,27 @@ export async function routeMessage(
     return resolveTriggeredRoute(triggerMatch, enrichedContext)
   }
 
-  // No trigger matched
+  // Phase 3: Active quote catch-all — no more silence during live quotes
+  // This runs AFTER trigger matching, so registered triggers (e.g., "atualiza") still work.
+  // Only catches messages that didn't match ANY trigger.
+  // Note: group-scoped (not sender-scoped) — any unmatched message from any sender tags
+  // the operator. Acceptable for OTC groups (2-4 people) where any message during a
+  // live quote is likely deal-related.
+  const activeQuote = getActiveQuote(enrichedContext.groupId)
+  if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+    logger.info('Active quote catch-all: routing unmatched message to deal handler', {
+      event: 'active_quote_catchall',
+      groupId: enrichedContext.groupId,
+      sender: enrichedContext.sender,
+      quoteId: activeQuote.id,
+      message: enrichedContext.message.substring(0, 50),
+    })
+    return {
+      destination: 'DEAL_HANDLER',
+      context: { ...enrichedContext, dealAction: 'unrecognized_input' },
+    }
+  }
+
+  // No trigger matched, no active context
   return { destination: 'IGNORE', context: enrichedContext }
 }

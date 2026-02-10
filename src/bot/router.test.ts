@@ -11,6 +11,8 @@ const mockGetActiveDealForSender = vi.hoisted(() => vi.fn())
 const mockGetSpreadConfig = vi.hoisted(() => vi.fn())
 const mockGetKeywordsForPatternSync = vi.hoisted(() => vi.fn())
 const mockParseBrazilianNumber = vi.hoisted(() => vi.fn())
+const mockGetActiveQuote = vi.hoisted(() => vi.fn())
+const mockForceAccept = vi.hoisted(() => vi.fn())
 
 vi.mock('../services/groupConfig.js', () => ({
   getGroupModeSync: mockGetGroupModeSync,
@@ -43,6 +45,11 @@ vi.mock('../services/systemPatternService.js', () => ({
 
 vi.mock('../services/dealComputation.js', () => ({
   parseBrazilianNumber: mockParseBrazilianNumber,
+}))
+
+vi.mock('../services/activeQuotes.js', () => ({
+  getActiveQuote: mockGetActiveQuote,
+  forceAccept: mockForceAccept,
 }))
 
 import {
@@ -101,6 +108,7 @@ describe('routeMessage', () => {
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
     mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
     mockParseBrazilianNumber.mockReturnValue(null)
+    mockGetActiveQuote.mockReturnValue(null)
   })
 
   // ---- Trigger detection routing (via matchTrigger) ----
@@ -394,6 +402,7 @@ describe('routeMessage receipt routing', () => {
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
     mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
     mockParseBrazilianNumber.mockReturnValue(null)
+    mockGetActiveQuote.mockReturnValue(null)
   })
 
   it('routes PDF document to RECEIPT_HANDLER', async () => {
@@ -467,6 +476,7 @@ describe('routeMessage per-group modes', () => {
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
     mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
     mockParseBrazilianNumber.mockReturnValue(null)
+    mockGetActiveQuote.mockReturnValue(null)
   })
 
   describe('PAUSED mode', () => {
@@ -630,6 +640,7 @@ describe('routeMessage simple mode intercept', () => {
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
     mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
     mockParseBrazilianNumber.mockReturnValue(null)
+    mockGetActiveQuote.mockReturnValue(null)
   })
 
   // ---- Classic mode: zero behavior change ----
@@ -836,5 +847,113 @@ describe('routeMessage simple mode intercept', () => {
       // Error is caught by try/catch in routeMessage → falls through
       expect(result.destination).toBe('IGNORE')
     })
+  })
+})
+
+// ============================================================================
+// Phase 3: Active Quote Catch-All
+// ============================================================================
+
+describe('routeMessage active quote catch-all', () => {
+  const mockSock = {} as WASocket
+
+  const baseContext: RouterContext = {
+    groupId: '123456789@g.us',
+    groupName: 'Test Group',
+    message: '',
+    sender: 'client@s.whatsapp.net',
+    isControlGroup: false,
+    sock: mockSock,
+  }
+
+  const MOCK_ACTIVE_QUOTE = {
+    id: 'quote-1',
+    groupJid: '123456789@g.us',
+    quotedPrice: 5.25,
+    basePrice: 5.20,
+    status: 'pending' as const,
+    quotedAt: new Date(),
+    repriceCount: 0,
+    priceSource: 'usdt_brl' as const,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetGroupModeSync.mockReturnValue('active')
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
+    // Default: classic mode (simple mode intercept skipped)
+    mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
+    mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    mockParseBrazilianNumber.mockReturnValue(null)
+    mockGetActiveQuote.mockReturnValue(null)
+  })
+
+  it('routes unmatched message to DEAL_HANDLER when active quote exists (pending)', async () => {
+    mockGetActiveQuote.mockReturnValue(MOCK_ACTIVE_QUOTE)
+    const context = { ...baseContext, message: 'melhorar?' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('DEAL_HANDLER')
+    expect(result.context.dealAction).toBe('unrecognized_input')
+  })
+
+  it('routes unmatched message to DEAL_HANDLER when active quote is repricing', async () => {
+    mockGetActiveQuote.mockReturnValue({ ...MOCK_ACTIVE_QUOTE, status: 'repricing' })
+    const context = { ...baseContext, message: 'consegue melhor?' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('DEAL_HANDLER')
+    expect(result.context.dealAction).toBe('unrecognized_input')
+  })
+
+  it('routes to IGNORE when active quote is in terminal state (accepted)', async () => {
+    mockGetActiveQuote.mockReturnValue({ ...MOCK_ACTIVE_QUOTE, status: 'accepted' })
+    const context = { ...baseContext, message: 'hello' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('IGNORE')
+  })
+
+  it('routes to IGNORE when active quote is expired', async () => {
+    mockGetActiveQuote.mockReturnValue({ ...MOCK_ACTIVE_QUOTE, status: 'expired' })
+    const context = { ...baseContext, message: 'hello' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('IGNORE')
+  })
+
+  it('routes to IGNORE when no active quote exists', async () => {
+    mockGetActiveQuote.mockReturnValue(null)
+    const context = { ...baseContext, message: 'hello' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('IGNORE')
+  })
+
+  it('trigger match takes priority over active quote catch-all', async () => {
+    mockGetActiveQuote.mockReturnValue(MOCK_ACTIVE_QUOTE)
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ triggerPhrase: 'atualiza', actionType: 'price_quote' }) })
+    const context = { ...baseContext, message: 'atualiza' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('PRICE_HANDLER')
+    expect(result.context.hasTrigger).toBe(true)
+  })
+
+  it('simple mode: catch-all fires when intercept falls through (non-amount, non-keyword)', async () => {
+    // Simple mode intercept checks active quote for amounts/lock keywords only.
+    // "melhorar?" doesn't match either → intercept returns null → trigger matching → catch-all.
+    mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'simple' } })
+    mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+    mockGetActiveQuote.mockReturnValue(MOCK_ACTIVE_QUOTE)
+    const context = { ...baseContext, message: 'melhorar?' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('DEAL_HANDLER')
+    expect(result.context.dealAction).toBe('unrecognized_input')
+  })
+
+  it('routes to OBSERVE_ONLY (not catch-all) when matchTrigger throws', async () => {
+    // matchTrigger DB failure → OBSERVE_ONLY, skipping catch-all.
+    // Safer: we can't be sure no trigger would have matched.
+    mockGetActiveQuote.mockReturnValue(MOCK_ACTIVE_QUOTE)
+    mockMatchTrigger.mockRejectedValue(new Error('DB connection failed'))
+    const context = { ...baseContext, message: 'melhorar?' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('OBSERVE_ONLY')
   })
 })

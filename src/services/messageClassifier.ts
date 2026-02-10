@@ -151,6 +151,12 @@ export const MESSAGE_PATTERNS: Record<OTCMessageType, RegExp[]> = {
     /\b(melhor|menor|maior)\s+(pre[çc]o|valor)\b/i,
     /\bcontra[\s-]?proposta\b/i,
     /\b(aumenta|diminui|abaixa)\b/i,
+    // Standalone negotiation words/phrases (Phase 3)
+    // Note: "melhora" overlaps with \b pattern below — anchored version catches "melhorar"
+    /^melhorar?\??$/i,                          // "melhorar?" "melhora?"
+    /^consegue\s+(um\s+)?(melhor|menos)\??$/i,  // "consegue melhor?"
+    /\b(reduz|baixa|melhora)\s*(um\s+pouco|a[ií])?\b/i, // "reduz", "baixa um pouco"
+    /\b(tem\s+como|d[áa]\s+pra)\s+(melhorar|reduzir|baixar)\b/i, // "tem como melhorar?"
   ],
   confirmation: [
     /\b(fechado|fechou|feito|deal|ok|vamos|bora|combinado)\b/i,
