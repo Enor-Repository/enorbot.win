@@ -328,6 +328,51 @@ export async function handleVolumeInquiry(
     messageLength: message.length,
   })
 
+  // "Trava {amount}" shortcut: treat amount as USDT, respond with price + math only
+  if (/\btrava\b/i.test(message)) {
+    let travaUsdt: number | null = null
+    const words = message.trim().split(/\s+/)
+    for (const word of words) {
+      if (/^trava$/i.test(word)) continue
+      const parsed = parseBrazilianNumber(word)
+      if (parsed !== null && parsed > 0) {
+        travaUsdt = parsed
+        break
+      }
+    }
+
+    if (travaUsdt !== null) {
+      const travaQuoteCtx = await getQuoteContext(groupId)
+      if (!travaQuoteCtx.ok) {
+        return err(travaQuoteCtx.error)
+      }
+      const { quotedRate: travaRate } = travaQuoteCtx.data
+      const travaComp = computeUsdtToBrl(travaUsdt, travaRate)
+      if (!travaComp.ok) {
+        return err(`Computation failed: ${travaComp.error}`)
+      }
+
+      const travaMsg = `📊 US$ 1,00 = R$ ${formatRate(travaRate)}\n\n${formatUsdt(travaUsdt)} → ${formatBrl(travaComp.data.amountBrl)}`
+      await sendDealMessage(context, travaMsg, 'deal_quote')
+
+      logger.info('Trava shortcut responded with price + math', {
+        event: 'deal_trava_shortcut',
+        groupId,
+        sender,
+        quotedRate: travaRate,
+        amountUsdt: travaUsdt,
+        amountBrl: travaComp.data.amountBrl,
+      })
+
+      return ok({
+        action: 'deal_quoted',
+        groupId,
+        clientJid: sender,
+        message: travaMsg,
+      })
+    }
+  }
+
   // Check for existing active deal
   const existingResult = await findClientDeal(groupId, sender)
   if (!existingResult.ok) {
