@@ -10,7 +10,7 @@ import type { EnvConfig } from '../types/config.js'
 
 // Types
 export type GroupMode = 'learning' | 'assisted' | 'active' | 'paused'
-export type PlayerRole = 'operator' | 'client' | 'cio'
+export type PlayerRole = 'operator' | 'client' | 'cio' | 'ignore'
 
 export interface GroupConfig {
   groupJid: string
@@ -215,6 +215,15 @@ export function resolveOperatorJid(groupJid: string): string | null {
     if (entry) return entry[0]
   }
   return null
+}
+
+/**
+ * Check if a player is marked as ignored in a group.
+ * Used to silently skip messages from other bots or specific JIDs.
+ */
+export function isIgnoredPlayer(groupJid: string, playerJid: string): boolean {
+  const config = configCache.get(groupJid)
+  return config?.playerRoles?.[playerJid] === 'ignore'
 }
 
 /**

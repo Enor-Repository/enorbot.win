@@ -1001,13 +1001,15 @@ describe('handlePriceLock — lock with no quote', () => {
     })
     vi.mocked(createDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, id: 'deal-no-quote' } })
     vi.mocked(lockDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+    vi.mocked(startComputation).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+    vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'completed' } as never })
 
     const context = createTestContext({ message: 'travar 19226' })
     const result = await handlePriceLock(context)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
-      expect(result.data.action).toBe('deal_locked')
+      expect(result.data.action).toBe('deal_computed')
     }
     expect(fetchPrice).toHaveBeenCalled()
     expect(createQuote).toHaveBeenCalledWith(
@@ -1022,6 +1024,8 @@ describe('handlePriceLock — lock with no quote', () => {
       })
     )
     expect(lockDeal).toHaveBeenCalled()
+    expect(startComputation).toHaveBeenCalled()
+    expect(completeDeal).toHaveBeenCalled()
   })
 
   it('rejects amounts below MIN_VOLUME_USDT threshold', async () => {

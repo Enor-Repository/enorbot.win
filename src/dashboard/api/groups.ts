@@ -7,6 +7,7 @@ import { Router, type Request, type Response } from 'express'
 import { getAllGroupConfigs, setGroupMode, getGroupConfigSync, setPlayerRole, removePlayerRole, type PlayerRole } from '../../services/groupConfig.js'
 import { getSupabase } from '../../services/supabase.js'
 import { seedDefaultTriggers } from '../../services/systemTriggerSeeder.js'
+import { cloneGroupRuleset } from '../../services/ruleService.js'
 import { logger } from '../../utils/logger.js'
 
 // Validate group JID format
@@ -427,9 +428,9 @@ groupsRouter.put('/:groupJid/players/:playerJid/role', async (req: Request, res:
     }
 
     const { role } = req.body
-    const validRoles: (PlayerRole | null)[] = ['operator', 'client', 'cio', null]
+    const validRoles: (PlayerRole | null)[] = ['operator', 'client', 'cio', 'ignore', null]
     if (!validRoles.includes(role)) {
-      return res.status(400).json({ error: 'Invalid role. Must be "operator", "client", "cio", or null' })
+      return res.status(400).json({ error: 'Invalid role. Must be "operator", "client", "cio", "ignore", or null' })
     }
 
     // Remove role
@@ -516,6 +517,66 @@ groupsRouter.post('/:groupJid/seed', async (req: Request, res: Response) => {
     })
     res.status(500).json({
       error: 'Failed to seed triggers',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+})
+
+/**
+ * POST /api/groups/:groupJid/clone-ruleset
+ * Clone triggers, time rules, and/or spread config from a source group.
+ * Uses upsert strategy — safe to call multiple times (idempotent).
+ *
+ * Body: { sourceGroupJid: string, cloneTriggers?: boolean, cloneRules?: boolean, cloneSpreads?: boolean }
+ */
+groupsRouter.post('/:groupJid/clone-ruleset', async (req: Request, res: Response) => {
+  try {
+    const targetGroupJid = req.params.groupJid as string
+
+    if (!isValidGroupJid(targetGroupJid)) {
+      return res.status(400).json({ error: 'Invalid target group JID format' })
+    }
+
+    const { sourceGroupJid, cloneTriggers, cloneRules, cloneSpreads } = req.body
+
+    if (!sourceGroupJid || typeof sourceGroupJid !== 'string') {
+      return res.status(400).json({ error: 'sourceGroupJid is required' })
+    }
+
+    if (!isValidGroupJid(sourceGroupJid)) {
+      return res.status(400).json({ error: 'Invalid source group JID format' })
+    }
+
+    // Self-clone and "nothing selected" are validated by cloneGroupRuleset()
+    const result = await cloneGroupRuleset({
+      sourceGroupJid,
+      targetGroupJid,
+      cloneTriggers: cloneTriggers !== false,
+      cloneRules: cloneRules !== false,
+      cloneSpreads: cloneSpreads !== false,
+    })
+
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error })
+    }
+
+    logger.info('Ruleset cloned via dashboard', {
+      event: 'ruleset_cloned_dashboard',
+      sourceGroupJid,
+      targetGroupJid,
+      triggers: result.data.triggers,
+      rules: result.data.rules,
+      spreads: result.data.spreads,
+    })
+
+    res.json({ success: true, ...result.data })
+  } catch (error) {
+    logger.error('Failed to clone ruleset', {
+      event: 'clone_ruleset_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({
+      error: 'Failed to clone ruleset',
       message: error instanceof Error ? error.message : String(error),
     })
   }

@@ -804,11 +804,50 @@ export async function handlePriceLock(
           })
         }
 
-        const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(quotedRate)}\n\n${formatUsdt(noQuoteAmount)} → ${formatBrl(comp.data.amountBrl)}`
-        await sendDealMessage(context, calcMsg, 'deal_quote')
+        // Complete the deal immediately (locked deal = handshake, no TTL expiry)
+        if (dealId) {
+          const computeResult = await startComputation(dealId, groupId)
+          if (computeResult.ok) {
+            await completeDeal(dealId, groupId, {
+              amountBrl: comp.data.amountBrl,
+              amountUsdt: noQuoteAmount,
+            })
+          }
+        }
 
-        logger.info('Lock with no quote: fresh rate fetched, LOCKED deal created', {
-          event: 'deal_lock_no_quote',
+        // Send formatted calculation + @mention (mirrors simple-mode completion)
+        const operatorJid = resolveOperatorJid(groupId)
+        const mentions = operatorJid ? [operatorJid] : []
+        const calcLine = `${formatUsdt(noQuoteAmount)} × ${formatRate(quotedRate)} = ${formatBrl(comp.data.amountBrl)}`
+        const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
+        const calcMsg = `🔒 ${calcLine}${mentionSuffix}`
+
+        const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+        if (sendResult.ok) {
+          logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
+          recordMessageSent(groupId)
+        }
+
+        // Archive (fire-and-forget)
+        if (dealId) {
+          archiveDeal(dealId, groupId).catch(() => { /* logged internally */ })
+        }
+
+        // Clear active quote now that deal reached terminal state
+        forceAccept(groupId)
+
+        // Log to Excel (fire-and-forget)
+        logDealToExcel({
+          groupId,
+          groupName: context.groupName,
+          clientIdentifier: context.senderName ?? sender,
+          volumeBrl: comp.data.amountBrl,
+          quote: quotedRate,
+          acquiredUsdt: noQuoteAmount,
+        })
+
+        logger.info('Cold-lock flow: completed deal immediately', {
+          event: 'deal_cold_lock_complete',
           dealId,
           groupId,
           sender,
@@ -818,7 +857,7 @@ export async function handlePriceLock(
         })
 
         return ok({
-          action: 'deal_locked',
+          action: 'deal_computed',
           dealId,
           groupId,
           clientJid: sender,
@@ -1862,11 +1901,11 @@ export function startDealSweepTimer(): void {
           expired: result.data.length,
         })
 
-        // Send "off" notification for locked/quoted deals that expired
+        // Send "off" notification for quoted deals that expired
         const sock = getSocket()
         if (sock) {
           for (const expired of result.data) {
-            if (expired.state === 'locked' || expired.state === 'quoted') {
+            if (expired.state === 'quoted') {
               const operatorJid = resolveOperatorJid(expired.groupJid)
               const mentions = operatorJid ? [operatorJid] : []
               const offMsg = operatorJid ? `off @${operatorJid.replace(/@.*/, '')}` : 'off'

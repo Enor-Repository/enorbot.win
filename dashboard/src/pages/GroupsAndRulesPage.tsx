@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { ChevronDown, ChevronRight, Zap, Clock, DollarSign, Handshake, Users, Star } from 'lucide-react'
+import { ChevronDown, ChevronRight, Zap, Clock, DollarSign, Handshake, Users, Star, Copy, EyeOff } from 'lucide-react'
 import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { GroupSpreadEditor } from '@/components/groups/GroupSpreadEditor'
 import { GroupTimeRulesEditor } from '@/components/groups/GroupTimeRulesEditor'
 import { GroupTriggersEditor } from '@/components/groups/GroupTriggersEditor'
 import GroupDealsView from '@/components/groups/GroupDealsView'
+import { CloneRulesetModal } from '@/components/groups/CloneRulesetModal'
 
 const FETCH_TIMEOUT_MS = 10000
 
@@ -73,6 +74,9 @@ export function GroupsAndRulesPage() {
   // updatingRole removed — backend route not yet implemented
   const [sectionState, setSectionState] = useState<Record<string, Record<string, boolean>>>({})
   const [mountedSections, setMountedSections] = useState<Record<string, Set<string>>>({})
+
+  // Clone modal state
+  const [cloneSource, setCloneSource] = useState<{ jid: string; name: string } | null>(null)
 
   // Section counts per group { [groupJid]: { triggers: 5, timeRules: 3, deals: 0 } }
   const [sectionCounts, setSectionCounts] = useState<Record<string, Record<string, number>>>({})
@@ -149,7 +153,7 @@ export function GroupsAndRulesPage() {
     }
   }
 
-  const updatePlayerRole = async (groupJid: string, playerJid: string, role: 'operator' | 'client' | 'cio' | null) => {
+  const updatePlayerRole = async (groupJid: string, playerJid: string, role: 'operator' | 'client' | 'cio' | 'ignore' | null) => {
     // Optimistically update local state
     setGroupPlayers(prev => {
       const current = prev[groupJid] || []
@@ -275,61 +279,73 @@ export function GroupsAndRulesPage() {
                 {/* Tech-y glow effect */}
                 <div className="absolute top-0 right-0 w-32 h-32 bg-purple-500/5 blur-3xl rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
 
-                {/* Group Header - Clickable */}
-                <button
-                  onClick={() => toggleGroup(group.id, group.jid)}
-                  className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-purple-500/5 transition-all duration-200 rounded-t-lg border-l-2 border-l-transparent hover:border-l-purple-400 relative"
-                >
-                  {/* Expand/Collapse Icon */}
-                  <div className="flex-shrink-0">
-                    {isExpanded ? (
-                      <ChevronDown className="h-4 w-4 text-purple-400" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4 text-purple-400" />
-                    )}
-                  </div>
-
-                  {/* Group Info - Single Line */}
-                  <div className="flex-1 min-w-0 flex items-center gap-3">
-                    <h3 className="text-base font-mono font-semibold text-foreground truncate">
-                      {group.name}
-                    </h3>
-                    {group.isControlGroup && (
-                      <Badge className="bg-purple-500/30 text-purple-300 border-purple-500/40 text-[10px] px-1.5 py-0 uppercase">
-                        CTRL
-                      </Badge>
-                    )}
-                    <Badge className={`${getModeColor(group.mode)} text-[10px] font-mono px-1.5 py-0 uppercase`}>
-                      {group.mode}
-                    </Badge>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono ml-auto">
-                      <span className="flex items-center gap-1">
-                        <span className="text-purple-400">{group.messagesCollected}</span>
-                        <span className="opacity-60">msg</span>
-                      </span>
-                      <span className="opacity-40">|</span>
-                      <span className="flex items-center gap-1">
-                        <span className="text-purple-400">{group.learningDays}</span>
-                        <span className="opacity-60">d</span>
-                      </span>
-                      {group.rulesActive > 0 && (
-                        <>
-                          <span className="opacity-40">|</span>
-                          <span className="flex items-center gap-1 text-green-400 font-semibold">
-                            {group.rulesActive} rules
-                          </span>
-                        </>
+                {/* Group Header Row */}
+                <div className="flex items-center gap-0 relative">
+                  {/* Group Header - Clickable */}
+                  <button
+                    onClick={() => toggleGroup(group.id, group.jid)}
+                    className="flex-1 min-w-0 text-left px-4 py-3 flex items-center gap-3 hover:bg-purple-500/5 transition-all duration-200 rounded-tl-lg border-l-2 border-l-transparent hover:border-l-purple-400"
+                  >
+                    {/* Expand/Collapse Icon */}
+                    <div className="flex-shrink-0">
+                      {isExpanded ? (
+                        <ChevronDown className="h-4 w-4 text-purple-400" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 text-purple-400" />
                       )}
                     </div>
-                  </div>
 
-                  {/* Rules Count Badge */}
-                  {group.rulesActive > 0 && (
-                    <div className="flex-shrink-0 h-6 w-6 rounded-full bg-green-500/20 border border-green-500/40 flex items-center justify-center shadow-[0_0_8px_rgba(34,197,94,0.3)]">
-                      <span className="text-xs font-bold text-green-400">{group.rulesActive}</span>
+                    {/* Group Info - Single Line */}
+                    <div className="flex-1 min-w-0 flex items-center gap-3">
+                      <h3 className="text-base font-mono font-semibold text-foreground truncate">
+                        {group.name}
+                      </h3>
+                      {group.isControlGroup && (
+                        <Badge className="bg-purple-500/30 text-purple-300 border-purple-500/40 text-[10px] px-1.5 py-0 uppercase">
+                          CTRL
+                        </Badge>
+                      )}
+                      <Badge className={`${getModeColor(group.mode)} text-[10px] font-mono px-1.5 py-0 uppercase`}>
+                        {group.mode}
+                      </Badge>
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono ml-auto">
+                        <span className="flex items-center gap-1">
+                          <span className="text-purple-400">{group.messagesCollected}</span>
+                          <span className="opacity-60">msg</span>
+                        </span>
+                        <span className="opacity-40">|</span>
+                        <span className="flex items-center gap-1">
+                          <span className="text-purple-400">{group.learningDays}</span>
+                          <span className="opacity-60">d</span>
+                        </span>
+                        {group.rulesActive > 0 && (
+                          <>
+                            <span className="opacity-40">|</span>
+                            <span className="flex items-center gap-1 text-green-400 font-semibold">
+                              {group.rulesActive} rules
+                            </span>
+                          </>
+                        )}
+                      </div>
                     </div>
-                  )}
-                </button>
+
+                    {/* Rules Count Badge */}
+                    {group.rulesActive > 0 && (
+                      <div className="flex-shrink-0 h-6 w-6 rounded-full bg-green-500/20 border border-green-500/40 flex items-center justify-center shadow-[0_0_8px_rgba(34,197,94,0.3)]">
+                        <span className="text-xs font-bold text-green-400">{group.rulesActive}</span>
+                      </div>
+                    )}
+                  </button>
+
+                  {/* Clone Button — sibling of the header button, not nested */}
+                  <button
+                    onClick={() => setCloneSource({ jid: group.jid, name: group.name })}
+                    className="flex-shrink-0 p-1.5 mr-3 rounded-md text-muted-foreground hover:text-purple-400 hover:bg-purple-500/10 border border-transparent hover:border-purple-500/30 transition-all"
+                    title="Clone ruleset to another group"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </div>
 
                 {/* Expanded Sections — Collapsible Accordion */}
                 {isExpanded && (
@@ -415,6 +431,11 @@ export function GroupsAndRulesPage() {
                                                     OPERATOR
                                                   </Badge>
                                                 )}
+                                                {player.role === 'ignore' && (
+                                                  <Badge className="bg-red-500/15 text-red-400 border-red-500/30 text-[9px] font-mono px-1.5 py-0">
+                                                    IGNORED
+                                                  </Badge>
+                                                )}
                                               </div>
                                               <div className="text-[10px] text-muted-foreground font-mono">
                                                 {player.messageCount} msg
@@ -437,6 +458,23 @@ export function GroupsAndRulesPage() {
                                             >
                                               <Star className={`h-4 w-4 ${player.role === 'operator' ? 'fill-cyan-400' : ''}`} />
                                             </button>
+
+                                            {/* Ignore Toggle */}
+                                            <button
+                                              onClick={() => updatePlayerRole(
+                                                group.jid,
+                                                player.jid,
+                                                player.role === 'ignore' ? null : 'ignore'
+                                              )}
+                                              className={`flex-shrink-0 p-1.5 rounded-md transition-all ${
+                                                player.role === 'ignore'
+                                                  ? 'text-red-400 bg-red-500/20 border border-red-500/40 shadow-[0_0_8px_rgba(239,68,68,0.3)]'
+                                                  : 'text-muted-foreground hover:text-red-400 hover:bg-red-500/10 border border-transparent'
+                                              }`}
+                                              title={player.role === 'ignore' ? 'Stop ignoring this player' : 'Ignore this player'}
+                                            >
+                                              <EyeOff className={`h-4 w-4`} />
+                                            </button>
                                           </div>
                                         ))}
                                     </div>
@@ -455,6 +493,17 @@ export function GroupsAndRulesPage() {
           })
         )}
       </div>
+
+      {/* Clone Ruleset Modal */}
+      {cloneSource && (
+        <CloneRulesetModal
+          open
+          onOpenChange={(open) => { if (!open) setCloneSource(null) }}
+          sourceGroup={cloneSource}
+          allGroups={groups.map(g => ({ jid: g.jid, name: g.name, mode: g.mode }))}
+          onSuccess={fetchGroups}
+        />
+      )}
     </div>
   )
 }

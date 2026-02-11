@@ -28,7 +28,7 @@ import { useSupabaseAuthState } from './authState.js'
 import { clearAuthState, checkSupabaseHealth } from '../services/supabase.js'
 import { routeMessage, isControlGroupMessage, type RouterContext } from './router.js'
 import { handleControlMessage } from '../handlers/control.js'
-import { ensureGroupRegistered, getGroupModeSync } from '../services/groupConfig.js'
+import { ensureGroupRegistered, getGroupModeSync, isIgnoredPlayer } from '../services/groupConfig.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { handlePriceMessage } from '../handlers/price.js'
 import { handleTronscanMessage } from '../handlers/tronscan.js'
@@ -368,6 +368,17 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       if (!messageText.trim()) return
 
       const sender = msg.key.participant || msg.key.remoteJid || ''
+
+      // Skip messages from ignored players (e.g., other bots in the group)
+      if (isIgnoredPlayer(groupId, sender)) {
+        logger.debug('Message from ignored player skipped', {
+          event: 'ignored_player_skipped',
+          groupId,
+          sender,
+        })
+        return
+      }
+
       // Extract sender's WhatsApp display name (pushName) if available
       const senderName = msg.pushName || undefined
 

@@ -996,7 +996,7 @@ export async function sweepExpiredDeals(): Promise<Result<ExpiredDealInfo[]>> {
     const { data, error } = await supabase
       .from('active_deals')
       .select('id, group_jid, state')
-      .in('state', ['quoted', 'locked', 'awaiting_amount'])
+      .in('state', ['quoted', 'awaiting_amount'])
       .lt('ttl_expires_at', now)
       .limit(50)
 
