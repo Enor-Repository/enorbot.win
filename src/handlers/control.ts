@@ -154,6 +154,7 @@ export type ControlCommandType =
   | 'config'    // config <group> - show group config
   | 'trigger'   // trigger add|remove <group> <pattern>
   | 'role'      // role <group> <player> operator|client|cio
+  | 'turnoff'   // turnoff - emergency kill: pause all groups + cancel all deals
   | 'select'    // Number selection for interactive group selection
   | 'unknown'
 
@@ -206,6 +207,11 @@ export function parseControlCommand(message: string): ControlCommand {
     const rest = message.replace(/^role\s+/i, '').trim()
     const parts = parseQuotedArgs(rest)
     return { type: 'role', args: parts }
+  }
+
+  // Turnoff command: emergency kill switch — pause all groups + cancel all deals
+  if (lower === 'turnoff') {
+    return { type: 'turnoff', args: [] }
   }
 
   // Pause command: "pause" or "pause [group name]"
@@ -688,6 +694,51 @@ async function handleRoleCommand(context: RouterContext, args: string[]): Promis
     groupName: match.groupName,
     playerJid,
     role,
+    triggeredBy: context.sender,
+  })
+}
+
+/**
+ * Handle turnoff command — emergency kill switch.
+ * Pauses ALL groups and cancels ALL active deals in one shot.
+ */
+async function handleTurnoffCommand(context: RouterContext): Promise<void> {
+  logger.info('TURNOFF command received — emergency kill', {
+    event: 'turnoff_command',
+    triggeredBy: context.sender,
+  })
+
+  // 1. Pause all groups
+  const configs = await getAllGroupConfigs()
+  let pausedCount = 0
+  for (const config of configs.values()) {
+    if (config.mode !== 'paused') {
+      await setGroupMode(config.groupJid, 'paused', context.sender)
+      pausedCount++
+    }
+  }
+
+  // 2. Cancel all active deals across all groups
+  let cancelledCount = 0
+  for (const config of configs.values()) {
+    const dealsResult = await getActiveDeals(config.groupJid)
+    if (!dealsResult.ok) continue
+    for (const deal of dealsResult.data) {
+      await cancelDeal(deal.id, config.groupJid, 'cancelled_by_operator').catch(() => {})
+      archiveDeal(deal.id, config.groupJid).catch(() => {})
+      cancelledCount++
+    }
+    // Cancel active quotes too
+    cancelQuote(config.groupJid)
+  }
+
+  const msg = `TURNOFF: ${pausedCount} groups paused, ${cancelledCount} deals cancelled.`
+  await sendControlResponse(context, msg)
+
+  logger.info('TURNOFF complete', {
+    event: 'turnoff_complete',
+    pausedCount,
+    cancelledCount,
     triggeredBy: context.sender,
   })
 }
@@ -1400,6 +1451,10 @@ export async function handleControlMessage(context: RouterContext): Promise<Resu
 
     case 'role':
       await handleRoleCommand(context, command.args)
+      break
+
+    case 'turnoff':
+      await handleTurnoffCommand(context)
       break
 
     case 'pause':
