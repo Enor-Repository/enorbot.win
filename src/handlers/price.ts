@@ -465,6 +465,7 @@ async function sendPriceResponse(
     priceSource: pricingSource === 'commercial_dollar' ? 'commercial_dollar' : 'usdt_brl',
     basePrice: price, // Raw price before spread
     preStatedVolume,
+    requesterJid: context.sender,
   })
 
   // Log bot response to observations (fire-and-forget)

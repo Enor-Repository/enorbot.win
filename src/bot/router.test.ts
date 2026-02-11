@@ -869,6 +869,7 @@ describe('routeMessage active quote catch-all', () => {
   const MOCK_ACTIVE_QUOTE = {
     id: 'quote-1',
     groupJid: '123456789@g.us',
+    requesterJid: 'client@s.whatsapp.net',
     quotedPrice: 5.25,
     basePrice: 5.20,
     status: 'pending' as const,
@@ -945,6 +946,13 @@ describe('routeMessage active quote catch-all', () => {
     const result = await routeMessage(context)
     expect(result.destination).toBe('DEAL_HANDLER')
     expect(result.context.dealAction).toBe('unrecognized_input')
+  })
+
+  it('routes non-requester message to IGNORE during active quote (sender scoping)', async () => {
+    mockGetActiveQuote.mockReturnValue(MOCK_ACTIVE_QUOTE)
+    const context = { ...baseContext, sender: 'other-client@s.whatsapp.net', message: 'boa noite' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('IGNORE')
   })
 
   it('routes to OBSERVE_ONLY (not catch-all) when matchTrigger throws', async () => {

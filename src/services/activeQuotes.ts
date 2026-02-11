@@ -27,6 +27,8 @@ export type PriceSource = 'usdt_brl' | 'commercial_dollar'
 export interface ActiveQuote {
   id: string
   groupJid: string
+  /** JID of the client who initiated this negotiation (sent the price request) */
+  requesterJid: string
   quotedPrice: number
   quotedAt: Date
   repriceCount: number
@@ -91,6 +93,8 @@ export interface CreateQuoteOptions {
   basePrice?: number
   /** Pre-stated USDT volume from price request message */
   preStatedVolume?: number
+  /** JID of the client who initiated this negotiation */
+  requesterJid: string
 }
 
 /**
@@ -99,22 +103,23 @@ export interface CreateQuoteOptions {
  *
  * @param groupJid - The group JID
  * @param price - The final quoted price (after spread)
- * @param options - Optional price source and base price for volatility monitoring
+ * @param options - Price source, base price, and requester JID for quote tracking
  */
-export function createQuote(groupJid: string, price: number, options?: CreateQuoteOptions): ActiveQuote {
-  const priceSource = options?.priceSource ?? 'usdt_brl'
-  const basePrice = options?.basePrice ?? price
+export function createQuote(groupJid: string, price: number, options: CreateQuoteOptions): ActiveQuote {
+  const priceSource = options.priceSource ?? 'usdt_brl'
+  const basePrice = options.basePrice ?? price
 
   const quote: ActiveQuote = {
     id: generateQuoteId(),
     groupJid,
+    requesterJid: options.requesterJid,
     quotedPrice: price,
     quotedAt: new Date(),
     repriceCount: 0,
     status: 'pending',
     priceSource,
     basePrice,
-    preStatedVolume: options?.preStatedVolume,
+    preStatedVolume: options.preStatedVolume,
   }
 
   quotes.set(groupJid, quote)
@@ -123,6 +128,7 @@ export function createQuote(groupJid: string, price: number, options?: CreateQuo
     event: 'quote_created',
     quoteId: quote.id,
     groupJid,
+    requesterJid: options.requesterJid,
     price,
     priceSource,
     basePrice,

@@ -768,6 +768,7 @@ export async function handlePriceLock(
         createQuote(groupId, quotedRate, {
           priceSource: 'usdt_brl',
           basePrice: baseRate,
+          requesterJid: context.sender,
         })
 
         // No need to cancel prior deal — we're inside `deal === null` branch

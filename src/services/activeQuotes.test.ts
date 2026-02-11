@@ -27,7 +27,11 @@ import {
   getAllActiveQuotes,
   MIN_VOLUME_USDT,
   _resetForTesting,
+  type CreateQuoteOptions,
 } from './activeQuotes.js'
+
+const REQ = '5511999999999@s.whatsapp.net'
+const opts = (extra?: Partial<Omit<CreateQuoteOptions, 'requesterJid'>>): CreateQuoteOptions => ({ requesterJid: REQ, ...extra })
 
 describe('activeQuotes', () => {
   beforeEach(() => {
@@ -37,26 +41,27 @@ describe('activeQuotes', () => {
 
   describe('createQuote', () => {
     it('creates a new quote with pending status', () => {
-      const quote = createQuote('group1@g.us', 5.2650)
+      const quote = createQuote('group1@g.us', 5.2650, opts())
 
       expect(quote.groupJid).toBe('group1@g.us')
       expect(quote.quotedPrice).toBe(5.2650)
       expect(quote.status).toBe('pending')
       expect(quote.repriceCount).toBe(0)
+      expect(quote.requesterJid).toBe(REQ)
     })
 
     it('defaults to usdt_brl price source and uses quotedPrice as basePrice', () => {
-      const quote = createQuote('group1@g.us', 5.2650)
+      const quote = createQuote('group1@g.us', 5.2650, opts())
 
       expect(quote.priceSource).toBe('usdt_brl')
       expect(quote.basePrice).toBe(5.2650)
     })
 
     it('accepts custom price source and base price', () => {
-      const quote = createQuote('group1@g.us', 5.2900, {
+      const quote = createQuote('group1@g.us', 5.2900, opts({
         priceSource: 'commercial_dollar',
         basePrice: 5.2800,
-      })
+      }))
 
       expect(quote.priceSource).toBe('commercial_dollar')
       expect(quote.basePrice).toBe(5.2800)
@@ -64,21 +69,22 @@ describe('activeQuotes', () => {
     })
 
     it('replaces existing quote for same group', () => {
-      createQuote('group1@g.us', 5.2650)
-      const quote2 = createQuote('group1@g.us', 5.2700)
+      createQuote('group1@g.us', 5.2650, opts())
+      const quote2 = createQuote('group1@g.us', 5.2700, opts())
 
       expect(getActiveQuoteCount()).toBe(1)
       expect(getActiveQuote('group1@g.us')?.quotedPrice).toBe(5.2700)
     })
 
     it('logs quote creation with price source', () => {
-      createQuote('group1@g.us', 5.2650, { priceSource: 'commercial_dollar', basePrice: 5.26 })
+      createQuote('group1@g.us', 5.2650, opts({ priceSource: 'commercial_dollar', basePrice: 5.26 }))
 
       expect(mockLogger.info).toHaveBeenCalledWith(
         'Active quote created',
         expect.objectContaining({
           event: 'quote_created',
           groupJid: 'group1@g.us',
+          requesterJid: REQ,
           price: 5.2650,
           priceSource: 'commercial_dollar',
           basePrice: 5.26,
@@ -87,20 +93,20 @@ describe('activeQuotes', () => {
     })
 
     it('stores preStatedVolume when provided', () => {
-      const quote = createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+      const quote = createQuote('group1@g.us', 5.2650, opts({ preStatedVolume: 30000 }))
 
       expect(quote.preStatedVolume).toBe(30000)
       expect(getActiveQuote('group1@g.us')?.preStatedVolume).toBe(30000)
     })
 
     it('leaves preStatedVolume undefined when not provided', () => {
-      const quote = createQuote('group1@g.us', 5.2650)
+      const quote = createQuote('group1@g.us', 5.2650, opts())
 
       expect(quote.preStatedVolume).toBeUndefined()
     })
 
     it('stores preStatedVolume with k suffix (15000)', () => {
-      const quote = createQuote('group1@g.us', 5.2650, { preStatedVolume: 15000 })
+      const quote = createQuote('group1@g.us', 5.2650, opts({ preStatedVolume: 15000 }))
 
       expect(quote.preStatedVolume).toBe(15000)
     })
@@ -108,7 +114,7 @@ describe('activeQuotes', () => {
 
   describe('clearPreStatedVolume', () => {
     it('clears preStatedVolume on existing quote', () => {
-      createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+      createQuote('group1@g.us', 5.2650, opts({ preStatedVolume: 30000 }))
       clearPreStatedVolume('group1@g.us')
 
       expect(getActiveQuote('group1@g.us')?.preStatedVolume).toBeUndefined()
@@ -120,7 +126,7 @@ describe('activeQuotes', () => {
     })
 
     it('prevents double consumption', () => {
-      createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+      createQuote('group1@g.us', 5.2650, opts({ preStatedVolume: 30000 }))
 
       // First consumption
       const vol = getActiveQuote('group1@g.us')?.preStatedVolume
@@ -140,7 +146,7 @@ describe('activeQuotes', () => {
 
   describe('preStatedVolume expiry', () => {
     it('preStatedVolume is gone after quote expires', async () => {
-      createQuote('group1@g.us', 5.2650, { preStatedVolume: 30000 })
+      createQuote('group1@g.us', 5.2650, opts({ preStatedVolume: 30000 }))
       const quote = getActiveQuote('group1@g.us')!
       quote.quotedAt = new Date(Date.now() - 6 * 60 * 1000)
 
@@ -152,7 +158,7 @@ describe('activeQuotes', () => {
 
   describe('getActiveQuote', () => {
     it('returns quote if exists', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       const quote = getActiveQuote('group1@g.us')
 
       expect(quote).not.toBeNull()
@@ -166,7 +172,7 @@ describe('activeQuotes', () => {
 
   describe('state machine transitions', () => {
     it('allows pending -> repricing', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       const result = transitionTo('group1@g.us', 'repricing')
 
       expect(result.ok).toBe(true)
@@ -174,21 +180,21 @@ describe('activeQuotes', () => {
     })
 
     it('allows pending -> accepted', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       const result = transitionTo('group1@g.us', 'accepted')
 
       expect(result.ok).toBe(true)
     })
 
     it('allows pending -> expired', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       const result = transitionTo('group1@g.us', 'expired')
 
       expect(result.ok).toBe(true)
     })
 
     it('allows repricing -> pending', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       transitionTo('group1@g.us', 'repricing')
       const result = transitionTo('group1@g.us', 'pending')
 
@@ -196,7 +202,7 @@ describe('activeQuotes', () => {
     })
 
     it('allows repricing -> accepted (critical: acceptance wins)', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       transitionTo('group1@g.us', 'repricing')
       const result = transitionTo('group1@g.us', 'accepted')
 
@@ -204,7 +210,7 @@ describe('activeQuotes', () => {
     })
 
     it('rejects transition from terminal state (accepted)', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       transitionTo('group1@g.us', 'accepted')
       const result = transitionTo('group1@g.us', 'pending')
 
@@ -213,7 +219,7 @@ describe('activeQuotes', () => {
     })
 
     it('rejects invalid transition (repricing -> expired)', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       transitionTo('group1@g.us', 'repricing')
       const result = transitionTo('group1@g.us', 'expired')
 
@@ -231,7 +237,7 @@ describe('activeQuotes', () => {
 
   describe('tryLockForReprice', () => {
     it('returns true and locks quote if pending', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       const locked = tryLockForReprice('group1@g.us')
 
       expect(locked).toBe(true)
@@ -239,7 +245,7 @@ describe('activeQuotes', () => {
     })
 
     it('returns false if already repricing (prevents concurrent reprices)', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       expect(tryLockForReprice('group1@g.us')).toBe(true) // First lock
       expect(tryLockForReprice('group1@g.us')).toBe(false) // Second fails
     })
@@ -249,7 +255,7 @@ describe('activeQuotes', () => {
     })
 
     it('returns false if quote is accepted', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       transitionTo('group1@g.us', 'accepted')
       expect(tryLockForReprice('group1@g.us')).toBe(false)
     })
@@ -257,7 +263,7 @@ describe('activeQuotes', () => {
 
   describe('unlockAfterReprice', () => {
     it('updates price and returns to pending', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       tryLockForReprice('group1@g.us')
       unlockAfterReprice('group1@g.us', 5.2700)
 
@@ -267,7 +273,7 @@ describe('activeQuotes', () => {
     })
 
     it('does nothing if not in repricing state', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       unlockAfterReprice('group1@g.us', 5.2700)
 
       expect(getActiveQuote('group1@g.us')?.quotedPrice).toBe(5.2650)
@@ -276,7 +282,7 @@ describe('activeQuotes', () => {
 
   describe('forceAccept', () => {
     it('accepts quote from pending state', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       forceAccept('group1@g.us')
 
       // Quote should be removed after acceptance
@@ -284,7 +290,7 @@ describe('activeQuotes', () => {
     })
 
     it('CRITICAL: accepts quote even during repricing', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       tryLockForReprice('group1@g.us') // status = repricing
       forceAccept('group1@g.us') // MUST succeed
 
@@ -304,7 +310,7 @@ describe('activeQuotes', () => {
     })
 
     it('removes quote from store after acceptance', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       expect(getActiveQuoteCount()).toBe(1)
       forceAccept('group1@g.us')
       expect(getActiveQuoteCount()).toBe(0)
@@ -313,7 +319,7 @@ describe('activeQuotes', () => {
 
   describe('incrementRepriceCount', () => {
     it('increments and returns new count', () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
 
       expect(incrementRepriceCount('group1@g.us')).toBe(1)
       expect(incrementRepriceCount('group1@g.us')).toBe(2)
@@ -327,7 +333,7 @@ describe('activeQuotes', () => {
 
   describe('expireOldQuotes', () => {
     it('expires quotes older than TTL', async () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       const quote = getActiveQuote('group1@g.us')!
 
       // Set quotedAt to past
@@ -343,7 +349,7 @@ describe('activeQuotes', () => {
     })
 
     it('does not expire quotes within TTL', async () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
 
       await expireOldQuotes(5 * 60 * 1000)
 
@@ -351,7 +357,7 @@ describe('activeQuotes', () => {
     })
 
     it('does not expire quotes in repricing state', async () => {
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       const quote = getActiveQuote('group1@g.us')!
       quote.quotedAt = new Date(Date.now() - 6 * 60 * 1000)
       tryLockForReprice('group1@g.us')
@@ -365,15 +371,15 @@ describe('activeQuotes', () => {
   describe('getActiveQuoteCount and getAllActiveQuotes', () => {
     it('returns correct count', () => {
       expect(getActiveQuoteCount()).toBe(0)
-      createQuote('group1@g.us', 5.2650)
+      createQuote('group1@g.us', 5.2650, opts())
       expect(getActiveQuoteCount()).toBe(1)
-      createQuote('group2@g.us', 5.2700)
+      createQuote('group2@g.us', 5.2700, opts())
       expect(getActiveQuoteCount()).toBe(2)
     })
 
     it('returns all active quotes', () => {
-      createQuote('group1@g.us', 5.2650)
-      createQuote('group2@g.us', 5.2700)
+      createQuote('group1@g.us', 5.2650, opts())
+      createQuote('group2@g.us', 5.2700, opts())
 
       const quotes = getAllActiveQuotes()
       expect(quotes).toHaveLength(2)

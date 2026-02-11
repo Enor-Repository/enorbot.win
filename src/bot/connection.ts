@@ -496,9 +496,10 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
 
             // Phase 3 extension: don't go silent during active quotes.
             // The trigger match was incidental (e.g., "preço" inside "preço ruim melhora p/ mim").
-            // Route to deal handler so operator gets tagged.
+            // Route to deal handler so operator gets tagged — only for the requester who initiated the quote.
             const activeQuote = getActiveQuote(groupId)
-            if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+            if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')
+              && sender === activeQuote.requesterJid) {
               logger.info('Suppressed price redirected to deal handler (active quote)', {
                 event: 'suppressed_price_active_quote_redirect',
                 groupId,

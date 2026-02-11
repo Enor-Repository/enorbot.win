@@ -1068,6 +1068,7 @@ describe('handleDealRouted — unrecognized input with active quote (Phase 3)', 
   const MOCK_ACTIVE_QUOTE = {
     id: 'quote-1',
     groupJid: 'group-123@g.us',
+    requesterJid: '5511999999999@s.whatsapp.net',
     quotedPrice: 5.25,
     basePrice: 5.20,
     status: 'pending' as const,

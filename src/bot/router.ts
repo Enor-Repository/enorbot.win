@@ -173,6 +173,9 @@ async function trySimpleModeIntercept(
   if (!dealResult.ok || !dealResult.data) {
     // No active deal — check if there's an active quote
     // Sprint 9.1: Bridges the price response → deal handler flow
+    // NOTE: active-quote paths here (direct_amount, price_lock) are intentionally NOT
+    // sender-scoped. Any client sending a number or lock keyword against the posted price
+    // is a legitimate OTC action. Only the catch-all at the end of routeMessage is scoped.
     const activeQuote = getActiveQuote(enrichedContext.groupId)
     if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
       // Bare USDT amount → direct_amount (creates + completes deal in one shot)
@@ -518,11 +521,11 @@ export async function routeMessage(
   // Phase 3: Active quote catch-all — no more silence during live quotes
   // This runs AFTER trigger matching, so registered triggers (e.g., "atualiza") still work.
   // Only catches messages that didn't match ANY trigger.
-  // Note: group-scoped (not sender-scoped) — any unmatched message from any sender tags
-  // the operator. Acceptable for OTC groups (2-4 people) where any message during a
-  // live quote is likely deal-related.
+  // Scoped to the requester who initiated the quote — messages from other clients are ignored
+  // to prevent uninvolved participants from spamming the operator with @mentions.
   const activeQuote = getActiveQuote(enrichedContext.groupId)
-  if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')) {
+  if (activeQuote && (activeQuote.status === 'pending' || activeQuote.status === 'repricing')
+    && enrichedContext.sender === activeQuote.requesterJid) {
     logger.info('Active quote catch-all: routing unmatched message to deal handler', {
       event: 'active_quote_catchall',
       groupId: enrichedContext.groupId,
