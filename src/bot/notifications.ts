@@ -248,8 +248,8 @@ export async function sendDealExpirationNotification(
 
   // Send to the OTC group where the deal expired
   const message = count === 1
-    ? '⏰ Uma cotação expirou neste grupo.'
-    : `⏰ ${count} cotações expiraram neste grupo.`
+    ? 'Uma cotação expirou neste grupo.'
+    : `${count} cotações expiraram neste grupo.`
 
   const result = await sendWithAntiDetection(socket, groupJid, message)
 
@@ -286,7 +286,7 @@ export async function notifyDealSweepResults(totalExpired: number): Promise<void
   if (totalExpired === 0) return
 
   await queueControlNotification(
-    `⏰ Deal sweep: ${totalExpired} cotação(ões) expirada(s).`
+    `Deal sweep: ${totalExpired} cotação(ões) expirada(s).`
   )
 
   logger.info('Deal sweep notification sent to control group', {

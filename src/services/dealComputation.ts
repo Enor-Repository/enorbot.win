@@ -342,7 +342,7 @@ export function computeUsdtToBrl(amountUsdt: number, rate: number): Result<DealC
     rate: formatRate(rate),
   }
 
-  const display = `${formatted.usdt} × ${formatted.rate} = ${formatted.brl}`
+  const display = `${formatted.usdt} * ${formatted.rate} = ${formatted.brl}`
 
   return ok({
     amountBrl: truncatedBrl,

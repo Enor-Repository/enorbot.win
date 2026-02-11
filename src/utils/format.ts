@@ -110,5 +110,5 @@ export function formatCommercialDollar(bid: number, ask: number): string {
     return `R$${truncated.toFixed(4).replace('.', ',')}`
   }
 
-  return `💲 *Dólar Comercial*\nCompra: ${formatRate(bid)}\nVenda: ${formatRate(ask)}`
+  return `*Dólar Comercial*\nCompra: ${formatRate(bid)}\nVenda: ${formatRate(ask)}`
 }

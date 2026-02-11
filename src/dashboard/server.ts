@@ -25,6 +25,7 @@ import { volatilityRouter } from './api/volatility.js'
 import { escalationsRouter } from './api/escalations.js'
 import { quotesRouter, allQuotesRouter } from './api/quotes.js'
 import { dashboardAuth } from './middleware/auth.js'
+import { simulatorRouter } from './api/simulator.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -84,7 +85,8 @@ const writeLimiter = rateLimit({
   message: { error: 'Too many write requests, please try again later' },
 })
 app.use('/api', (req: Request, _res: Response, next: NextFunction) => {
-  if (['POST', 'PUT', 'DELETE'].includes(req.method)) {
+  // Simulator sends many POSTs rapidly during testing — exempt from write limiter
+  if (['POST', 'PUT', 'DELETE'].includes(req.method) && !req.path.startsWith('/simulator')) {
     return writeLimiter(req, _res, next)
   }
   next()
@@ -122,6 +124,7 @@ app.use('/api/groups/:groupJid/escalations', escalationsRouter)
 app.use('/api/groups/:groupJid/quote', quotesRouter)
 app.use('/api/quotes', allQuotesRouter)
 app.use('/api/system-patterns', systemPatternsRouter)
+app.use('/api/simulator', simulatorRouter)
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {

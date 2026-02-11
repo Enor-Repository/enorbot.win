@@ -714,10 +714,17 @@ describe('handlePriceLock simple mode', () => {
     }
     expect(startComputation).toHaveBeenCalled()
     expect(completeDeal).toHaveBeenCalled()
+    // Calc message sent without operator mention
     expect(sendWithAntiDetection).toHaveBeenCalledWith(
       expect.anything(),
       'group-123@g.us',
-      expect.stringContaining('×'),
+      expect.stringContaining('*'),
+    )
+    // Operator tagged in separate follow-up message
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('@5511888888888'),
       ['5511888888888@s.whatsapp.net']
     )
   })
@@ -813,13 +820,20 @@ describe('handleVolumeInput', () => {
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.data.action).toBe('deal_computed')
-      expect(result.data.message).toContain('×')
+      expect(result.data.message).toContain('*')
     }
     expect(startComputation).toHaveBeenCalled()
     expect(completeDeal).toHaveBeenCalledWith('deal-uuid-1', 'group-123@g.us', {
       amountBrl: 26250,
       amountUsdt: 5000,
     })
+    // Calc message sent without operator mention
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('*'),
+    )
+    // Operator tagged in separate follow-up message
     expect(sendWithAntiDetection).toHaveBeenCalledWith(
       expect.anything(),
       'group-123@g.us',
@@ -1023,8 +1037,7 @@ describe('handlePriceLock — active quote + inline amount', () => {
     expect(result.ok).toBe(true)
     if (result.ok) {
       expect(result.data.action).toBe('deal_computed')
-      expect(result.data.message).toContain('🔒')
-      expect(result.data.message).toContain('@')
+      expect(result.data.message).toContain('*')
     }
 
     // Full lifecycle: create → lock → compute → complete
@@ -1033,11 +1046,17 @@ describe('handlePriceLock — active quote + inline amount', () => {
     expect(startComputation).toHaveBeenCalled()
     expect(completeDeal).toHaveBeenCalled()
 
-    // Must send with operator mention
+    // Calc message sent without operator mention
     expect(sendWithAntiDetection).toHaveBeenCalledWith(
       expect.anything(),
       'group-123@g.us',
-      expect.stringContaining('🔒'),
+      expect.stringContaining('*'),
+    )
+    // Operator tagged in separate follow-up message
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('@5511888888888'),
       ['5511888888888@s.whatsapp.net']
     )
   })

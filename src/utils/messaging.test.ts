@@ -486,4 +486,108 @@ describe('sendWithAntiDetection', () => {
 
     await expect(promise).resolves.not.toThrow()
   })
+
+  describe('simulator mode (_simulatorMode flag)', () => {
+    let simSocket: {
+      _simulatorMode: boolean
+      sendPresenceUpdate: ReturnType<typeof vi.fn>
+      sendMessage: ReturnType<typeof vi.fn>
+    }
+
+    beforeEach(() => {
+      simSocket = {
+        _simulatorMode: true,
+        sendPresenceUpdate: vi.fn().mockResolvedValue(undefined),
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      }
+    })
+
+    it('skips typing indicator and chaos delay', async () => {
+      const result = await sendWithAntiDetection(
+        simSocket as never,
+        'group@g.us',
+        'Hello'
+      )
+
+      expect(result.ok).toBe(true)
+      expect(simSocket.sendPresenceUpdate).not.toHaveBeenCalled()
+      expect(mockChaosDelay).not.toHaveBeenCalled()
+      expect(simSocket.sendMessage).toHaveBeenCalledOnce()
+    })
+
+    it('sends message with correct payload', async () => {
+      await sendWithAntiDetection(
+        simSocket as never,
+        'group@g.us',
+        'Test message'
+      )
+
+      expect(simSocket.sendMessage).toHaveBeenCalledWith('group@g.us', {
+        text: 'Test message',
+      })
+    })
+
+    it('includes mentions when provided', async () => {
+      const mentions = ['5511999@s.whatsapp.net']
+      await sendWithAntiDetection(
+        simSocket as never,
+        'group@g.us',
+        'Hello @user',
+        mentions
+      )
+
+      expect(simSocket.sendMessage).toHaveBeenCalledWith('group@g.us', {
+        text: 'Hello @user',
+        mentions: ['5511999@s.whatsapp.net'],
+      })
+    })
+
+    it('omits mentions for empty array', async () => {
+      await sendWithAntiDetection(
+        simSocket as never,
+        'group@g.us',
+        'Hello',
+        []
+      )
+
+      const payload = simSocket.sendMessage.mock.calls[0][1]
+      expect(payload).not.toHaveProperty('mentions')
+    })
+
+    it('returns err on sendMessage failure', async () => {
+      simSocket.sendMessage.mockRejectedValue(new Error('Mock error'))
+
+      const result = await sendWithAntiDetection(
+        simSocket as never,
+        'group@g.us',
+        'Hello'
+      )
+
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error).toBe('Mock error')
+      }
+    })
+
+    it('never throws on sendMessage failure', async () => {
+      simSocket.sendMessage.mockRejectedValue(new Error('Crash'))
+
+      await expect(
+        sendWithAntiDetection(simSocket as never, 'group@g.us', 'Hello')
+      ).resolves.not.toThrow()
+    })
+
+    it('bypasses learning mode block', async () => {
+      // The simulator bypass runs BEFORE the learning mode check,
+      // so even learning-mode group JIDs get a response
+      const result = await sendWithAntiDetection(
+        simSocket as never,
+        'learning-group@g.us',
+        'Hello'
+      )
+
+      expect(result.ok).toBe(true)
+      expect(simSocket.sendMessage).toHaveBeenCalledOnce()
+    })
+  })
 })

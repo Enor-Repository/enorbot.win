@@ -92,6 +92,20 @@ export async function sendWithAntiDetection(
     return err('Invalid message: must be non-empty')
   }
 
+  // Simulator mode: skip all delays, send immediately
+  if ((sock as any)._simulatorMode) {
+    try {
+      const messagePayload: { text: string; mentions?: string[] } = { text: message }
+      if (mentions && mentions.length > 0) messagePayload.mentions = mentions
+      await sock.sendMessage(jid, messagePayload)
+      return ok(undefined)
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : 'Unknown error'
+      logger.error('Simulator message send failed', { event: 'simulator_message_error', jid, error: errorMessage })
+      return err(errorMessage)
+    }
+  }
+
   // SAFETY: Block outbound messages to learning mode groups
   if (jid.endsWith('@g.us')) {
     const mode = getGroupModeSync(jid)

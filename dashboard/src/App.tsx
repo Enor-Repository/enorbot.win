@@ -3,6 +3,7 @@ import { Layout } from './components/shared/Layout'
 import { OverviewPage } from './pages/OverviewPage'
 import { GroupsAndRulesPage } from './pages/GroupsAndRulesPage'
 import { CostsPage } from './pages/CostsPage'
+import { SimulatorPage } from './pages/SimulatorPage'
 
 function App() {
   return (
@@ -12,6 +13,7 @@ function App() {
         <Route path="/overview" element={<OverviewPage />} />
         <Route path="/groups" element={<GroupsAndRulesPage />} />
         <Route path="/costs" element={<CostsPage />} />
+        <Route path="/simulator" element={<SimulatorPage />} />
         {/* Catch-all: redirect unknown paths to overview */}
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes>

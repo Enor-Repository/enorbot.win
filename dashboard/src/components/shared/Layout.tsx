@@ -1,6 +1,6 @@
 import { ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Activity, BarChart3, ListTree, Zap } from 'lucide-react'
+import { Activity, BarChart3, ListTree, MessageSquare, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SystemStatus } from './SystemStatus'
 
@@ -12,6 +12,7 @@ const navItems = [
   { to: '/overview', icon: Activity, label: 'Overview' },
   { to: '/groups', icon: ListTree, label: 'Groups & Rules' },
   { to: '/costs', icon: BarChart3, label: 'Costs' },
+  { to: '/simulator', icon: MessageSquare, label: 'Simulator' },
 ]
 
 export function Layout({ children }: LayoutProps) {

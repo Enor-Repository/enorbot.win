@@ -105,6 +105,13 @@ export const API_ENDPOINTS = {
   /** Sprint 4: Trigger manual deal sweep */
   groupDealSweep: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/deals/sweep`,
+  /** Clone ruleset from source group to target group */
+  cloneRuleset: (targetGroupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(targetGroupJid)}/clone-ruleset`,
+  /** Simulator: list groups */
+  simulatorGroups: `${API_BASE_URL}/api/simulator/groups`,
+  /** Simulator: send message */
+  simulatorSend: `${API_BASE_URL}/api/simulator/send`,
 } as const
 
 /**
@@ -112,6 +119,33 @@ export const API_ENDPOINTS = {
  */
 export type APIEndpoint = typeof API_ENDPOINTS
 export type APIEndpointKey = keyof APIEndpoint
+
+// ============================================================================
+// Clone Ruleset Types
+// ============================================================================
+
+/** Request body for clone ruleset */
+export interface CloneRulesetRequest {
+  sourceGroupJid: string
+  cloneTriggers?: boolean
+  cloneRules?: boolean
+  cloneSpreads?: boolean
+}
+
+/** Per-category clone counts */
+export interface CloneCategoryCounts {
+  created: number
+  updated: number
+  skipped: number
+}
+
+/** Response from clone ruleset endpoint */
+export interface CloneRulesetResponse {
+  success: boolean
+  triggers: CloneCategoryCounts
+  rules: CloneCategoryCounts
+  spreads: { updated: boolean }
+}
 
 /**
  * Dashboard auth secret from build-time env var.

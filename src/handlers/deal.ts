@@ -92,12 +92,12 @@ export interface SweepNotification {
 
 function buildQuoteMessage(deal: ActiveDeal, amountBrl: number | null, amountUsdt: number | null, simpleMode = false): string {
   const lines: string[] = []
-  lines.push('📊 *Cotação*')
+  lines.push('*Cotação*')
   lines.push('')
   lines.push(`Taxa: ${formatRate(deal.quotedRate)}`)
 
   if (amountBrl !== null && amountUsdt !== null) {
-    lines.push(`${formatBrl(amountBrl)} → ${formatUsdt(amountUsdt)}`)
+    lines.push(`${formatBrl(amountBrl)} = ${formatUsdt(amountUsdt)}`)
   }
 
   lines.push('')
@@ -113,7 +113,7 @@ function buildQuoteMessage(deal: ActiveDeal, amountBrl: number | null, amountUsd
 function buildLockMessage(deal: ActiveDeal): string {
   const rate = deal.lockedRate ?? deal.quotedRate
   const lines: string[] = []
-  lines.push('🔒 *Taxa Travada*')
+  lines.push('*Taxa Travada*')
   lines.push('')
   lines.push(`Taxa: ${formatRate(rate)}`)
 
@@ -133,7 +133,7 @@ function buildLockMessage(deal: ActiveDeal): string {
 function buildCompletionMessage(deal: ActiveDeal): string {
   const rate = deal.lockedRate ?? deal.quotedRate
   const lines: string[] = []
-  lines.push('✅ *Operação Confirmada*')
+  lines.push('*Operação Confirmada*')
   lines.push('')
   lines.push(`Taxa: ${formatRate(rate)}`)
 
@@ -151,11 +151,11 @@ function buildCompletionMessage(deal: ActiveDeal): string {
 }
 
 function buildExpirationMessage(): string {
-  return '⏰ Sua cotação expirou. Envie uma nova mensagem para receber uma cotação atualizada.'
+  return 'Sua cotação expirou. Envie uma nova mensagem para receber uma cotação atualizada.'
 }
 
 function buildCancellationMessage(): string {
-  return '❌ Operação cancelada.'
+  return 'Operação cancelada.'
 }
 
 // ============================================================================
@@ -278,7 +278,7 @@ async function sendDealMessage(
 
 /**
  * Complete a locked deal in one shot: LOCKED → COMPUTING → COMPLETED,
- * send 🔒 message with @operator, archive, clear quote, log to Excel.
+ * send calculation message, tag @operator separately, archive, clear quote, log to Excel.
  *
  * Used by ALL paths that create a locked deal with a known amount:
  * - handleVolumeInquiry bare-amount shortcut
@@ -310,28 +310,31 @@ async function completeLockAndNotify(params: {
     }
   }
 
-  // 2. Send 🔒 message with @operator mention
-  const operatorJid = resolveOperatorJid(groupId)
-  const mentions = operatorJid ? [operatorJid] : []
-  const calcLine = `${formatUsdt(amountUsdt)} × ${formatRate(rate)} = ${formatBrl(amountBrl)}`
-  const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
-  const calcMsg = `🔒 ${calcLine}${mentionSuffix}`
+  // 2. Send calculation message (no emoji, Davi-style format)
+  const calcMsg = `${formatUsdt(amountUsdt)} * ${formatRate(rate)} = ${formatBrl(amountBrl)}`
 
-  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg)
   if (sendResult.ok) {
     logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
     recordMessageSent(groupId)
   }
 
-  // 3. Archive (fire-and-forget)
+  // 3. Tag operator in a separate message
+  const operatorJid = resolveOperatorJid(groupId)
+  if (operatorJid) {
+    const tagMsg = `@${operatorJid.replace(/@.*/, '')}`
+    await sendWithAntiDetection(context.sock, groupId, tagMsg, [operatorJid])
+  }
+
+  // 4. Archive (fire-and-forget)
   if (dealId) {
     archiveDeal(dealId, groupId).catch(() => { /* logged internally */ })
   }
 
-  // 4. Clear active quote — deal reached terminal state
+  // 5. Clear active quote — deal reached terminal state
   forceAccept(groupId)
 
-  // 5. Log to Excel (fire-and-forget)
+  // 6. Log to Excel (fire-and-forget)
   logDealToExcel({
     groupId,
     groupName: context.groupName,
@@ -341,7 +344,7 @@ async function completeLockAndNotify(params: {
     acquiredUsdt: amountUsdt,
   })
 
-  // 6. Log
+  // 7. Log
   logger.info('Lock completed immediately (handshake)', {
     event: logEvent,
     dealId,
@@ -501,10 +504,10 @@ export async function handleVolumeInquiry(
     const existing = existingResult.data
     // Client already has an active deal — remind them
     const stateMessages: Record<string, string> = {
-      quoted: '📊 Você já tem uma cotação aberta. Responda *trava* para travar a taxa.',
-      locked: '🔒 Sua taxa já está travada. Responda *fechado* para confirmar.',
-      awaiting_amount: '💰 Aguardando o valor em USDT. Envie o valor desejado.',
-      computing: '⏳ Sua operação está sendo processada.',
+      quoted: 'Você já tem uma cotação aberta. Responda *trava* para travar a taxa.',
+      locked: 'Sua taxa já está travada. Responda *fechado* para confirmar.',
+      awaiting_amount: 'Aguardando o valor em USDT. Envie o valor desejado.',
+      computing: 'Sua operação está sendo processada.',
     }
     const reminder = stateMessages[existing.state] ?? 'Você já tem uma operação ativa.'
     await sendDealMessage(context, reminder, 'deal_reminder')
@@ -892,8 +895,8 @@ export async function handlePriceLock(
 
   if (deal.state !== 'quoted') {
     const stateMessages: Record<string, string> = {
-      locked: '🔒 Sua taxa já está travada. Responda *fechado* para confirmar.',
-      computing: '⏳ Sua operação está sendo processada.',
+      locked: 'Sua taxa já está travada. Responda *fechado* para confirmar.',
+      computing: 'Sua operação está sendo processada.',
     }
     const msg = stateMessages[deal.state] ?? 'Operação já em andamento.'
     await sendDealMessage(context, msg, 'deal_state_reminder')
@@ -973,17 +976,20 @@ export async function handlePriceLock(
       })
       if (!completeResult.ok) return err(completeResult.error)
 
-      // Send formatted calculation + @mention
-      const operatorJid = resolveOperatorJid(groupId)
-      const mentions = operatorJid ? [operatorJid] : []
-      const calcLine = `${formatUsdt(simpleAmount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
-      const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
-      const calcMsg = `🔒 ${calcLine}${mentionSuffix}`
+      // Send formatted calculation
+      const calcMsg = `${formatUsdt(simpleAmount)} * ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
 
-      const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+      const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg)
       if (sendResult.ok) {
         logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
         recordMessageSent(groupId)
+      }
+
+      // Tag operator in a separate message
+      const operatorJid = resolveOperatorJid(groupId)
+      if (operatorJid) {
+        const tagMsg = `@${operatorJid.replace(/@.*/, '')}`
+        await sendWithAntiDetection(context.sock, groupId, tagMsg, [operatorJid])
       }
 
       // Archive (fire-and-forget)
@@ -1112,7 +1118,7 @@ export async function handleConfirmation(
     // Confirmation on a quote = auto-lock first, then compute
     await sendDealMessage(
       context,
-      '📊 Primeiro trave a taxa respondendo *trava*, depois confirme.',
+      'Primeiro trave a taxa respondendo *trava*, depois confirme.',
       'deal_state_hint'
     )
     return ok({
@@ -1126,8 +1132,8 @@ export async function handleConfirmation(
 
   if (deal.state !== 'locked') {
     const stateMessages: Record<string, string> = {
-      computing: '⏳ Sua operação está sendo processada.',
-      completed: '✅ Sua operação já foi concluída.',
+      computing: 'Sua operação está sendo processada.',
+      completed: 'Sua operação já foi concluída.',
     }
     const msg = stateMessages[deal.state] ?? 'Operação já em andamento.'
     await sendDealMessage(context, msg, 'deal_state_reminder')
@@ -1181,16 +1187,20 @@ export async function handleConfirmation(
       return err(completeResult.error)
     }
 
-    // Send confirmation with operator @tag
-    const operatorJid = resolveOperatorJid(groupId)
-    const mentions = operatorJid ? [operatorJid] : []
-    const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
-    const confirmMsg = `✅ US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(finalUsdt)} → ${formatBrl(finalBrl)}${mentionSuffix}`
+    // Send confirmation calculation
+    const confirmMsg = `${formatUsdt(finalUsdt)} * ${formatRate(rate)} = ${formatBrl(finalBrl)}`
 
-    const sendResult = await sendWithAntiDetection(context.sock, groupId, confirmMsg, mentions)
+    const sendResult = await sendWithAntiDetection(context.sock, groupId, confirmMsg)
     if (sendResult.ok) {
       logBotMessage({ groupJid: groupId, content: confirmMsg, messageType: 'deal_completed', isControlGroup: false })
       recordMessageSent(groupId)
+    }
+
+    // Tag operator in a separate message
+    const operatorJid = resolveOperatorJid(groupId)
+    if (operatorJid) {
+      const tagMsg = `@${operatorJid.replace(/@.*/, '')}`
+      await sendWithAntiDetection(context.sock, groupId, tagMsg, [operatorJid])
     }
 
     // Archive the deal (fire-and-forget)
@@ -1238,7 +1248,7 @@ export async function handleConfirmation(
   // Amounts not available — ask client
   await sendDealMessage(
     context,
-    '💰 Informe o valor da operação (ex: "10k", "R$ 5.000", "500 usdt").',
+    'Informe o valor da operação (ex: "10k", "R$ 5.000", "500 usdt").',
     'deal_amount_needed'
   )
 
@@ -1409,7 +1419,7 @@ export async function handleRejection(
 /**
  * Sprint 9: Handle volume input (AWAITING_AMOUNT state).
  * Client sends a USDT amount (e.g., "5000", "10k") after rate was locked.
- * Computes USDT × rate = BRL, sends formatted message, @mentions operator, completes deal.
+ * Computes USDT * rate = BRL, sends formatted message, @mentions operator, completes deal.
  */
 export async function handleVolumeInput(
   context: RouterContext
@@ -1461,7 +1471,7 @@ export async function handleVolumeInput(
     })
   }
 
-  // Compute USDT × rate = BRL
+  // Compute USDT * rate = BRL
   const rate = deal.lockedRate ?? deal.quotedRate
   const comp = computeUsdtToBrl(amount, rate)
 
@@ -1479,17 +1489,24 @@ export async function handleVolumeInput(
   })
   if (!completeResult.ok) return err(completeResult.error)
 
-  // Send formatted calculation + @mention
+  // Send formatted calculation, then @mention operator separately
   const operatorJid = resolveOperatorJid(groupId)
-  const mentions = operatorJid ? [operatorJid] : []
-  const calcLine = `${formatUsdt(amount)} × ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
-  const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
-  const calcMsg = `✅ ${calcLine}${mentionSuffix}`
+  const calcMsg = `${formatUsdt(amount)} * ${formatRate(rate)} = ${formatBrl(comp.data.amountBrl)}`
 
-  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg)
   if (sendResult.ok) {
     logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
     recordMessageSent(groupId)
+  }
+
+  // Tag operator in a separate follow-up message
+  if (operatorJid) {
+    const tagMsg = `@${operatorJid.replace(/@.*/, '')}`
+    const tagResult = await sendWithAntiDetection(context.sock, groupId, tagMsg, [operatorJid])
+    if (tagResult.ok) {
+      logBotMessage({ groupJid: groupId, content: tagMsg, messageType: 'notification', isControlGroup: false })
+      recordMessageSent(groupId)
+    }
   }
 
   // Archive (fire-and-forget)
@@ -1575,7 +1592,7 @@ export async function handleDirectAmount(
     })
   }
 
-  // Compute USDT × quotedPrice = BRL
+  // Compute USDT * quotedPrice = BRL
   const rate = activeQuote.quotedPrice
   const comp = computeUsdtToBrl(amount, rate)
   if (!comp.ok) {
