@@ -155,6 +155,7 @@ export type ControlCommandType =
   | 'trigger'   // trigger add|remove <group> <pattern>
   | 'role'      // role <group> <player> operator|client|cio
   | 'turnoff'   // turnoff - emergency kill: pause all groups + cancel all deals
+  | 'turnon'    // turnon [group] - list paused groups or resume one to learning mode
   | 'select'    // Number selection for interactive group selection
   | 'unknown'
 
@@ -212,6 +213,12 @@ export function parseControlCommand(message: string): ControlCommand {
   // Turnoff command: emergency kill switch — pause all groups + cancel all deals
   if (lower === 'turnoff') {
     return { type: 'turnoff', args: [] }
+  }
+
+  // Turnon command: "turnon" lists paused groups, "turnon <group>" resumes one
+  if (lower === 'turnon' || lower.startsWith('turnon ')) {
+    const args = stripped.replace(/^turnon\s*/i, '').trim()
+    return { type: 'turnon', args: args ? [args] : [] }
   }
 
   // Pause command: "pause" or "pause [group name]"
@@ -739,6 +746,61 @@ async function handleTurnoffCommand(context: RouterContext): Promise<void> {
     event: 'turnoff_complete',
     pausedCount,
     cancelledCount,
+    triggeredBy: context.sender,
+  })
+}
+
+/**
+ * Handle turnon command.
+ * No args: list all paused groups so CIO can pick one.
+ * With args: resume the named group to learning mode.
+ */
+async function handleTurnonCommand(context: RouterContext, args: string[]): Promise<void> {
+  const configs = await getAllGroupConfigs()
+  const pausedGroups = [...configs.values()].filter(c => c.mode === 'paused')
+
+  // No args — list paused groups
+  if (args.length === 0) {
+    if (pausedGroups.length === 0) {
+      await sendControlResponse(context, 'No groups are paused.')
+      return
+    }
+
+    const lines = ['Paused groups (send *turnon <name>* to resume):']
+    for (const g of pausedGroups) {
+      lines.push(`• ${g.groupName}`)
+    }
+    await sendControlResponse(context, lines.join('\n'))
+    return
+  }
+
+  // With args — find and resume the group
+  const groupSearch = args[0]
+  const match = findMatchingGroup(groupSearch)
+
+  if (!match.found || !match.groupId) {
+    await sendControlResponse(context, `No group matching "${groupSearch}" found`)
+    return
+  }
+
+  const current = configs.get(match.groupId)
+  if (current && current.mode !== 'paused') {
+    await sendControlResponse(context, `${match.groupName} is already ${current.mode}, not paused.`)
+    return
+  }
+
+  const result = await setGroupMode(match.groupId, 'learning', context.sender)
+  if (!result.ok) {
+    await sendControlResponse(context, `Failed to resume: ${result.error}`)
+    return
+  }
+
+  await sendControlResponse(context, `${match.groupName} resumed to LEARNING mode.`)
+
+  logger.info('TURNON: group resumed to learning', {
+    event: 'turnon_command',
+    groupId: match.groupId,
+    groupName: match.groupName,
     triggeredBy: context.sender,
   })
 }
@@ -1455,6 +1517,10 @@ export async function handleControlMessage(context: RouterContext): Promise<Resu
 
     case 'turnoff':
       await handleTurnoffCommand(context)
+      break
+
+    case 'turnon':
+      await handleTurnonCommand(context, command.args)
       break
 
     case 'pause':
