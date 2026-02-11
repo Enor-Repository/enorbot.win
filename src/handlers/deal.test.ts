@@ -931,13 +931,15 @@ describe('handlePriceLock — pre-stated volume', () => {
     })
     vi.mocked(createDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, id: 'deal-pre-stated' } })
     vi.mocked(lockDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+    vi.mocked(startComputation).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+    vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'completed' } as never })
 
     const context = createTestContext({ message: 'trava' })
     const result = await handlePriceLock(context)
 
     expect(result.ok).toBe(true)
     if (result.ok) {
-      expect(result.data.action).toBe('deal_locked')
+      expect(result.data.action).toBe('deal_computed')
     }
     expect(clearPreStatedVolume).toHaveBeenCalledWith('group-123@g.us')
     expect(createDeal).toHaveBeenCalledWith(
@@ -947,6 +949,8 @@ describe('handlePriceLock — pre-stated volume', () => {
       })
     )
     expect(lockDeal).toHaveBeenCalled()
+    expect(startComputation).toHaveBeenCalled()
+    expect(completeDeal).toHaveBeenCalled()
     expect(sendWithAntiDetection).toHaveBeenCalled()
   })
 
@@ -969,6 +973,73 @@ describe('handlePriceLock — pre-stated volume', () => {
     // Should proceed to bare-lock path (creates deal from quote)
     expect(result.ok).toBe(true)
     expect(clearPreStatedVolume).not.toHaveBeenCalled()
+  })
+})
+
+// ============================================================================
+// handlePriceLock — Active Quote + Inline Amount (Daniel's "trava 100k" scenario)
+// ============================================================================
+
+describe('handlePriceLock — active quote + inline amount', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(sendWithAntiDetection).mockResolvedValue({ ok: true, data: undefined })
+    vi.mocked(findClientDeal).mockResolvedValue({ ok: true, data: null })
+    vi.mocked(getSpreadConfig).mockResolvedValue({
+      ok: true,
+      data: { defaultSide: 'client_buys_usdt', quoteTtlSeconds: 180 } as never,
+    })
+    vi.mocked(getActiveRule).mockResolvedValue({ ok: true, data: null })
+  })
+
+  it('completes deal immediately when "trava 100k" with active quote', async () => {
+    vi.mocked(getActiveQuote).mockReturnValue({
+      groupJid: 'group-123@g.us',
+      quotedPrice: 5.2077,
+      basePrice: 5.20,
+      status: 'pending',
+      quotedAt: new Date(),
+      repriceCount: 0,
+      priceSource: 'usdt_brl',
+    } as never)
+    vi.mocked(parseBrazilianNumber).mockImplementation((input: string) => {
+      if (input === '100k') return 100000
+      return null
+    })
+    vi.mocked(computeUsdtToBrl).mockReturnValue({
+      ok: true,
+      data: { amountBrl: 520770, amountUsdt: 100000, rate: 5.2077, display: '', formatted: { brl: '', usdt: '', rate: '' } },
+    })
+    vi.mocked(createDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, id: 'deal-trava-100k' } })
+    vi.mocked(lockDeal).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+    vi.mocked(startComputation).mockResolvedValue({ ok: true, data: MOCK_DEAL as never })
+    vi.mocked(completeDeal).mockResolvedValue({ ok: true, data: { ...MOCK_DEAL, state: 'completed' } as never })
+    vi.mocked(resolveOperatorJid).mockReturnValue('5511888888888@s.whatsapp.net')
+
+    const context = createTestContext({ message: 'Trava 100k' })
+    const result = await handlePriceLock(context)
+
+    // Must return deal_computed, NOT deal_locked
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.data.action).toBe('deal_computed')
+      expect(result.data.message).toContain('🔒')
+      expect(result.data.message).toContain('@')
+    }
+
+    // Full lifecycle: create → lock → compute → complete
+    expect(createDeal).toHaveBeenCalled()
+    expect(lockDeal).toHaveBeenCalled()
+    expect(startComputation).toHaveBeenCalled()
+    expect(completeDeal).toHaveBeenCalled()
+
+    // Must send with operator mention
+    expect(sendWithAntiDetection).toHaveBeenCalledWith(
+      expect.anything(),
+      'group-123@g.us',
+      expect.stringContaining('🔒'),
+      ['5511888888888@s.whatsapp.net']
+    )
   })
 })
 

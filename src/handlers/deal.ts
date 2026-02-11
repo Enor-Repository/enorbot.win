@@ -273,6 +273,95 @@ async function sendDealMessage(
 }
 
 // ============================================================================
+// Shared: Complete a locked deal immediately (locked = handshake)
+// ============================================================================
+
+/**
+ * Complete a locked deal in one shot: LOCKED → COMPUTING → COMPLETED,
+ * send 🔒 message with @operator, archive, clear quote, log to Excel.
+ *
+ * Used by ALL paths that create a locked deal with a known amount:
+ * - handleVolumeInquiry bare-amount shortcut
+ * - handlePriceLock active-quote + inline amount
+ * - handlePriceLock active-quote + pre-stated volume
+ * - handlePriceLock cold-lock (no quote)
+ * - handleDirectAmount
+ *
+ * State transitions are best-effort — if DB fails, we still send the message
+ * so the user sees their calculation and the operator is tagged.
+ */
+async function completeLockAndNotify(params: {
+  dealId: string | undefined
+  groupId: string
+  sender: string
+  rate: number
+  amountUsdt: number
+  amountBrl: number
+  context: RouterContext
+  logEvent: string
+}): Promise<Result<DealHandlerResult>> {
+  const { dealId, groupId, sender, rate, amountUsdt, amountBrl, context, logEvent } = params
+
+  // 1. Transition: LOCKED → COMPUTING → COMPLETED (best-effort)
+  if (dealId) {
+    const computeResult = await startComputation(dealId, groupId)
+    if (computeResult.ok) {
+      await completeDeal(dealId, groupId, { amountBrl, amountUsdt })
+    }
+  }
+
+  // 2. Send 🔒 message with @operator mention
+  const operatorJid = resolveOperatorJid(groupId)
+  const mentions = operatorJid ? [operatorJid] : []
+  const calcLine = `${formatUsdt(amountUsdt)} × ${formatRate(rate)} = ${formatBrl(amountBrl)}`
+  const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
+  const calcMsg = `🔒 ${calcLine}${mentionSuffix}`
+
+  const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
+  if (sendResult.ok) {
+    logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
+    recordMessageSent(groupId)
+  }
+
+  // 3. Archive (fire-and-forget)
+  if (dealId) {
+    archiveDeal(dealId, groupId).catch(() => { /* logged internally */ })
+  }
+
+  // 4. Clear active quote — deal reached terminal state
+  forceAccept(groupId)
+
+  // 5. Log to Excel (fire-and-forget)
+  logDealToExcel({
+    groupId,
+    groupName: context.groupName,
+    clientIdentifier: context.senderName ?? sender,
+    volumeBrl: amountBrl,
+    quote: rate,
+    acquiredUsdt: amountUsdt,
+  })
+
+  // 6. Log
+  logger.info('Lock completed immediately (handshake)', {
+    event: logEvent,
+    dealId,
+    groupId,
+    sender,
+    rate,
+    amountUsdt,
+    amountBrl,
+  })
+
+  return ok({
+    action: 'deal_computed',
+    dealId,
+    groupId,
+    clientJid: sender,
+    message: calcMsg,
+  })
+}
+
+// ============================================================================
 // Sprint 9.1: Dispatcher for connection.ts DEAL_HANDLER routing
 // ============================================================================
 
@@ -390,25 +479,15 @@ export async function handleVolumeInquiry(
       })
     }
 
-    const shortMsg = `📊 US$ 1,00 = R$ ${formatRate(quotedRate)}\n\n${formatUsdt(bareAmount)} → ${formatBrl(comp.data.amountBrl)}`
-    await sendDealMessage(context, shortMsg, 'deal_quote')
-
-    logger.info('Calculator lock: LOCKED deal created', {
-      event: 'deal_calculator_lock',
+    return completeLockAndNotify({
       dealId,
       groupId,
       sender,
-      quotedRate,
+      rate: quotedRate,
       amountUsdt: bareAmount,
       amountBrl: comp.data.amountBrl,
-    })
-
-    return ok({
-      action: 'deal_locked',
-      dealId,
-      groupId,
-      clientJid: sender,
-      message: shortMsg,
+      context,
+      logEvent: 'deal_calculator_lock',
     })
   }
 
@@ -614,25 +693,15 @@ export async function handlePriceLock(
           })
         }
 
-        const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(inlineAmount)} → ${formatBrl(comp.data.amountBrl)}`
-        await sendDealMessage(context, calcMsg, 'deal_quote')
-
-        logger.info('Price lock with amount: LOCKED deal created (active quote preserved)', {
-          event: 'deal_lock_calc',
+        return completeLockAndNotify({
           dealId: bridgeDealId,
           groupId,
           sender,
           rate,
           amountUsdt: inlineAmount,
           amountBrl: comp.data.amountBrl,
-        })
-
-        return ok({
-          action: 'deal_locked',
-          dealId: bridgeDealId,
-          groupId,
-          clientJid: sender,
-          message: calcMsg,
+          context,
+          logEvent: 'deal_lock_calc',
         })
       }
 
@@ -677,25 +746,15 @@ export async function handlePriceLock(
           })
         }
 
-        const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(preVol)} → ${formatBrl(comp.data.amountBrl)}`
-        await sendDealMessage(context, calcMsg, 'deal_quote')
-
-        logger.info('Price lock with pre-stated volume: LOCKED deal created', {
-          event: 'deal_lock_pre_stated',
+        return completeLockAndNotify({
           dealId: bridgeDealId,
           groupId,
           sender,
           rate,
           amountUsdt: preVol,
           amountBrl: comp.data.amountBrl,
-        })
-
-        return ok({
-          action: 'deal_locked',
-          dealId: bridgeDealId,
-          groupId,
-          clientJid: sender,
-          message: calcMsg,
+          context,
+          logEvent: 'deal_lock_pre_stated',
         })
       }
 
@@ -804,64 +863,15 @@ export async function handlePriceLock(
           })
         }
 
-        // Complete the deal immediately (locked deal = handshake, no TTL expiry)
-        if (dealId) {
-          const computeResult = await startComputation(dealId, groupId)
-          if (computeResult.ok) {
-            await completeDeal(dealId, groupId, {
-              amountBrl: comp.data.amountBrl,
-              amountUsdt: noQuoteAmount,
-            })
-          }
-        }
-
-        // Send formatted calculation + @mention (mirrors simple-mode completion)
-        const operatorJid = resolveOperatorJid(groupId)
-        const mentions = operatorJid ? [operatorJid] : []
-        const calcLine = `${formatUsdt(noQuoteAmount)} × ${formatRate(quotedRate)} = ${formatBrl(comp.data.amountBrl)}`
-        const mentionSuffix = operatorJid ? ` @${operatorJid.replace(/@.*/, '')}` : ''
-        const calcMsg = `🔒 ${calcLine}${mentionSuffix}`
-
-        const sendResult = await sendWithAntiDetection(context.sock, groupId, calcMsg, mentions)
-        if (sendResult.ok) {
-          logBotMessage({ groupJid: groupId, content: calcMsg, messageType: 'deal_volume_computed', isControlGroup: false })
-          recordMessageSent(groupId)
-        }
-
-        // Archive (fire-and-forget)
-        if (dealId) {
-          archiveDeal(dealId, groupId).catch(() => { /* logged internally */ })
-        }
-
-        // Clear active quote now that deal reached terminal state
-        forceAccept(groupId)
-
-        // Log to Excel (fire-and-forget)
-        logDealToExcel({
-          groupId,
-          groupName: context.groupName,
-          clientIdentifier: context.senderName ?? sender,
-          volumeBrl: comp.data.amountBrl,
-          quote: quotedRate,
-          acquiredUsdt: noQuoteAmount,
-        })
-
-        logger.info('Cold-lock flow: completed deal immediately', {
-          event: 'deal_cold_lock_complete',
+        return completeLockAndNotify({
           dealId,
           groupId,
           sender,
-          quotedRate,
+          rate: quotedRate,
           amountUsdt: noQuoteAmount,
           amountBrl: comp.data.amountBrl,
-        })
-
-        return ok({
-          action: 'deal_computed',
-          dealId,
-          groupId,
-          clientJid: sender,
-          message: calcMsg,
+          context,
+          logEvent: 'deal_cold_lock_complete',
         })
       }
 
@@ -1611,26 +1621,15 @@ export async function handleDirectAmount(
     })
   }
 
-  // Send in standard format — active quote is NOT consumed so rate persists
-  const calcMsg = `📊 US$ 1,00 = R$ ${formatRate(rate)}\n\n${formatUsdt(amount)} → ${formatBrl(comp.data.amountBrl)}`
-  await sendDealMessage(context, calcMsg, 'deal_quote')
-
-  logger.info('Direct amount: LOCKED deal created (active quote preserved)', {
-    event: 'deal_direct_amount_calc',
+  return completeLockAndNotify({
     dealId,
     groupId,
     sender,
     rate,
     amountUsdt: amount,
     amountBrl: comp.data.amountBrl,
-  })
-
-  return ok({
-    action: 'deal_locked',
-    dealId,
-    groupId,
-    clientJid: sender,
-    message: calcMsg,
+    context,
+    logEvent: 'deal_direct_amount_calc',
   })
 }
 
