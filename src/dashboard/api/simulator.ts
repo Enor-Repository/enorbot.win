@@ -13,6 +13,7 @@ import { handleControlMessage } from '../../handlers/control.js'
 import { handlePriceMessage } from '../../handlers/price.js'
 import { handleTronscanMessage } from '../../handlers/tronscan.js'
 import { getGroupConfigSync, getAllGroupConfigs, isIgnoredPlayer } from '../../services/groupConfig.js'
+import { getGroupMessages } from '../../services/messageHistory.js'
 import { createMockSocket } from './simulatorSocket.js'
 
 export const simulatorRouter = Router()
@@ -155,5 +156,38 @@ simulatorRouter.post('/send', async (req: Request, res: Response) => {
       message: error instanceof Error ? error.message : String(error),
       processingTimeMs: Date.now() - startTime,
     })
+  }
+})
+
+/**
+ * GET /api/simulator/history/:groupId
+ * Returns the last 50 messages for a group (newest last).
+ */
+simulatorRouter.get('/history/:groupId', async (req: Request, res: Response) => {
+  try {
+    const groupId = decodeURIComponent(req.params.groupId as string)
+
+    const result = await getGroupMessages(groupId, { limit: 50, orderBy: 'desc' })
+    if (!result.ok) {
+      return res.status(500).json({ error: result.error })
+    }
+
+    // Reverse so oldest is first (chat order)
+    const messages = result.data.data.reverse().map((m) => ({
+      id: m.id,
+      senderJid: m.sender_jid,
+      isFromBot: m.is_from_bot,
+      messageType: m.message_type,
+      content: m.content,
+      timestamp: new Date(m.created_at).getTime(),
+    }))
+
+    res.json({ messages })
+  } catch (error) {
+    logger.error('Simulator history fetch failed', {
+      event: 'simulator_history_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({ error: 'Failed to fetch history' })
   }
 })

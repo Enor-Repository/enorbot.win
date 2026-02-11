@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Loader2 } from 'lucide-react'
+import { Send, Loader2, History } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { SimulatorMessage, type ChatMessage } from './SimulatorMessage'
@@ -18,10 +18,13 @@ export function SimulatorChat({ group }: SimulatorChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Reset chat when group changes
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+
+  // Load history and reset chat when group changes
   useEffect(() => {
     setMessages([])
     setInput('')
+    setHistoryLoaded(false)
     // Auto-select first player (prefer client, then first available)
     const players = Object.entries(group.playerRoles)
     const client = players.find(([, role]) => role === 'client')
@@ -35,6 +38,26 @@ export function SimulatorChat({ group }: SimulatorChatProps) {
     } else {
       setSelectedPlayer('')
     }
+
+    // Fetch message history
+    fetch(API_ENDPOINTS.simulatorHistory(group.groupJid))
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.messages && data.messages.length > 0) {
+          const historyMsgs: ChatMessage[] = data.messages.map((m: { id: string; senderJid: string; isFromBot: boolean; messageType: string; content: string; timestamp: number }) => ({
+            id: `hist-${m.id}`,
+            type: m.isFromBot ? 'bot' as const : 'user' as const,
+            text: m.content || '',
+            senderName: m.isFromBot ? 'eNorBOT' : formatJid(m.senderJid),
+            timestamp: m.timestamp,
+          }))
+          setMessages(historyMsgs)
+        }
+        setHistoryLoaded(true)
+      })
+      .catch(() => {
+        setHistoryLoaded(true)
+      })
   }, [group.groupJid])
 
   // Auto-scroll to bottom on new messages
@@ -168,7 +191,14 @@ export function SimulatorChat({ group }: SimulatorChatProps) {
       <div className="flex-1 overflow-y-auto p-4 space-y-1" style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, rgba(255,255,255,0.03) 1px, transparent 0)', backgroundSize: '24px 24px' }}>
         {messages.length === 0 && (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-            Send a message to start simulating...
+            {!historyLoaded ? (
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading history...
+              </div>
+            ) : (
+              'No message history. Send a message to start simulating...'
+            )}
           </div>
         )}
         {messages.map((msg) => (
@@ -213,5 +243,5 @@ export function SimulatorChat({ group }: SimulatorChatProps) {
 }
 
 function formatJid(jid: string): string {
-  return jid.replace(/@s\.whatsapp\.net$/, '')
+  return jid.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
