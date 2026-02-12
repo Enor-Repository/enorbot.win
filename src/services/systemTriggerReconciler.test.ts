@@ -312,7 +312,7 @@ describe('reconcileSystemTriggers', () => {
 
   it('is a no-op when required triggers are already canonical', async () => {
     const requiredRows = [
-      createRequiredRow('tronscan\\.(?:org|io)/#/transaction/[a-f0-9]{64}', 'tronscan_process', {
+      createRequiredRow('(?:^|[^a-z0-9])(?:https?://)?(?:www\\.)?tronscan\\.(?:org|io)/#/transaction/[a-f0-9]{64}', 'tronscan_process', {
         pattern_type: 'regex',
         priority: 95,
         display_name: 'Tronscan Link',
@@ -321,7 +321,7 @@ describe('reconcileSystemTriggers', () => {
     mockBuildSystemTriggerRows.mockResolvedValue(requiredRows)
 
     const existingRows = [
-      createExistingRow('tronscan\\.(?:org|io)/#/transaction/[a-f0-9]{64}', 'tronscan_process', {
+      createExistingRow('(?:^|[^a-z0-9])(?:https?://)?(?:www\\.)?tronscan\\.(?:org|io)/#/transaction/[a-f0-9]{64}', 'tronscan_process', {
         id: 'tronscan-id',
         pattern_type: 'regex',
         priority: 95,

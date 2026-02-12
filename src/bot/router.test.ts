@@ -673,6 +673,13 @@ describe('routeMessage operator finality policy', () => {
     expect(result.context.hasTronscan).toBe(true)
   })
 
+  it('routes operator scheme-less tronscan link to TRONSCAN_HANDLER in simple mode', async () => {
+    const context = { ...baseContext, message: 'tronscan.org/#/transaction/e779beb52ec8448ff31db3384f4af9857078f718911dd6f9f88f7f0f03f2f1d2' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('TRONSCAN_HANDLER')
+    expect(result.context.hasTronscan).toBe(true)
+  })
+
   it('treats spread operatorJid as operator even without player role', async () => {
     mockGetGroupConfigSync.mockReturnValue({ playerRoles: {} })
     const context = { ...baseContext, sender: 'spread-op@s.whatsapp.net', message: 'anotado' }

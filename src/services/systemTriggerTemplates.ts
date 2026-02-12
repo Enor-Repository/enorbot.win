@@ -55,7 +55,7 @@ const DYNAMIC_KEYWORD_GROUPS: DynamicKeywordGroup[] = [
  */
 const FIXED_REGEX_TEMPLATES: TriggerTemplate[] = [
   {
-    triggerPhrase: 'tronscan\\.(?:org|io)/#/transaction/[a-f0-9]{64}',
+    triggerPhrase: '(?:^|[^a-z0-9])(?:https?://)?(?:www\\.)?tronscan\\.(?:org|io)/#/transaction/[a-f0-9]{64}',
     patternType: 'regex',
     actionType: 'tronscan_process',
     priority: 95,

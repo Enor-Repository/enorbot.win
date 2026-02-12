@@ -92,9 +92,11 @@ export function extractVolumeBrl(message: string): number | null {
 
 /**
  * Tronscan transaction URL pattern.
- * Matches URLs like: https://tronscan.org/#/transaction/e779beb52ec8448f...
+ * Matches URLs like:
+ * - https://tronscan.org/#/transaction/e779beb52ec8448f...
+ * - tronscan.org/#/transaction/e779beb52ec8448f...
  */
-const TRONSCAN_PATTERN = /https?:\/\/tronscan\.(?:org|io)\/#\/transaction\/([a-f0-9]{64})/i
+const TRONSCAN_PATTERN = /(?:^|[^a-z0-9])(?:https?:\/\/)?(?:www\.)?tronscan\.(?:org|io)\/#\/transaction\/([a-f0-9]{64})(?![a-f0-9])/i
 
 /**
  * Check if a message contains a Tronscan transaction link.
