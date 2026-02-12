@@ -2,6 +2,7 @@ import makeWASocket, {
   DisconnectReason,
   Browsers,
   type WASocket,
+  type proto,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import { logger } from '../utils/logger.js'
@@ -26,9 +27,10 @@ import {
 } from './notifications.js'
 import { useSupabaseAuthState } from './authState.js'
 import { clearAuthState, checkSupabaseHealth } from '../services/supabase.js'
-import { routeMessage, isControlGroupMessage, type RouterContext } from './router.js'
+import { routeMessage, isControlGroupMessage, type RouterContext, type BaileysMessage } from './router.js'
 import { handleControlMessage } from '../handlers/control.js'
 import { ensureGroupRegistered, getGroupModeSync, isIgnoredPlayer } from '../services/groupConfig.js'
+import { scheduleSystemTriggerReconciliation } from '../services/systemTriggerReconciler.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { handlePriceMessage } from '../handlers/price.js'
 import { handleTronscanMessage } from '../handlers/tronscan.js'
@@ -46,7 +48,7 @@ import { initExcelService } from '../services/excel.js'
 import { initLogQueue, startPeriodicSync, queueObservationEntry, setAppendObservationRowFn } from '../services/logQueue.js'
 import { isExcelLoggingConfigured, isObservationLoggingConfigured } from '../types/config.js'
 // Message history logging to Supabase
-import { initMessageHistory, logMessageToHistory } from '../services/messageHistory.js'
+import { initMessageHistory, logMessageToHistory, type IncomingMessageType } from '../services/messageHistory.js'
 // Sprint 5: Response suppression (cooldown + dedup)
 import { shouldSuppressResponse } from '../services/responseSuppression.js'
 // Phase 3 extension: redirect suppressed price to deal handler during active quotes
@@ -73,6 +75,43 @@ const GROUP_CACHE_MAX_SIZE = 500
  * Issue fix: Limited to GROUP_CACHE_MAX_SIZE entries with LRU eviction.
  */
 const groupMetadataCache = new Map<string, string>()
+
+interface IngressExtraction {
+  messageText: string
+  messageType: IncomingMessageType
+  hasMedia: boolean
+}
+
+/**
+ * Extract normalized ingress data from a WhatsApp message.
+ * Keeps media-only receipts processable (no text body required).
+ */
+export function extractIngressData(msg: proto.IWebMessageInfo): IngressExtraction {
+  const messageText =
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    msg.message?.documentMessage?.caption ||
+    ''
+
+  const hasDocument = !!msg.message?.documentMessage
+  const hasImage = !!msg.message?.imageMessage
+
+  let messageType: IncomingMessageType = 'other'
+  if (hasDocument) {
+    messageType = 'document'
+  } else if (hasImage) {
+    messageType = 'image'
+  } else if (messageText.trim()) {
+    messageType = 'text'
+  }
+
+  return {
+    messageText,
+    messageType,
+    hasMedia: hasDocument || hasImage,
+  }
+}
 
 /**
  * Add entry to group metadata cache with LRU eviction.
@@ -358,14 +397,12 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       // Only process group messages (JIDs ending with @g.us)
       if (!groupId.endsWith('@g.us')) return
 
-      // Extract message text from various message types
-      const messageText =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        ''
+      const ingress = extractIngressData(msg)
+      const messageText = ingress.messageText
 
-      // Skip empty messages
-      if (!messageText.trim()) return
+      // Skip messages that are both text-empty and media-empty.
+      // Media-only receipts are valid and must continue.
+      if (!messageText.trim() && !ingress.hasMedia) return
 
       const sender = msg.key.participant || msg.key.remoteJid || ''
 
@@ -424,6 +461,10 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         })
       })
 
+      // Keep required system triggers self-healed with cooldown + in-flight guard.
+      // Non-blocking by design: never delay live message handling.
+      scheduleSystemTriggerReconciliation(groupId, isControlGroup)
+
       const context: RouterContext = {
         groupId,
         groupName,
@@ -432,6 +473,7 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         senderName,
         isControlGroup,
         sock: currentSock,
+        rawMessage: msg,
       }
 
       logger.info('Message received', {
@@ -442,7 +484,7 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         // DO NOT log message content for privacy
       })
 
-      const route = await routeMessage(context)
+      const route = await routeMessage(context, msg.message as BaileysMessage)
 
       // Log message to Supabase history (fire-and-forget)
       // Story 7.3 AC6: Pass hasTrigger from router
@@ -453,8 +495,8 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         senderJid: sender,
         senderName,
         isControlGroup,
-        messageType: 'text',
-        content: messageText,
+        messageType: ingress.messageType,
+        content: messageText || `[${ingress.messageType}]`,
         isFromBot: false,
         isTrigger: route.context.hasTrigger ?? false,
       })
@@ -533,6 +575,18 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
         // Sprint 9.1: Handle deal flow messages (volume inquiry, price lock, confirmation, etc.)
         const { handleDealRouted } = await import('../handlers/deal.js')
         await handleDealRouted(route.context)
+      } else if (route.destination === 'RECEIPT_HANDLER') {
+        // Receipt/media processing pipeline
+        const { handleReceipt } = await import('../handlers/receipt.js')
+        const receiptResult = await handleReceipt(route.context)
+        if (!receiptResult.ok && receiptResult.error !== 'Duplicate receipt') {
+          logger.warn('Receipt handler failed', {
+            event: 'receipt_handler_failed',
+            groupId,
+            sender,
+            error: receiptResult.error,
+          })
+        }
       } else if (route.destination === 'OBSERVE_ONLY') {
         // Training mode: Message was logged above, but no response sent
         logger.debug('Training mode: message observed', {
@@ -544,7 +598,6 @@ export async function createConnection(config: EnvConfig): Promise<WASocket> {
       }
       // IGNORE = silence. Operator tagging during active negotiations is handled by
       // the Phase 3 catch-all in router.ts (scoped to requester only).
-      // RECEIPT_HANDLER destination: no action in text message handler
 
       // Story 8.6: Log observation for pattern analysis (fire-and-forget)
       // Skip control group messages and ignored messages

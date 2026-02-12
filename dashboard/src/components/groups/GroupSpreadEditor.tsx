@@ -450,7 +450,9 @@ export function GroupSpreadEditor({ groupJid, hideTitle, onCountChange }: GroupS
           <div className="flex items-center justify-between">
             <label className="text-xs text-amber-300 font-mono flex items-center gap-1">
               Threshold
-              <Info className="h-3 w-3 text-amber-400/50" title="Derived from active time-based rule" />
+              <span title="Derived from active time-based rule">
+                <Info className="h-3 w-3 text-amber-400/50" />
+              </span>
             </label>
             <span className={`text-xs font-mono bg-zinc-900 px-2 py-1 rounded border border-amber-500/10 ${
               ruleThreshold.isDefault ? 'text-amber-300/50' : 'text-amber-300/80'

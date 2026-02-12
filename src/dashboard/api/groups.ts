@@ -7,6 +7,7 @@ import { Router, type Request, type Response } from 'express'
 import { getAllGroupConfigs, setGroupMode, getGroupConfigSync, setPlayerRole, removePlayerRole, type PlayerRole } from '../../services/groupConfig.js'
 import { getSupabase } from '../../services/supabase.js'
 import { seedDefaultTriggers } from '../../services/systemTriggerSeeder.js'
+import { reconcileSystemTriggers } from '../../services/systemTriggerReconciler.js'
 import { cloneGroupRuleset } from '../../services/ruleService.js'
 import { logger } from '../../utils/logger.js'
 
@@ -517,6 +518,59 @@ groupsRouter.post('/:groupJid/seed', async (req: Request, res: Response) => {
     })
     res.status(500).json({
       error: 'Failed to seed triggers',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+})
+
+/**
+ * POST /api/groups/:groupJid/system-triggers/reconcile
+ * Run on-demand system trigger reconciliation for one group and return summary.
+ * Safe/idempotent: inserts missing system triggers and heals system-owned drift.
+ */
+groupsRouter.post('/:groupJid/system-triggers/reconcile', async (req: Request, res: Response) => {
+  try {
+    const groupJid = req.params.groupJid as string
+
+    if (!isValidGroupJid(groupJid)) {
+      return res.status(400).json({ error: 'Invalid group JID format' })
+    }
+
+    const config = getGroupConfigSync(groupJid)
+    const isControlGroup = config ? config.groupName.includes('CONTROLE') : false
+
+    const result = await reconcileSystemTriggers(groupJid, isControlGroup)
+    if (!result.ok) {
+      const status = result.error.includes('Supabase not initialized') ? 503 : 500
+      return res.status(status).json({
+        error: 'Failed to reconcile system triggers',
+        message: result.error,
+      })
+    }
+
+    logger.info('System triggers reconciled via dashboard', {
+      event: 'system_trigger_reconcile_dashboard',
+      groupJid,
+      isControlGroup,
+      insertedCount: result.data.insertedCount,
+      updatedCount: result.data.updatedCount,
+      conflictCount: result.data.conflicts.length,
+    })
+
+    res.json({
+      success: true,
+      summary: {
+        ...result.data,
+        reconciledAt: new Date().toISOString(),
+      },
+    })
+  } catch (error) {
+    logger.error('Failed to reconcile system triggers', {
+      event: 'system_trigger_reconcile_dashboard_error',
+      error: error instanceof Error ? error.message : String(error),
+    })
+    res.status(500).json({
+      error: 'Failed to reconcile system triggers',
       message: error instanceof Error ? error.message : String(error),
     })
   }

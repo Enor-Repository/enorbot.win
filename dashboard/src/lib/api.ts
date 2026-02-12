@@ -59,6 +59,9 @@ export const API_ENDPOINTS = {
   /** Seed default triggers for a group */
   groupTriggerSeed: (groupJid: string): string =>
     `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/seed`,
+  /** Reconcile required system triggers for a group */
+  groupSystemTriggerReconcile: (groupJid: string): string =>
+    `${API_BASE_URL}/api/groups/${encodeURIComponent(groupJid)}/system-triggers/reconcile`,
   /** System status */
   status: `${API_BASE_URL}/api/status`,
   /** Current USDT/BRL price */

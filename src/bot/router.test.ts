@@ -6,6 +6,7 @@ import type { WASocket } from '@whiskeysockets/baileys'
 // ============================================================================
 
 const mockGetGroupModeSync = vi.hoisted(() => vi.fn())
+const mockGetGroupConfigSync = vi.hoisted(() => vi.fn())
 const mockMatchTrigger = vi.hoisted(() => vi.fn())
 const mockGetActiveDealForSender = vi.hoisted(() => vi.fn())
 const mockGetSpreadConfig = vi.hoisted(() => vi.fn())
@@ -16,6 +17,7 @@ const mockForceAccept = vi.hoisted(() => vi.fn())
 
 vi.mock('../services/groupConfig.js', () => ({
   getGroupModeSync: mockGetGroupModeSync,
+  getGroupConfigSync: mockGetGroupConfigSync,
 }))
 
 vi.mock('../services/triggerService.js', () => ({
@@ -83,6 +85,14 @@ function makeTrigger(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function setDefaultPatternMocks(): void {
+  mockGetKeywordsForPatternSync.mockImplementation((key: string) => {
+    if (key === 'deal_cancellation') return ['cancela', 'cancelar', 'cancel']
+    if (key === 'price_lock') return ['trava', 'lock', 'travar']
+    return []
+  })
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -102,11 +112,12 @@ describe('routeMessage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetGroupModeSync.mockReturnValue('active')
+    mockGetGroupConfigSync.mockReturnValue(null)
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
     // Default: classic mode (intercept skipped)
     mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
-    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    setDefaultPatternMocks()
     mockParseBrazilianNumber.mockReturnValue(null)
     mockGetActiveQuote.mockReturnValue(null)
   })
@@ -194,6 +205,7 @@ describe('routeMessage', () => {
       const context = { ...baseContext, message: 'https://tronscan.org/#/transaction/abc123' }
       const result = await routeMessage(context)
       expect(result.destination).toBe('TRONSCAN_HANDLER')
+      expect(result.context.hasTronscan).toBe(true)
     })
 
     it('routes receipt_process to RECEIPT_HANDLER', async () => {
@@ -397,10 +409,11 @@ describe('routeMessage receipt routing', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetGroupModeSync.mockReturnValue('active')
+    mockGetGroupConfigSync.mockReturnValue(null)
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
     mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
-    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    setDefaultPatternMocks()
     mockParseBrazilianNumber.mockReturnValue(null)
     mockGetActiveQuote.mockReturnValue(null)
   })
@@ -472,9 +485,10 @@ describe('routeMessage per-group modes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
+    mockGetGroupConfigSync.mockReturnValue(null)
     mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
-    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    setDefaultPatternMocks()
     mockParseBrazilianNumber.mockReturnValue(null)
     mockGetActiveQuote.mockReturnValue(null)
   })
@@ -602,6 +616,80 @@ describe('routeMessage per-group modes', () => {
 })
 
 // ============================================================================
+// Simple-mode operator finality policy
+// ============================================================================
+
+describe('routeMessage operator finality policy', () => {
+  const mockSock = {} as WASocket
+
+  const baseContext: RouterContext = {
+    groupId: '123456789@g.us',
+    groupName: 'Test Group',
+    message: '',
+    sender: 'operator@s.whatsapp.net',
+    isControlGroup: false,
+    sock: mockSock,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetGroupModeSync.mockReturnValue('active')
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
+    mockGetSpreadConfig.mockResolvedValue({
+      ok: true,
+      data: { dealFlowMode: 'simple', operatorJid: 'spread-op@s.whatsapp.net' },
+    })
+    mockGetGroupConfigSync.mockReturnValue({
+      playerRoles: {
+        'operator@s.whatsapp.net': 'operator',
+      },
+    })
+    mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
+    setDefaultPatternMocks()
+    mockParseBrazilianNumber.mockReturnValue(null)
+    mockGetActiveQuote.mockReturnValue(null)
+  })
+
+  it('routes operator non-finality chatter to OBSERVE_ONLY in simple mode', async () => {
+    const context = { ...baseContext, message: 'aguardando cliente' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('OBSERVE_ONLY')
+  })
+
+  it('routes operator receipt to RECEIPT_HANDLER in simple mode', async () => {
+    const context = { ...baseContext, message: '' }
+    const baileysMessage: BaileysMessage = {
+      documentMessage: { mimetype: 'application/pdf' },
+    }
+    const result = await routeMessage(context, baileysMessage)
+    expect(result.destination).toBe('RECEIPT_HANDLER')
+    expect(result.context.isReceipt).toBe(true)
+  })
+
+  it('routes operator tronscan link to TRONSCAN_HANDLER in simple mode', async () => {
+    const context = { ...baseContext, message: 'https://tronscan.org/#/transaction/e779beb52ec8448ff31db3384f4af9857078f718911dd6f9f88f7f0f03f2f1d2' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('TRONSCAN_HANDLER')
+    expect(result.context.hasTronscan).toBe(true)
+  })
+
+  it('treats spread operatorJid as operator even without player role', async () => {
+    mockGetGroupConfigSync.mockReturnValue({ playerRoles: {} })
+    const context = { ...baseContext, sender: 'spread-op@s.whatsapp.net', message: 'anotado' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('OBSERVE_ONLY')
+  })
+
+  it('does not apply operator finality policy outside simple mode', async () => {
+    mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
+    mockMatchTrigger.mockResolvedValue({ ok: true, data: makeTrigger({ actionType: 'price_quote' }) })
+    const context = { ...baseContext, message: 'preço' }
+    const result = await routeMessage(context)
+    expect(result.destination).toBe('PRICE_HANDLER')
+  })
+})
+
+// ============================================================================
 // Sprint 9: Simple Mode Deal-State Intercept
 // ============================================================================
 
@@ -631,14 +719,22 @@ describe('routeMessage simple mode intercept', () => {
     groupJid: '123456789@g.us',
   }
 
+  const MOCK_LOCKED_DEAL = {
+    id: 'deal-3',
+    clientJid: 'client@s.whatsapp.net',
+    state: 'locked',
+    groupJid: '123456789@g.us',
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetGroupModeSync.mockReturnValue('active')
+    mockGetGroupConfigSync.mockReturnValue(null)
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
     // Default: simple mode with lock keywords
     mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'simple' } })
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
-    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    setDefaultPatternMocks()
     mockParseBrazilianNumber.mockReturnValue(null)
     mockGetActiveQuote.mockReturnValue(null)
   })
@@ -672,6 +768,18 @@ describe('routeMessage simple mode intercept', () => {
   describe('simple mode QUOTED state', () => {
     beforeEach(() => {
       mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: MOCK_QUOTED_DEAL })
+    })
+
+    it('intercepts cancel keyword in quoted state → cancellation', async () => {
+      mockGetKeywordsForPatternSync.mockImplementation((key: string) => {
+        if (key === 'deal_cancellation') return ['cancela', 'cancelar', 'cancel']
+        if (key === 'price_lock') return ['trava', 'lock', 'travar']
+        return []
+      })
+      const context = { ...baseContext, message: 'cancela' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('cancellation')
     })
 
     it('intercepts "off" → rejection', async () => {
@@ -730,6 +838,40 @@ describe('routeMessage simple mode intercept', () => {
       // Simple mode: bare number in QUOTED state auto-locks with amount
       expect(result.destination).toBe('DEAL_HANDLER')
       expect(result.context.dealAction).toBe('price_lock')
+    })
+  })
+
+  // ---- Simple mode: LOCKED state intercepts ----
+
+  describe('simple mode LOCKED state', () => {
+    beforeEach(() => {
+      mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: MOCK_LOCKED_DEAL })
+      mockGetKeywordsForPatternSync.mockImplementation((key: string) => {
+        if (key === 'deal_cancellation') return ['cancela', 'cancelar', 'cancel']
+        if (key === 'price_lock') return ['trava', 'lock', 'travar']
+        return []
+      })
+    })
+
+    it('intercepts cancel keyword in locked state → cancellation', async () => {
+      const context = { ...baseContext, message: 'cancela' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('cancellation')
+    })
+
+    it('intercepts "off" in locked state → rejection', async () => {
+      const context = { ...baseContext, message: 'off' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('rejection')
+    })
+
+    it('intercepts any other locked-state message → confirmation', async () => {
+      const context = { ...baseContext, message: 'fechado' }
+      const result = await routeMessage(context)
+      expect(result.destination).toBe('DEAL_HANDLER')
+      expect(result.context.dealAction).toBe('confirmation')
     })
   })
 
@@ -881,11 +1023,12 @@ describe('routeMessage active quote catch-all', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockGetGroupModeSync.mockReturnValue('active')
+    mockGetGroupConfigSync.mockReturnValue(null)
     mockMatchTrigger.mockResolvedValue({ ok: true, data: null })
     // Default: classic mode (simple mode intercept skipped)
     mockGetSpreadConfig.mockResolvedValue({ ok: true, data: { dealFlowMode: 'classic' } })
     mockGetActiveDealForSender.mockResolvedValue({ ok: true, data: null })
-    mockGetKeywordsForPatternSync.mockReturnValue(['trava', 'lock', 'travar'])
+    setDefaultPatternMocks()
     mockParseBrazilianNumber.mockReturnValue(null)
     mockGetActiveQuote.mockReturnValue(null)
   })

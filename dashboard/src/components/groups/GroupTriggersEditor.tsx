@@ -11,7 +11,7 @@
  * - Enable/disable toggle
  */
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, Trash2, Edit, X, Zap, Search, ToggleLeft, ToggleRight, Shield, Download } from 'lucide-react'
+import { Plus, Trash2, Edit, X, Zap, Search, ToggleLeft, ToggleRight, Shield, Download, RefreshCw, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import { API_ENDPOINTS, writeHeaders } from '@/lib/api'
 import { showToast } from '@/lib/toast'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
@@ -59,6 +59,24 @@ interface TestResult {
   trigger: GroupTrigger | null
   activeRule: { name: string; pricingSource: string } | null
   actionResult: { message: string; actionType: string; ruleApplied: boolean; ruleName?: string } | null
+}
+
+interface ReconcileConflict {
+  triggerPhrase: string
+  existingActionType: string
+  requiredActionType: string
+  reason: 'user_owned_conflict' | 'insert_conflict'
+}
+
+interface ReconcileSummary {
+  groupJid: string
+  isControlGroup: boolean
+  requiredCount: number
+  matchedCount: number
+  insertedCount: number
+  updatedCount: number
+  conflicts: ReconcileConflict[]
+  reconciledAt: string
 }
 
 // ============================================================================
@@ -132,6 +150,8 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
   const [fetchError, setFetchError] = useState(false)
 
   const [seeding, setSeeding] = useState(false)
+  const [reconciling, setReconciling] = useState(false)
+  const [reconcileSummary, setReconcileSummary] = useState<ReconcileSummary | null>(null)
 
   // Tester state
   const [showTester, setShowTester] = useState(false)
@@ -379,6 +399,45 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
     }
   }
 
+  // ---- Reconcile System Triggers ----
+
+  const reconcileSystemTriggers = async () => {
+    setReconciling(true)
+    try {
+      const response = await fetch(API_ENDPOINTS.groupSystemTriggerReconcile(groupJid), {
+        method: 'POST',
+        headers: writeHeaders(),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || errorData.error || `HTTP ${response.status}`)
+      }
+
+      const payload = await response.json()
+      const summary = payload.summary as ReconcileSummary
+      setReconcileSummary(summary)
+
+      const changedCount = summary.insertedCount + summary.updatedCount
+      const conflictCount = summary.conflicts.length
+      showToast({
+        type: 'success',
+        message: `Reconciled: ${changedCount} changed, ${conflictCount} conflict${conflictCount === 1 ? '' : 's'}`,
+      })
+
+      if (changedCount > 0) {
+        await fetchTriggers()
+      }
+    } catch (e) {
+      showToast({
+        type: 'error',
+        message: e instanceof Error ? e.message : 'Failed to reconcile system triggers',
+      })
+    } finally {
+      setReconciling(false)
+    }
+  }
+
   // ---- Render ----
 
   if (loading) {
@@ -418,6 +477,15 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
             >
               <Plus className="h-3 w-3 inline mr-1" />
               Add
+            </button>
+            <button
+              onClick={reconcileSystemTriggers}
+              disabled={reconciling}
+              className="px-2 py-1 text-xs font-mono rounded bg-slate-500/10 border border-slate-500/30 text-slate-200 hover:bg-slate-500/20 disabled:opacity-60 transition-colors"
+              title="Heal missing/changed system triggers safely"
+            >
+              <RefreshCw className={`h-3 w-3 inline mr-1${reconciling ? ' animate-spin' : ''}`} />
+              {reconciling ? 'Reconciling...' : 'Reconcile'}
             </button>
           </div>
         </div>
@@ -461,6 +529,47 @@ export function GroupTriggersEditor({ groupJid, hideTitle, onCountChange }: Grou
                   </div>
                 ) : (
                   <p>No trigger matched this message</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Reconcile Summary */}
+        {reconcileSummary && (
+          <div className={`p-3 rounded-lg border text-xs font-mono space-y-2 ${
+            reconcileSummary.conflicts.length > 0
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200'
+          }`}>
+            <div className="flex items-center gap-2">
+              {reconcileSummary.conflicts.length > 0 ? (
+                <AlertTriangle className="h-3.5 w-3.5" />
+              ) : (
+                <CheckCircle2 className="h-3.5 w-3.5" />
+              )}
+              <span className="font-semibold">
+                System Trigger Reconciliation
+              </span>
+              <span className="text-[10px] opacity-80 ml-auto">
+                {new Date(reconcileSummary.reconciledAt).toLocaleTimeString()}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <span>Required: <strong>{reconcileSummary.requiredCount}</strong></span>
+              <span>Inserted: <strong>{reconcileSummary.insertedCount}</strong></span>
+              <span>Updated: <strong>{reconcileSummary.updatedCount}</strong></span>
+            </div>
+            {reconcileSummary.conflicts.length > 0 && (
+              <div className="pt-1 space-y-1">
+                <p className="text-[11px] font-semibold">Conflicts preserved (manual review):</p>
+                {reconcileSummary.conflicts.slice(0, 3).map((conflict) => (
+                  <p key={`${conflict.triggerPhrase}:${conflict.reason}`} className="text-[10px] opacity-90">
+                    "{conflict.triggerPhrase}" existing `{conflict.existingActionType}` vs required `{conflict.requiredActionType}`
+                  </p>
+                ))}
+                {reconcileSummary.conflicts.length > 3 && (
+                  <p className="text-[10px] opacity-80">+{reconcileSummary.conflicts.length - 3} more conflicts</p>
                 )}
               </div>
             )}

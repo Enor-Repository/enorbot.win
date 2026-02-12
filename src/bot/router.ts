@@ -4,16 +4,17 @@ import {
   RECEIPT_MIME_TYPES,
   SUPPORTED_IMAGE_MIME_TYPES,
 } from '../types/handlers.js'
-import { getGroupModeSync } from '../services/groupConfig.js'
+import { getGroupModeSync, getGroupConfigSync } from '../services/groupConfig.js'
 import { matchTrigger, type GroupTrigger } from '../services/triggerService.js'
 import { logger } from '../utils/logger.js'
 // Volatility Protection: Close active quotes on deal acceptance
 import { getActiveQuote, forceAccept } from '../services/activeQuotes.js'
 // Sprint 9: Simple mode deal-state intercept
 import { getActiveDealForSender } from '../services/dealFlowService.js'
-import { getSpreadConfig } from '../services/groupSpreadService.js'
+import { getSpreadConfig, type SpreadConfig } from '../services/groupSpreadService.js'
 import { getKeywordsForPatternSync } from '../services/systemPatternService.js'
 import { parseBrazilianNumber } from '../services/dealComputation.js'
+import { hasTronscanLink } from '../utils/triggers.js'
 
 /**
  * Route destinations for message handling.
@@ -160,11 +161,18 @@ function matchesKeyword(message: string, keywords: string[]): boolean {
  * Returns a RouteResult if intercepted, or null to fall through to normal routing.
  */
 async function trySimpleModeIntercept(
-  enrichedContext: RouterContext
+  enrichedContext: RouterContext,
+  spreadConfig: SpreadConfig | null = null
 ): Promise<RouteResult | null> {
   // 1. Check if group is in simple mode
-  const configResult = await getSpreadConfig(enrichedContext.groupId)
-  if (!configResult.ok || configResult.data.dealFlowMode !== 'simple') {
+  let effectiveConfig = spreadConfig
+  if (!effectiveConfig) {
+    const configResult = await getSpreadConfig(enrichedContext.groupId)
+    if (configResult.ok) {
+      effectiveConfig = configResult.data
+    }
+  }
+  if (!effectiveConfig || effectiveConfig.dealFlowMode !== 'simple') {
     return null // Not simple mode → skip intercept entirely
   }
 
@@ -220,6 +228,21 @@ async function trySimpleModeIntercept(
 
   // 3. Route based on deal state
   if (deal.state === 'quoted') {
+    // QUOTED + cancel keyword → cancellation
+    if (matchesKeyword(message, CANCEL_KEYWORDS_SYNC())) {
+      logger.info('Simple mode intercept: cancellation (quoted)', {
+        event: 'simple_mode_intercept',
+        action: 'cancellation',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'cancellation' },
+      }
+    }
+
     // QUOTED + "off" → rejection
     if (matchesKeyword(message, OFF_KEYWORDS)) {
       logger.info('Simple mode intercept: rejection (off)', {
@@ -283,6 +306,21 @@ async function trySimpleModeIntercept(
   }
 
   if (deal.state === 'locked') {
+    // LOCKED + cancel keyword → cancellation
+    if (matchesKeyword(message, CANCEL_KEYWORDS_SYNC())) {
+      logger.info('Simple mode intercept: cancellation (locked)', {
+        event: 'simple_mode_intercept',
+        action: 'cancellation',
+        groupId: enrichedContext.groupId,
+        sender: enrichedContext.sender,
+        dealId: deal.id,
+      })
+      return {
+        destination: 'DEAL_HANDLER',
+        context: { ...enrichedContext, dealAction: 'cancellation' },
+      }
+    }
+
     // LOCKED + "off" → rejection (cancel the locked deal)
     if (matchesKeyword(message, OFF_KEYWORDS)) {
       logger.info('Simple mode intercept: rejection (locked + off)', {
@@ -373,6 +411,9 @@ function resolveTriggeredRoute(
 ): RouteResult {
   enrichedContext.matchedTrigger = trigger
   enrichedContext.hasTrigger = true
+  if (trigger.actionType === 'tronscan_process') {
+    enrichedContext.hasTronscan = true
+  }
 
   // Volatility Protection: Check for deal acceptance (confirmation trigger)
   // If there's an active simple quote (not full deal flow), close it
@@ -471,11 +512,43 @@ export async function routeMessage(
 
   // ACTIVE mode: full routing through database triggers
 
+  // Load spread config once for mode-dependent policies/intercepts.
+  // If DB lookup fails, we degrade safely to existing routing behavior.
+  let spreadConfig: SpreadConfig | null = null
+  try {
+    const spreadResult = await getSpreadConfig(context.groupId)
+    if (spreadResult.ok) {
+      spreadConfig = spreadResult.data
+    }
+  } catch {
+    // Non-fatal, handled by downstream fallbacks.
+  }
+
+  // Operator finality policy (simple mode only):
+  // - Receipts and tronscan links are allowed finality paths.
+  // - All other operator chatter is observe-only to prevent deal-flow noise.
+  const isSimpleMode = spreadConfig?.dealFlowMode === 'simple'
+  const senderRole = getGroupConfigSync(context.groupId)?.playerRoles?.[context.sender] ?? null
+  const isConfiguredOperator = senderRole === 'operator'
+  const isSpreadOperator = spreadConfig?.operatorJid === context.sender
+  if (isSimpleMode && (isConfiguredOperator || isSpreadOperator)) {
+    if (isReceipt) {
+      return { destination: 'RECEIPT_HANDLER', context: enrichedContext }
+    }
+    if (hasTronscanLink(context.message)) {
+      return {
+        destination: 'TRONSCAN_HANDLER',
+        context: { ...enrichedContext, hasTronscan: true },
+      }
+    }
+    return { destination: 'OBSERVE_ONLY', context: enrichedContext }
+  }
+
   // Priority 3 (Sprint 9): Simple mode deal-state intercept
   // Runs BEFORE trigger matching so deal-state context takes priority
   // Classic mode: completely skipped (returns null instantly)
   try {
-    const interceptResult = await trySimpleModeIntercept(enrichedContext)
+    const interceptResult = await trySimpleModeIntercept(enrichedContext, spreadConfig)
     if (interceptResult) {
       return interceptResult
     }

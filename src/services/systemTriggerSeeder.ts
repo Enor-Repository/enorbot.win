@@ -10,76 +10,9 @@
  */
 
 import { getSupabase } from './supabase.js'
-import { getKeywordsForPattern, type PatternKey } from './systemPatternService.js'
 import { clearTriggersCache } from './triggerService.js'
+import { buildSystemTriggerRows } from './systemTriggerTemplates.js'
 import { logger } from '../utils/logger.js'
-
-// ============================================================================
-// Default Trigger Templates
-// ============================================================================
-
-interface DefaultTriggerTemplate {
-  /** Human-readable trigger phrase */
-  triggerPhrase: string
-  patternType: 'exact' | 'contains' | 'regex'
-  actionType: string
-  priority: number
-  scope?: 'group' | 'control_only'
-  displayName?: string
-}
-
-interface DynamicKeywordGroup {
-  patternKey: PatternKey
-  actionType: string
-  priority: number
-}
-
-/**
- * Keyword groups loaded from systemPatternService.
- * Each keyword becomes a separate "contains" trigger.
- */
-const DYNAMIC_KEYWORD_GROUPS: DynamicKeywordGroup[] = [
-  { patternKey: 'price_request', actionType: 'price_quote', priority: 100 },
-  { patternKey: 'deal_cancellation', actionType: 'deal_cancel', priority: 90 },
-  { patternKey: 'price_lock', actionType: 'deal_lock', priority: 90 },
-  { patternKey: 'deal_confirmation', actionType: 'deal_confirm', priority: 90 },
-]
-
-/**
- * Fixed triggers that require regex (patterns, not keywords).
- */
-const FIXED_REGEX_TEMPLATES: DefaultTriggerTemplate[] = [
-  {
-    triggerPhrase: 'tronscan\\.(?:org|io)/#/transaction/[a-f0-9]{64}',
-    patternType: 'regex',
-    actionType: 'tronscan_process',
-    priority: 95,
-    displayName: 'Tronscan Link',
-  },
-  {
-    triggerPhrase: '\\d+(?:[.,]\\d+)?\\s*(?:k|mil)\\b|\\d{1,3}(?:[.,]\\d{3})+',
-    patternType: 'regex',
-    actionType: 'deal_volume',
-    priority: 80,
-    displayName: 'Volume Pattern',
-  },
-]
-
-/**
- * Control command triggers (exact match, control_only scope).
- * These simple commands become triggers so they're visible in the dashboard.
- * Commands with arguments (mode <group>, config <group>, etc.) stay
- * hardcoded in parseControlCommand() and are routed via the fallback.
- */
-const CONTROL_COMMAND_TEMPLATES: DefaultTriggerTemplate[] = [
-  { triggerPhrase: 'status', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
-  { triggerPhrase: 'pause', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
-  { triggerPhrase: 'resume', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
-  { triggerPhrase: 'modes', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
-  { triggerPhrase: 'training on', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
-  { triggerPhrase: 'training off', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only' },
-  { triggerPhrase: 'off', patternType: 'exact', actionType: 'control_command', priority: 100, scope: 'control_only', displayName: 'Off Command' },
-]
 
 // ============================================================================
 // Seeding
@@ -127,7 +60,7 @@ export async function seedDefaultTriggers(groupJid: string, isControlGroup = fal
     }
 
     // Build trigger rows
-    const rows = await buildDefaultTriggerRows(groupJid, isControlGroup)
+    const rows = await buildSystemTriggerRows(groupJid, isControlGroup)
 
     if (rows.length === 0) {
       logger.warn('No default triggers to seed', {
@@ -166,66 +99,4 @@ export async function seedDefaultTriggers(groupJid: string, isControlGroup = fal
       error: e instanceof Error ? e.message : String(e),
     })
   }
-}
-
-/**
- * Build database rows for all default triggers.
- * Loads keywords from systemPatternService and creates one "contains" trigger per keyword.
- */
-async function buildDefaultTriggerRows(groupJid: string, isControlGroup: boolean): Promise<Record<string, unknown>[]> {
-  const rows: Record<string, unknown>[] = []
-
-  // Dynamic keyword groups → one "contains" trigger per keyword
-  for (const group of DYNAMIC_KEYWORD_GROUPS) {
-    const keywords = await getKeywordsForPattern(group.patternKey)
-    for (const keyword of keywords) {
-      rows.push({
-        group_jid: groupJid,
-        trigger_phrase: keyword,
-        pattern_type: 'contains',
-        action_type: group.actionType,
-        action_params: {},
-        priority: group.priority,
-        is_active: true,
-        is_system: true,
-        scope: 'group',
-      })
-    }
-  }
-
-  // Fixed regex triggers (tronscan, volume)
-  for (const template of FIXED_REGEX_TEMPLATES) {
-    const row: Record<string, unknown> = {
-      group_jid: groupJid,
-      trigger_phrase: template.triggerPhrase,
-      pattern_type: template.patternType,
-      action_type: template.actionType,
-      action_params: {},
-      priority: template.priority,
-      is_active: true,
-      is_system: true,
-      scope: template.scope || 'group',
-    }
-    if (template.displayName) row.display_name = template.displayName
-    rows.push(row)
-  }
-
-  // Control command triggers — only seeded for control groups
-  if (!isControlGroup) return rows
-
-  for (const template of CONTROL_COMMAND_TEMPLATES) {
-    rows.push({
-      group_jid: groupJid,
-      trigger_phrase: template.triggerPhrase,
-      pattern_type: template.patternType,
-      action_type: template.actionType,
-      action_params: {},
-      priority: template.priority,
-      is_active: true,
-      is_system: true,
-      scope: template.scope || 'control_only',
-    })
-  }
-
-  return rows
 }

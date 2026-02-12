@@ -62,7 +62,7 @@ interface Player {
   jid: string
   name: string
   messageCount: number
-  role: 'operator' | 'client' | 'cio' | null
+  role: 'operator' | 'client' | 'cio' | 'ignore' | null
 }
 
 export function GroupsAndRulesPage() {
