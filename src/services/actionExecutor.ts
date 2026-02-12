@@ -61,7 +61,7 @@ export interface ActionContext {
 
 /**
  * Fetch the base exchange rate from the configured pricing source.
- * Falls back to Binance if commercial dollar API is unavailable.
+ * Commercial dollar uses TradingView scraper rate only.
  */
 async function fetchBaseRate(
   pricingSource: string,
@@ -70,16 +70,12 @@ async function fetchBaseRate(
   if (pricingSource === 'commercial_dollar') {
     const commercialResult = await fetchCommercialDollar()
     if (!commercialResult.ok) {
-      logger.warn('Commercial dollar unavailable, falling back to Binance', {
-        event: 'commercial_dollar_fallback',
+      logger.warn('Commercial dollar unavailable from TradingView scraper', {
+        event: 'commercial_dollar_unavailable',
         groupJid,
         error: commercialResult.error,
       })
-      const binanceResult = await fetchPrice()
-      if (!binanceResult.ok) {
-        return err(`Price unavailable: ${binanceResult.error}`)
-      }
-      return ok(binanceResult.data)
+      return err(`Price unavailable: ${commercialResult.error}`)
     }
     return ok(commercialResult.data.ask)
   }

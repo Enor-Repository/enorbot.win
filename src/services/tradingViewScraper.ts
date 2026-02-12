@@ -6,7 +6,7 @@
  * - Navigates to TradingView's generic chart for FX_IDC:USDBRL
  * - TradingView auto-updates the page title with the live price (e.g. "USDBRL 5,2169 ▼ −1.05%")
  * - On demand: reads the page title to extract the current price — zero DOM queries, zero interaction
- * - Keeps AwesomeAPI as a fallback (handled in awesomeapi.ts)
+ * - TradingView is the sole runtime source for commercial dollar quotes
  *
  * Lifecycle follows the same pattern as binanceWebSocket.ts:
  * - startScraper() on bot startup
@@ -42,13 +42,19 @@ const CHART_RENDER_WAIT_MS = 12_000
 const STALE_THRESHOLD_MS = Number(process.env.TRADINGVIEW_STALE_MS) || 120_000
 
 /** If the price hasn't changed for this long, the page is likely frozen. */
-const FROZEN_PRICE_THRESHOLD_MS = Number(process.env.TRADINGVIEW_FROZEN_MS) || 5 * 60_000
+const FROZEN_PRICE_THRESHOLD_MS = Number(process.env.TRADINGVIEW_FROZEN_MS) || 90_000
 
 /** How often the watchdog checks for a frozen price. */
-const WATCHDOG_INTERVAL_MS = 60_000
+const WATCHDOG_INTERVAL_MS = Number(process.env.TRADINGVIEW_WATCHDOG_MS) || 15_000
 
 /** Max page navigations (refresh/reconnect) per hour. Initial startup is exempt. */
-const MAX_NAVIGATIONS_PER_HOUR = Number(process.env.TRADINGVIEW_MAX_NAV_PER_HOUR) || 3
+const MAX_NAVIGATIONS_PER_HOUR = Number(process.env.TRADINGVIEW_MAX_NAV_PER_HOUR) || 12
+
+/**
+ * If navigation budget is exhausted, allow one controlled bypass at this interval.
+ * Avoids prolonged stale prices when TradingView needs a forced refresh.
+ */
+const RATE_LIMIT_BYPASS_INTERVAL_MS = Number(process.env.TRADINGVIEW_RATE_LIMIT_BYPASS_MS) || 5 * 60_000
 
 /** Reconnection backoff settings (matches binanceWebSocket.ts). */
 const INITIAL_RECONNECT_DELAY_MS = 2_000
@@ -70,6 +76,7 @@ let status: ScraperStatus = 'stopped'
 let reconnectDelay = INITIAL_RECONNECT_DELAY_MS
 let reconnectTimer: NodeJS.Timeout | null = null
 let watchdogTimer: NodeJS.Timeout | null = null
+let lastRateLimitBypassAt = 0
 
 /** Sliding window of navigation timestamps (refreshes + reconnects, NOT initial startup). */
 let navigationTimestamps: number[] = []
@@ -230,11 +237,12 @@ function scheduleReconnect(): void {
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null
 
-    if (!canNavigate()) {
-      logger.warn('Navigation rate limit reached — deferring reconnect, AwesomeAPI will serve as fallback', {
+    if (!canNavigateWithBypass('reconnect')) {
+      logger.warn('Navigation rate limit reached — deferring reconnect until bypass cooldown', {
         event: 'tradingview_reconnect_rate_limited',
         navigationsInLastHour: navigationsUsed(),
         maxPerHour: MAX_NAVIGATIONS_PER_HOUR,
+        bypassIntervalMs: RATE_LIMIT_BYPASS_INTERVAL_MS,
       })
       // Retry after the max backoff delay; budget may have replenished by then
       reconnectDelay = MAX_RECONNECT_DELAY_MS
@@ -282,6 +290,29 @@ function navigationsUsed(): number {
   return navigationTimestamps.length
 }
 
+/**
+ * Allow navigation if budget exists, or bypass rate limiting with cooldown.
+ */
+function canNavigateWithBypass(reason: 'refresh' | 'reconnect'): boolean {
+  if (canNavigate()) return true
+
+  const now = Date.now()
+  const elapsed = now - lastRateLimitBypassAt
+  if (elapsed >= RATE_LIMIT_BYPASS_INTERVAL_MS) {
+    lastRateLimitBypassAt = now
+    logger.warn('TradingView navigation budget exhausted — applying controlled bypass', {
+      event: 'tradingview_rate_limit_bypass',
+      reason,
+      bypassIntervalMs: RATE_LIMIT_BYPASS_INTERVAL_MS,
+      navigationsInLastHour: navigationsUsed(),
+      maxPerHour: MAX_NAVIGATIONS_PER_HOUR,
+    })
+    return true
+  }
+
+  return false
+}
+
 // ---------------------------------------------------------------------------
 // Watchdog: detect frozen price (TradingView internal WS may silently drop)
 // ---------------------------------------------------------------------------
@@ -293,11 +324,12 @@ function navigationsUsed(): number {
 async function refreshPage(): Promise<boolean> {
   if (!page) return false
 
-  if (!canNavigate()) {
-    logger.warn('Navigation rate limit reached — skipping refresh, falling back to AwesomeAPI', {
+  if (!canNavigateWithBypass('refresh')) {
+    logger.warn('Navigation rate limit reached — skipping refresh until bypass cooldown', {
       event: 'tradingview_rate_limited',
       navigationsInLastHour: navigationsUsed(),
       maxPerHour: MAX_NAVIGATIONS_PER_HOUR,
+      bypassIntervalMs: RATE_LIMIT_BYPASS_INTERVAL_MS,
     })
     return false
   }
@@ -364,16 +396,6 @@ async function watchdogTick(): Promise<void> {
   const frozenMs = Date.now() - lastPriceChange
   if (frozenMs < FROZEN_PRICE_THRESHOLD_MS) return
 
-  // Check rate limit before attempting anything
-  if (!canNavigate()) {
-    logger.info('Price frozen but navigation budget exhausted — AwesomeAPI serves as fallback', {
-      event: 'tradingview_frozen_rate_limited',
-      frozenMs,
-      navigationsInLastHour: navigationsUsed(),
-    })
-    return
-  }
-
   logger.warn('TradingView price appears frozen — refreshing page', {
     event: 'tradingview_price_frozen',
     frozenMs,
@@ -416,7 +438,7 @@ function stopWatchdog(): void {
 /**
  * Start the TradingView scraper.
  * Launches headless Chromium with stealth, navigates to TradingView chart.
- * Non-fatal: if launch fails, the system falls back to AwesomeAPI.
+ * Non-fatal: if launch fails, commercial-dollar pricing stays unavailable until recovery.
  */
 export async function startScraper(): Promise<void> {
   if (status !== 'stopped') {
@@ -467,6 +489,7 @@ export async function stopScraper(): Promise<void> {
   currentPrice = null
   lastSuccessfulRead = null
   lastPriceChange = null
+  lastRateLimitBypassAt = 0
   reconnectDelay = INITIAL_RECONNECT_DELAY_MS
   navigationTimestamps = []
 }

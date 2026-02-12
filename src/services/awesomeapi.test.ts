@@ -11,7 +11,7 @@ vi.mock('../utils/logger.js', () => ({
   },
 }))
 
-// Mock TradingView scraper — returns null by default (fallback to AwesomeAPI)
+// Mock TradingView scraper — returns null by default (unavailable)
 vi.mock('./tradingViewScraper.js', () => ({
   getCommercialDollarPrice: vi.fn().mockResolvedValue(null),
 }))
@@ -33,7 +33,7 @@ describe('fetchCommercialDollar', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.clearAllMocks()
-    // Default: scraper returns null → falls through to AwesomeAPI
+    // Default: scraper returns null → unavailable
     mockGetCommercialDollarPrice.mockResolvedValue(null)
     // Set a valid token for most tests
     process.env.AWESOMEAPI_TOKEN = 'test-token-123'
@@ -109,39 +109,25 @@ describe('fetchCommercialDollar', () => {
       )
     })
 
-    it('falls back to AwesomeAPI when scraper returns null', async () => {
+    it('returns unavailable when scraper returns null', async () => {
       mockGetCommercialDollarPrice.mockResolvedValue(null)
-
-      const mockResponse = {
-        USDBRL: {
-          code: 'USD',
-          codein: 'BRL',
-          bid: '5.2584',
-          ask: '5.2614',
-        },
-      }
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockResolvedValue({
-          ok: true,
-          json: () => Promise.resolve(mockResponse),
-        })
-      )
+      const mockFetch = vi.fn()
+      vi.stubGlobal('fetch', mockFetch)
 
       const resultPromise = fetchCommercialDollar()
       await vi.runAllTimersAsync()
       const result = await resultPromise
 
-      expect(result.ok).toBe(true)
-      if (result.ok) {
-        expect(result.data.bid).toBeCloseTo(5.2584)
-        expect(result.data.ask).toBeCloseTo(5.2614)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.error).toBe('TradingView commercial dollar unavailable')
       }
+      expect(mockFetch).not.toHaveBeenCalled()
 
       expect(logger.warn).toHaveBeenCalledWith(
-        'TradingView unavailable, falling back to AwesomeAPI',
+        'TradingView commercial dollar unavailable',
         expect.objectContaining({
-          event: 'tradingview_fallback_to_awesomeapi',
+          event: 'tradingview_price_unavailable',
         })
       )
     })

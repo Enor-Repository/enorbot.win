@@ -257,7 +257,7 @@ async function resolveActiveRulePricing(groupJid: string): Promise<ResolvedPrici
 
 /**
  * Fetch base price from the configured source.
- * Commercial dollar uses AwesomeAPI ask rate, falls back to Binance.
+ * Commercial dollar uses TradingView scraper rate only.
  */
 async function fetchBasePrice(
   pricingSource: string,
@@ -273,12 +273,12 @@ async function fetchBasePrice(
       })
       return ok(commercialResult.data.ask)
     }
-    // Fall back to Binance if commercial dollar unavailable
-    logger.warn('Commercial dollar unavailable, falling back to Binance', {
-      event: 'commercial_dollar_fallback',
+    logger.warn('Commercial dollar unavailable from TradingView scraper', {
+      event: 'commercial_dollar_unavailable',
       groupJid,
       error: commercialResult.error,
     })
+    return err(commercialResult.error)
   }
 
   const binanceResult = await fetchPrice()

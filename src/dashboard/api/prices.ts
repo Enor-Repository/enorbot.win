@@ -57,7 +57,7 @@ pricesRouter.get('/usdt-brl', async (_req: Request, res: Response) => {
 /**
  * GET /api/prices/commercial-dollar
  * Reads commercial dollar from TradingView page title (instant, no network call).
- * Falls back to AwesomeAPI if scraper is down.
+ * No secondary source fallback.
  * No caching — title reads are free.
  */
 pricesRouter.get('/commercial-dollar', async (_req: Request, res: Response) => {

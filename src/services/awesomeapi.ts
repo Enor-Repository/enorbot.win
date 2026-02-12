@@ -62,13 +62,13 @@ export interface CommercialDollarQuote {
 /**
  * Fetch current commercial USD/BRL exchange rate.
  *
- * Primary: TradingView scraper (reads page title — instant, accurate).
- * Fallback: AwesomeAPI REST endpoint (less accurate but always available).
+ * Source of truth: TradingView scraper (reads page title — instant, accurate).
+ * No REST fallback in runtime pricing flow.
  *
  * Returns Result type — never throws.
  */
 export async function fetchCommercialDollar(): Promise<Result<CommercialDollarQuote>> {
-  // Strategy 1: TradingView scraper (primary)
+  // TradingView scraper is the only runtime source.
   const tvPrice = await getCommercialDollarPrice()
 
   if (tvPrice !== null) {
@@ -87,12 +87,11 @@ export async function fetchCommercialDollar(): Promise<Result<CommercialDollarQu
     return ok(quote)
   }
 
-  // Strategy 2: AwesomeAPI REST fallback
-  logger.warn('TradingView unavailable, falling back to AwesomeAPI', {
-    event: 'tradingview_fallback_to_awesomeapi',
+  logger.warn('TradingView commercial dollar unavailable', {
+    event: 'tradingview_price_unavailable',
   })
 
-  return fetchFromAwesomeApiRest()
+  return err('TradingView commercial dollar unavailable')
 }
 
 /**

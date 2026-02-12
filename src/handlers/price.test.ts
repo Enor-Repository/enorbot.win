@@ -109,6 +109,7 @@ vi.mock('../services/dealComputation.js', () => ({
 }))
 
 import { fetchPrice } from '../services/binance.js'
+import { fetchCommercialDollar } from '../services/awesomeapi.js'
 import { sendWithAntiDetection } from '../utils/messaging.js'
 import { logger } from '../utils/logger.js'
 import { calculateQuote } from '../services/groupSpreadService.js'
@@ -116,6 +117,7 @@ import { getActiveRule } from '../services/ruleService.js'
 import { recordBotResponse } from '../services/responseSuppression.js'
 
 const mockFetchPrice = fetchPrice as ReturnType<typeof vi.fn>
+const mockFetchCommercialDollar = fetchCommercialDollar as ReturnType<typeof vi.fn>
 const mockSend = sendWithAntiDetection as ReturnType<typeof vi.fn>
 const mockCalculateQuote = calculateQuote as ReturnType<typeof vi.fn>
 const mockGetActiveRule = getActiveRule as ReturnType<typeof vi.fn>
@@ -1062,6 +1064,35 @@ describe('handlePriceMessage', () => {
         }),
         'client_buys_usdt'
       )
+    })
+
+    it('does not fall back to Binance when commercial_dollar source is unavailable', async () => {
+      mockGetActiveRule.mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: 'rule-commercial-1',
+          groupJid: '123456789@g.us',
+          name: 'Commercial Source Rule',
+          spreadMode: 'bps',
+          sellSpread: 20,
+          buySpread: -10,
+          pricingSource: 'commercial_dollar',
+          priority: 10,
+        },
+      })
+      mockFetchCommercialDollar.mockResolvedValueOnce({
+        ok: false,
+        error: 'TradingView commercial dollar unavailable',
+      })
+      mockFetchPrice.mockResolvedValue({ ok: true, data: 5.82 })
+
+      const promise = handlePriceMessage(baseContext)
+      await vi.advanceTimersByTimeAsync((MAX_PRICE_RETRIES * RETRY_DELAY_MS) + 250)
+      const result = await promise
+
+      expect(result.ok).toBe(false)
+      expect(mockFetchPrice).not.toHaveBeenCalled()
+      expect(mockSend).not.toHaveBeenCalled()
     })
   })
 

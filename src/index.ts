@@ -87,7 +87,7 @@ async function main(): Promise<void> {
 
   // Commercial dollar: Start TradingView scraper (non-fatal if fails)
   startScraper().catch((error) => {
-    logger.warn('TradingView scraper failed to start, will use AwesomeAPI fallback', {
+    logger.warn('TradingView scraper failed to start', {
       event: 'tradingview_start_error',
       error: error instanceof Error ? error.message : String(error),
     })
