@@ -27,6 +27,7 @@ import { logBotMessage } from '../services/messageHistory.js'
 import { recordMessageSent } from '../bot/state.js'
 import {
   findClientDeal,
+  getDealById,
   createDeal,
   lockDeal,
   startComputation,
@@ -60,7 +61,7 @@ import { getSpreadConfig, calculateQuote, type SpreadConfig } from '../services/
 import { getActiveRule, type GroupRule } from '../services/ruleService.js'
 // Sprint 9.1: Active quote bridge + operator resolution + Excel logging
 import { getActiveQuote, forceAccept, createQuote, clearPreStatedVolume, MIN_VOLUME_USDT } from '../services/activeQuotes.js'
-import { resolveOperatorJid } from '../services/groupConfig.js'
+import { resolveOperatorJid, isIgnoredPlayer } from '../services/groupConfig.js'
 import { logPriceQuote, type LogEntry } from '../services/excel.js'
 // Phase 3: AI classification for active quote unrecognized input
 import { classifyOTCMessage, type EnhancedClassificationResult } from '../services/classificationEngine.js'
@@ -161,6 +162,88 @@ function buildCancellationMessage(): string {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/** Cooldown for repeated operator tags during unrecognized-input loops. */
+const UNRECOGNIZED_TAG_COOLDOWN_MS = 2 * 60 * 1000
+
+/** Cooldown for repeated awaiting-amount prompts to avoid message storms. */
+const AWAITING_PROMPT_COOLDOWN_MS = 30 * 1000
+
+/** Last-send registry for operator tag cooldown. */
+const unrecognizedTagCooldown: Map<string, number> = new Map()
+
+/** Last-send registry for awaiting-amount prompt dedupe. */
+const awaitingPromptCooldown: Map<string, number> = new Map()
+
+/**
+ * Generic cooldown gate. Returns true when the caller is allowed to send now.
+ */
+function shouldSendWithCooldown(registry: Map<string, number>, key: string, cooldownMs: number): boolean {
+  const now = Date.now()
+  const last = registry.get(key)
+  if (last !== undefined && now - last < cooldownMs) {
+    return false
+  }
+  registry.set(key, now)
+  return true
+}
+
+function buildUnrecognizedTagKey(params: {
+  groupId: string
+  sender: string
+  threadId: string
+  state: 'active_quote' | 'quoted' | 'locked'
+}): string {
+  return `${params.groupId}:${params.sender}:${params.threadId}:${params.state}`
+}
+
+function shouldSendUnrecognizedTag(key: string): boolean {
+  return shouldSendWithCooldown(unrecognizedTagCooldown, key, UNRECOGNIZED_TAG_COOLDOWN_MS)
+}
+
+function shouldSendAwaitingPrompt(key: string): boolean {
+  return shouldSendWithCooldown(awaitingPromptCooldown, key, AWAITING_PROMPT_COOLDOWN_MS)
+}
+
+/**
+ * Safety filter for quoted-expiry "off" notifications.
+ * Suppresses noisy off messages for ignored players and mention-only/off-mention inputs.
+ */
+function shouldSendExpiryOff(deal: ActiveDeal): boolean {
+  if (isIgnoredPlayer(deal.groupJid, deal.clientJid)) {
+    return false
+  }
+
+  const originalMessageRaw = deal.metadata?.originalMessage
+  if (typeof originalMessageRaw !== 'string') {
+    return true
+  }
+
+  const original = originalMessageRaw.trim()
+  if (original.length === 0) {
+    return true
+  }
+
+  // Mention-only payloads are common in operator chatter and should not emit "off".
+  if (/^@\d{8,}$/i.test(original)) {
+    return false
+  }
+
+  // Explicit operator command text with mention should not become quote-expiry off noise.
+  if (/^off\s+@\d{8,}$/i.test(original)) {
+    return false
+  }
+
+  return true
+}
+
+/**
+ * Test helper to reset in-memory cooldown guards.
+ */
+export function resetDealHandlerGuardsForTesting(): void {
+  unrecognizedTagCooldown.clear()
+  awaitingPromptCooldown.clear()
+}
 
 /**
  * Get the current base rate and build spread/rule context for deal creation.
@@ -1711,8 +1794,24 @@ async function handleUnrecognizedInput(
       const operatorJid = resolveOperatorJid(groupId)
       const operatorTagged = !!operatorJid
       if (operatorJid) {
-        const mention = formatMention(operatorJid)
-        await sendDealMessage(context, mention.textSegment, 'deal_state_hint', [mention.jid])
+        const tagKey = buildUnrecognizedTagKey({
+          groupId,
+          sender,
+          threadId: activeQuote.id,
+          state: 'active_quote',
+        })
+        if (shouldSendUnrecognizedTag(tagKey)) {
+          const mention = formatMention(operatorJid)
+          await sendDealMessage(context, mention.textSegment, 'deal_state_hint', [mention.jid])
+        } else {
+          logger.info('Operator tag suppressed by cooldown (active quote)', {
+            event: 'deal_unrecognized_tag_suppressed',
+            groupId,
+            sender,
+            quoteId: activeQuote.id,
+            cooldownMs: UNRECOGNIZED_TAG_COOLDOWN_MS,
+          })
+        }
       }
 
       return ok({
@@ -1735,7 +1834,19 @@ async function handleUnrecognizedInput(
     const msg = language === 'en'
       ? `Send the USDT amount (e.g., 500, 10k) or "cancel". Rate: ${formatRate(rate)}.`
       : `Envie o valor em USDT (ex: 500, 10k) ou "cancela". Taxa: ${formatRate(rate)}.`
-    await sendDealMessage(context, msg, 'deal_awaiting_amount')
+
+    const promptKey = `awaiting:${groupId}:${sender}:${deal.id}`
+    if (shouldSendAwaitingPrompt(promptKey)) {
+      await sendDealMessage(context, msg, 'deal_awaiting_amount')
+    } else {
+      logger.info('Awaiting-amount prompt suppressed by cooldown', {
+        event: 'deal_awaiting_prompt_suppressed',
+        dealId: deal.id,
+        groupId,
+        sender,
+        cooldownMs: AWAITING_PROMPT_COOLDOWN_MS,
+      })
+    }
 
     return ok({
       action: 'no_action',
@@ -1751,8 +1862,25 @@ async function handleUnrecognizedInput(
   if (deal.state === 'quoted' || deal.state === 'locked') {
     const operatorJid = resolveOperatorJid(groupId)
     if (operatorJid) {
-      const mention = formatMention(operatorJid)
-      await sendDealMessage(context, mention.textSegment, 'deal_state_hint', [mention.jid])
+      const tagKey = buildUnrecognizedTagKey({
+        groupId,
+        sender,
+        threadId: deal.id,
+        state: deal.state,
+      })
+      if (shouldSendUnrecognizedTag(tagKey)) {
+        const mention = formatMention(operatorJid)
+        await sendDealMessage(context, mention.textSegment, 'deal_state_hint', [mention.jid])
+      } else {
+        logger.info('Operator tag suppressed by cooldown (active deal)', {
+          event: 'deal_unrecognized_tag_suppressed',
+          dealState: deal.state,
+          dealId: deal.id,
+          groupId,
+          sender,
+          cooldownMs: UNRECOGNIZED_TAG_COOLDOWN_MS,
+        })
+      }
     }
 
     logger.info('Unrecognized input during active deal, operator tagged', {
@@ -1922,22 +2050,52 @@ export function startDealSweepTimer(): void {
         if (sock) {
           for (const expired of result.data) {
             if (expired.state === 'quoted') {
-              const operatorJid = resolveOperatorJid(expired.groupJid)
-              const mentions = operatorJid ? [operatorJid] : []
-              const offMsg = operatorJid ? `off @${operatorJid.replace(/@.*/, '')}` : 'off'
-              await sendWithAntiDetection(sock, expired.groupJid, offMsg, mentions)
-              logBotMessage({ groupJid: expired.groupJid, content: offMsg, messageType: 'deal_expired', isControlGroup: false })
-              recordMessageSent(expired.groupJid)
-              // Clear active quote for this group
-              forceAccept(expired.groupJid)
+              let shouldSendOff = true
+              let suppressionReason: 'deal_lookup_failed' | 'guard_filtered' | null = null
 
-              logger.info('Sent expiry "off" notification', {
-                event: 'deal_expiry_off_sent',
-                dealId: expired.id,
-                groupJid: expired.groupJid,
-                state: expired.state,
-                operatorMentioned: !!operatorJid,
-              })
+              const dealResult = await getDealById(expired.id, expired.groupJid)
+              if (!dealResult.ok) {
+                shouldSendOff = false
+                suppressionReason = 'deal_lookup_failed'
+
+                logger.warn('Could not load deal for expiry off decision', {
+                  event: 'deal_expiry_off_lookup_failed',
+                  dealId: expired.id,
+                  groupJid: expired.groupJid,
+                  error: dealResult.error,
+                })
+              } else if (!shouldSendExpiryOff(dealResult.data)) {
+                shouldSendOff = false
+                suppressionReason = 'guard_filtered'
+              }
+
+              if (shouldSendOff) {
+                const operatorJid = resolveOperatorJid(expired.groupJid)
+                const mentions = operatorJid ? [operatorJid] : []
+                const offMsg = operatorJid ? `off @${operatorJid.replace(/@.*/, '')}` : 'off'
+                await sendWithAntiDetection(sock, expired.groupJid, offMsg, mentions)
+                logBotMessage({ groupJid: expired.groupJid, content: offMsg, messageType: 'deal_expired', isControlGroup: false })
+                recordMessageSent(expired.groupJid)
+
+                logger.info('Sent expiry "off" notification', {
+                  event: 'deal_expiry_off_sent',
+                  dealId: expired.id,
+                  groupJid: expired.groupJid,
+                  state: expired.state,
+                  operatorMentioned: !!operatorJid,
+                })
+              } else {
+                logger.info('Suppressed expiry "off" notification', {
+                  event: 'deal_expiry_off_suppressed',
+                  dealId: expired.id,
+                  groupJid: expired.groupJid,
+                  state: expired.state,
+                  suppressionReason,
+                })
+              }
+
+              // Always clear active quote for this group once quoted deal expires.
+              forceAccept(expired.groupJid)
             }
           }
         }
@@ -1977,4 +2135,3 @@ export function stopDealSweepTimer(): void {
     logger.info('Deal sweep timer stopped', { event: 'deal_sweep_timer_stopped' })
   }
 }
-

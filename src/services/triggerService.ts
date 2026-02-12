@@ -348,7 +348,7 @@ export function matchesPattern(message: string, trigger: GroupTrigger): boolean 
  * Triggers are sorted by priority DESC; first match wins.
  *
  * Scope filtering:
- * - In control groups (isControlGroup=true): all triggers match (both 'group' and 'control_only')
+ * - In control groups (isControlGroup=true): only 'control_only' triggers match
  * - In regular groups (isControlGroup=false): only 'group' scope triggers match
  *
  * @param message - The incoming message text
@@ -368,7 +368,10 @@ export async function matchTrigger(
   if (triggers.length === 0) return ok(null)
 
   for (const trigger of triggers) {
-    // Scope filtering: control_only triggers only fire in control groups
+    // Scope filtering:
+    // - Control groups must only execute control_only triggers
+    // - Trading groups must never execute control_only triggers
+    if (isControlGroup && trigger.scope !== 'control_only') continue
     if (!isControlGroup && trigger.scope === 'control_only') continue
 
     if (matchesPattern(message, trigger)) {

@@ -63,6 +63,7 @@ vi.mock('../services/groupSpreadService.js', () => ({
 // Mock groupConfig - resolveOperatorJid is the sole source for operator tagging
 vi.mock('../services/groupConfig.js', () => ({
   resolveOperatorJid: vi.fn().mockReturnValue(null),
+  isIgnoredPlayer: vi.fn().mockReturnValue(false),
 }))
 
 // Mock ruleService
@@ -145,6 +146,7 @@ import {
   handleRejection,
   handleVolumeInput,
   handleDealRouted,
+  resetDealHandlerGuardsForTesting,
 } from './deal.js'
 
 // ============================================================================
@@ -192,6 +194,10 @@ const MOCK_DEAL = {
   createdAt: new Date(),
   updatedAt: new Date(),
 }
+
+beforeEach(() => {
+  resetDealHandlerGuardsForTesting()
+})
 
 // ============================================================================
 // handleVolumeInquiry Tests
@@ -1324,4 +1330,3 @@ describe('handleDealRouted — unrecognized input with active quote (Phase 3)', 
     )
   })
 })
-
