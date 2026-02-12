@@ -12,6 +12,8 @@
 import { getSupabase } from './supabase.js'
 import { logger } from '../utils/logger.js'
 import { ok, err, type Result } from '../utils/result.js'
+import { getTriggersForGroup, clearTriggersCache } from './triggerService.js'
+import { getSpreadConfig, clearSpreadCache } from './groupSpreadService.js'
 
 // ============================================================================
 // Types
@@ -738,6 +740,254 @@ export async function deleteRule(ruleId: string, groupJid: string): Promise<Resu
     return ok(undefined)
   } catch (e) {
     return err(`Unexpected error: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+// ============================================================================
+// Clone Ruleset
+// ============================================================================
+
+/** Options for cloning a group's ruleset to another group */
+export interface CloneOptions {
+  sourceGroupJid: string
+  targetGroupJid: string
+  cloneTriggers: boolean
+  cloneRules: boolean
+  cloneSpreads: boolean
+}
+
+/** Per-category clone counts */
+export interface CloneCategoryCounts {
+  created: number
+  updated: number
+  skipped: number
+}
+
+/** Result of a clone operation */
+export interface CloneResult {
+  triggers: CloneCategoryCounts
+  rules: CloneCategoryCounts
+  spreads: { updated: boolean }
+}
+
+/**
+ * Clone triggers, time rules, and/or spread config from one group to another.
+ *
+ * Uses upsert strategy (match on unique keys) so the operation is idempotent:
+ * - Triggers: match on (group_jid, trigger_phrase)
+ * - Rules: match on (group_jid, name)
+ * - Spreads: match on group_jid (single row per group)
+ *
+ * System triggers (is_system=true) are skipped — each group seeds its own.
+ */
+export async function cloneGroupRuleset(options: CloneOptions): Promise<Result<CloneResult>> {
+  const { sourceGroupJid, targetGroupJid, cloneTriggers, cloneRules, cloneSpreads } = options
+
+  if (sourceGroupJid === targetGroupJid) {
+    return err('Source and target groups must be different')
+  }
+
+  if (!cloneTriggers && !cloneRules && !cloneSpreads) {
+    return err('At least one category must be selected for cloning')
+  }
+
+  const supabase = getSupabase()
+  if (!supabase) {
+    return err('Supabase not initialized')
+  }
+
+  const result: CloneResult = {
+    triggers: { created: 0, updated: 0, skipped: 0 },
+    rules: { created: 0, updated: 0, skipped: 0 },
+    spreads: { updated: false },
+  }
+
+  try {
+    // ---- Triggers ----
+    if (cloneTriggers) {
+      const triggersResult = await getTriggersForGroup(sourceGroupJid)
+      if (!triggersResult.ok) {
+        return err(`Failed to fetch source triggers: ${triggersResult.error}`)
+      }
+
+      const sourceTriggers = triggersResult.data.filter(t => !t.isSystem)
+
+      // Get existing target triggers to determine created vs updated
+      const { data: existingTargetTriggers } = await supabase
+        .from('group_triggers')
+        .select('trigger_phrase')
+        .eq('group_jid', targetGroupJid)
+
+      const existingPhrases = new Set(
+        (existingTargetTriggers || []).map((t: { trigger_phrase: string }) => t.trigger_phrase)
+      )
+
+      for (const trigger of sourceTriggers) {
+        const isUpdate = existingPhrases.has(trigger.triggerPhrase)
+
+        const { error: upsertError } = await supabase
+          .from('group_triggers')
+          .upsert({
+            group_jid: targetGroupJid,
+            trigger_phrase: trigger.triggerPhrase,
+            pattern_type: trigger.patternType,
+            action_type: trigger.actionType,
+            action_params: trigger.actionParams,
+            priority: trigger.priority,
+            is_active: trigger.isActive,
+            scope: trigger.scope,
+            display_name: trigger.displayName,
+          }, { onConflict: 'group_jid,trigger_phrase' })
+
+        if (upsertError) {
+          logger.warn('Failed to upsert trigger during clone', {
+            event: 'clone_trigger_upsert_error',
+            triggerPhrase: trigger.triggerPhrase,
+            targetGroupJid,
+            error: upsertError.message,
+          })
+          result.triggers.skipped++
+        } else if (isUpdate) {
+          result.triggers.updated++
+        } else {
+          result.triggers.created++
+        }
+      }
+
+      clearTriggersCache(targetGroupJid)
+    }
+
+    // ---- Rules ----
+    if (cloneRules) {
+      const rulesResult = await getRulesForGroup(sourceGroupJid)
+      if (!rulesResult.ok) {
+        return err(`Failed to fetch source rules: ${rulesResult.error}`)
+      }
+
+      const sourceRules = rulesResult.data
+
+      // Check target rule count to respect MAX_RULES_PER_GROUP
+      const { data: existingTargetRules } = await supabase
+        .from('group_rules')
+        .select('name')
+        .eq('group_jid', targetGroupJid)
+
+      const existingNames = new Set(
+        (existingTargetRules || []).map((r: { name: string }) => r.name)
+      )
+
+      // Count how many NEW rules would be added
+      const newRulesCount = sourceRules.filter(r => !existingNames.has(r.name)).length
+      const currentCount = existingTargetRules?.length || 0
+
+      if (currentCount + newRulesCount > MAX_RULES_PER_GROUP) {
+        // Note: if triggers were already cloned above, they remain in the target.
+        // This is by design — upsert is idempotent so re-running after fixing
+        // the limit issue won't duplicate anything.
+        return err(
+          `Target group would exceed ${MAX_RULES_PER_GROUP} rules limit ` +
+          `(current: ${currentCount}, new: ${newRulesCount})`
+        )
+      }
+
+      for (const rule of sourceRules) {
+        const isUpdate = existingNames.has(rule.name)
+
+        const { error: upsertError } = await supabase
+          .from('group_rules')
+          .upsert({
+            group_jid: targetGroupJid,
+            name: rule.name,
+            description: rule.description,
+            schedule_start_time: rule.scheduleStartTime,
+            schedule_end_time: rule.scheduleEndTime,
+            schedule_days: rule.scheduleDays,
+            schedule_timezone: rule.scheduleTimezone,
+            priority: rule.priority,
+            pricing_source: rule.pricingSource,
+            spread_mode: rule.spreadMode,
+            sell_spread: rule.sellSpread,
+            buy_spread: rule.buySpread,
+            is_active: rule.isActive,
+          }, { onConflict: 'group_jid,name' })
+
+        if (upsertError) {
+          logger.warn('Failed to upsert rule during clone', {
+            event: 'clone_rule_upsert_error',
+            ruleName: rule.name,
+            targetGroupJid,
+            error: upsertError.message,
+          })
+          result.rules.skipped++
+        } else if (isUpdate) {
+          result.rules.updated++
+        } else {
+          result.rules.created++
+        }
+      }
+
+      clearRulesCache(targetGroupJid)
+    }
+
+    // ---- Spreads ----
+    if (cloneSpreads) {
+      const spreadResult = await getSpreadConfig(sourceGroupJid)
+      if (!spreadResult.ok) {
+        return err(`Failed to fetch source spread config: ${spreadResult.error}`)
+      }
+
+      const source = spreadResult.data
+
+      // Note: operator_jid is intentionally NOT cloned — it's group-specific
+      // (each group has its own operator). On INSERT (new row), it defaults to NULL.
+      // On UPDATE (existing row), the unlisted column keeps its current value.
+      const { error: spreadError } = await supabase
+        .from('group_spreads')
+        .upsert({
+          group_jid: targetGroupJid,
+          spread_mode: source.spreadMode,
+          sell_spread: source.sellSpread,
+          buy_spread: source.buySpread,
+          default_side: source.defaultSide,
+          default_currency: source.defaultCurrency,
+          language: source.language,
+          quote_ttl_seconds: source.quoteTtlSeconds,
+          deal_flow_mode: source.dealFlowMode,
+          amount_timeout_seconds: source.amountTimeoutSeconds,
+          group_language: source.groupLanguage,
+        }, { onConflict: 'group_jid' })
+
+      if (spreadError) {
+        logger.warn('Failed to upsert spread config during clone', {
+          event: 'clone_spread_upsert_error',
+          targetGroupJid,
+          error: spreadError.message,
+        })
+      } else {
+        result.spreads.updated = true
+        clearSpreadCache(targetGroupJid)
+      }
+    }
+
+    logger.info('Ruleset cloned', {
+      event: 'ruleset_cloned',
+      sourceGroupJid,
+      targetGroupJid,
+      triggers: result.triggers,
+      rules: result.rules,
+      spreads: result.spreads,
+    })
+
+    return ok(result)
+  } catch (e) {
+    const errorMessage = e instanceof Error ? e.message : String(e)
+    logger.error('Failed to clone ruleset', {
+      event: 'ruleset_clone_error',
+      sourceGroupJid,
+      targetGroupJid,
+      error: errorMessage,
+    })
+    return err(`Failed to clone ruleset: ${errorMessage}`)
   }
 }
 

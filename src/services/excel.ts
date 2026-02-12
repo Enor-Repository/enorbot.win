@@ -13,6 +13,7 @@
 import { ok, err, type Result } from '../utils/result.js'
 import { logger } from '../utils/logger.js'
 import { getConfig } from '../config.js'
+import { isSimulation } from '../utils/simulationContext.js'
 import { ensureValidToken, classifyGraphError } from './graph.js'
 import { queueLogEntry, flushQueuedEntries, setAppendRowFn } from './logQueue.js'
 
@@ -139,6 +140,9 @@ function formatRowData(entry: LogEntry): string[][] {
  * @returns Promise<Result<{rowNumber: number}>> - Row number on success
  */
 export async function logPriceQuote(entry: LogEntry): Promise<Result<{ rowNumber: number }>> {
+  // Simulation mode: skip Excel writes
+  if (isSimulation()) return ok({ rowNumber: -1 })
+
   // Get valid token
   const tokenResult = await ensureValidToken()
   if (!tokenResult.ok) {

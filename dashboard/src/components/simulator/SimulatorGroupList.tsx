@@ -3,12 +3,19 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { API_ENDPOINTS } from '@/lib/api'
 
+export interface SimulatorPlayer {
+  jid: string
+  name: string
+  role: string | null
+}
+
 export interface SimulatorGroup {
   groupJid: string
   groupName: string
   mode: string
   isControlGroup: boolean
   playerRoles: Record<string, string>
+  players: SimulatorPlayer[]
 }
 
 interface SimulatorGroupListProps {
@@ -118,7 +125,7 @@ export function SimulatorGroupList({ selectedGroupJid, onSelectGroup }: Simulato
                   </Badge>
                 )}
                 <span className="text-[10px] text-muted-foreground">
-                  {Object.keys(group.playerRoles).length} players
+                  {group.players.length} players
                 </span>
               </div>
             </div>

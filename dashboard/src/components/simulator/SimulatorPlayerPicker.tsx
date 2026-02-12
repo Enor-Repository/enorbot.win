@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
+import type { SimulatorPlayer } from './SimulatorGroupList'
 
 interface SimulatorPlayerPickerProps {
-  playerRoles: Record<string, string>
+  players: SimulatorPlayer[]
   selectedPlayer: string
   onSelectPlayer: (jid: string) => void
 }
@@ -14,35 +15,38 @@ const ROLE_COLORS: Record<string, string> = {
   ignore: 'text-red-400 bg-red-500/15 border-red-500/30',
 }
 
-function formatJid(jid: string): string {
-  return jid.replace(/@s\.whatsapp\.net$/, '')
-}
-
-export function SimulatorPlayerPicker({ playerRoles, selectedPlayer, onSelectPlayer }: SimulatorPlayerPickerProps) {
+export function SimulatorPlayerPicker({ players, selectedPlayer, onSelectPlayer }: SimulatorPlayerPickerProps) {
   const [customJid, setCustomJid] = useState('')
   const [showCustom, setShowCustom] = useState(false)
 
-  const players = Object.entries(playerRoles)
+  // Sort: roles first (operator, client, cio), then others alphabetically by name
+  const sorted = [...players].sort((a, b) => {
+    if (a.role && !b.role) return -1
+    if (!a.role && b.role) return 1
+    return a.name.localeCompare(b.name)
+  })
 
   return (
     <div className="flex flex-col gap-2">
       <label className="text-xs text-muted-foreground font-medium">Send as:</label>
       <div className="flex flex-wrap gap-1.5">
-        {players.map(([jid, role]) => (
+        {sorted.map((player) => (
           <button
-            key={jid}
-            onClick={() => { setShowCustom(false); onSelectPlayer(jid) }}
+            key={player.jid}
+            onClick={() => { setShowCustom(false); onSelectPlayer(player.jid) }}
             className={cn(
               'flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs border transition-all',
-              selectedPlayer === jid && !showCustom
+              selectedPlayer === player.jid && !showCustom
                 ? 'ring-1 ring-primary border-primary/50 bg-primary/10'
                 : 'border-border hover:bg-accent/50'
             )}
           >
-            <span className="font-mono">{formatJid(jid)}</span>
-            <span className={cn('text-[10px] px-1.5 py-0.5 rounded-full border', ROLE_COLORS[role] || 'text-muted-foreground bg-muted border-border')}>
-              {role}
-            </span>
+            <span>{player.name}</span>
+            {player.role && (
+              <span className={cn('text-[10px] px-1.5 py-0.5 rounded-full border', ROLE_COLORS[player.role] || 'text-muted-foreground bg-muted border-border')}>
+                {player.role}
+              </span>
+            )}
           </button>
         ))}
         <button

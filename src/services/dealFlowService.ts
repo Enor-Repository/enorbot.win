@@ -21,6 +21,7 @@ import { ok, err, type Result } from '../utils/result.js'
 import type { GroupRule, PricingSource, SpreadMode } from './ruleService.js'
 import type { SpreadConfig, TradeSide } from './groupSpreadService.js'
 import { emitDealEvent } from './dataLake.js'
+import { isSimulation, getSimulationDeals, applyUpdatesToDeal, generateSimDealId } from '../utils/simulationContext.js'
 
 // ============================================================================
 // Types
@@ -331,6 +332,48 @@ export async function createDeal(input: CreateDealInput): Promise<Result<ActiveD
   const validationError = validateCreateDealInput(input)
   if (validationError) return err(validationError)
 
+  // ── Simulation mode: in-memory only, no Supabase writes ──
+  const simDeals = getSimulationDeals()
+  if (simDeals) {
+    // Check for existing active deal in memory
+    for (const d of simDeals.values()) {
+      if (d.groupJid === input.groupJid && d.clientJid === input.clientJid && !TERMINAL_STATES.includes(d.state)) {
+        return err(`Client already has an active deal (${d.state}) in this group`)
+      }
+    }
+    const now = new Date()
+    const ttlExpiresAt = new Date(Date.now() + input.ttlSeconds * 1000)
+    const rule = input.rule
+    const spreadConfig = input.spreadConfig
+    const deal: ActiveDeal = {
+      id: generateSimDealId(),
+      groupJid: input.groupJid,
+      clientJid: input.clientJid,
+      state: 'quoted',
+      side: input.side,
+      quotedRate: input.quotedRate,
+      baseRate: input.baseRate,
+      quotedAt: now,
+      lockedRate: null,
+      lockedAt: null,
+      amountBrl: input.amountBrl ?? null,
+      amountUsdt: input.amountUsdt ?? null,
+      ttlExpiresAt,
+      ruleIdUsed: rule?.id ?? null,
+      ruleName: rule?.name ?? null,
+      pricingSource: rule?.pricingSource ?? 'usdt_binance',
+      spreadMode: rule?.spreadMode ?? spreadConfig?.spreadMode ?? 'bps',
+      sellSpread: rule?.sellSpread ?? spreadConfig?.sellSpread ?? 0,
+      buySpread: rule?.buySpread ?? spreadConfig?.buySpread ?? 0,
+      repromptedAt: null,
+      metadata: input.metadata ?? {},
+      createdAt: now,
+      updatedAt: now,
+    }
+    simDeals.set(deal.id, deal)
+    return ok(deal)
+  }
+
   const supabase = getSupabase()
   if (!supabase) return err('Supabase not initialized')
 
@@ -439,6 +482,15 @@ export async function createDeal(input: CreateDealInput): Promise<Result<ActiveD
 export async function getActiveDeals(groupJid: string): Promise<Result<ActiveDeal[]>> {
   if (!groupJid) return err('groupJid is required')
 
+  // ── Simulation mode: read from in-memory store ──
+  const simDeals = getSimulationDeals()
+  if (simDeals) {
+    const deals = [...simDeals.values()]
+      .filter((d) => d.groupJid === groupJid && !TERMINAL_STATES.includes(d.state))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    return ok(deals)
+  }
+
   // Check cache
   if (isCacheValid(groupJid)) {
     const cached = dealsCache.get(groupJid)
@@ -521,6 +573,14 @@ export async function getDealById(dealId: string, groupJid: string): Promise<Res
   if (!dealId) return err('dealId is required')
   if (!groupJid) return err('groupJid is required')
 
+  // ── Simulation mode: read from in-memory store ──
+  const simDeals = getSimulationDeals()
+  if (simDeals) {
+    const deal = simDeals.get(dealId)
+    if (!deal || deal.groupJid !== groupJid) return err('Deal not found')
+    return ok(deal)
+  }
+
   const supabase = getSupabase()
   if (!supabase) return err('Supabase not initialized')
 
@@ -556,6 +616,15 @@ export async function findClientDeal(
   clientJid: string
 ): Promise<Result<ActiveDeal | null>> {
   if (!groupJid || !clientJid) return err('groupJid and clientJid are required')
+
+  // ── Simulation mode: read from in-memory store ──
+  const simDeals = getSimulationDeals()
+  if (simDeals) {
+    const deal = [...simDeals.values()]
+      .filter((d) => d.groupJid === groupJid && d.clientJid === clientJid && !TERMINAL_STATES.includes(d.state))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0] ?? null
+    return ok(deal)
+  }
 
   const supabase = getSupabase()
   if (!supabase) return err('Supabase not initialized')
@@ -594,6 +663,21 @@ async function transitionDeal(
   updates: Record<string, unknown>,
   logEvent: string
 ): Promise<Result<ActiveDeal>> {
+  // ── Simulation mode: update in-memory deal ──
+  const simDeals = getSimulationDeals()
+  if (simDeals) {
+    const deal = simDeals.get(dealId)
+    if (!deal || deal.groupJid !== groupJid) return err('Deal not found')
+    if (!isValidTransition(deal.state, toState)) return err(`Invalid transition: ${deal.state} → ${toState}`)
+    if (!TERMINAL_STATES.includes(toState) && new Date() > deal.ttlExpiresAt) return err('Deal has expired')
+    // Merge metadata before applying updates
+    if (typeof updates.metadata === 'object' && updates.metadata !== null) {
+      updates.metadata = { ...deal.metadata, ...(updates.metadata as Record<string, unknown>) }
+    }
+    applyUpdatesToDeal(deal, { state: toState, ...updates })
+    return ok({ ...deal })
+  }
+
   const supabase = getSupabase()
   if (!supabase) return err('Supabase not initialized')
 
@@ -838,6 +922,17 @@ export async function extendDealTtl(
     return err('additionalSeconds must be positive')
   }
 
+  // ── Simulation mode: update TTL in memory ──
+  const simDeals = getSimulationDeals()
+  if (simDeals) {
+    const deal = simDeals.get(dealId)
+    if (!deal || deal.groupJid !== groupJid) return err('Deal not found')
+    if (TERMINAL_STATES.includes(deal.state)) return err(`Cannot extend TTL for deal in ${deal.state} state`)
+    deal.ttlExpiresAt = new Date(Math.max(deal.ttlExpiresAt.getTime(), Date.now()) + additionalSeconds * 1000)
+    deal.updatedAt = new Date()
+    return ok({ ...deal })
+  }
+
   const supabase = getSupabase()
   if (!supabase) return err('Supabase not initialized')
 
@@ -1050,6 +1145,43 @@ export async function archiveDeal(
   dealId: string,
   groupJid: string
 ): Promise<Result<DealHistoryRecord>> {
+  // ── Simulation mode: remove from in-memory store, return mock history ──
+  const simDeals = getSimulationDeals()
+  if (simDeals) {
+    const deal = simDeals.get(dealId)
+    if (!deal || deal.groupJid !== groupJid) return err('Deal not found')
+    if (!TERMINAL_STATES.includes(deal.state)) return err(`Cannot archive deal in ${deal.state} state`)
+    simDeals.delete(dealId)
+    const now = new Date()
+    const historyRecord: DealHistoryRecord = {
+      id: deal.id,
+      groupJid: deal.groupJid,
+      clientJid: deal.clientJid,
+      finalState: deal.state,
+      side: deal.side,
+      quotedRate: deal.quotedRate,
+      baseRate: deal.baseRate,
+      lockedRate: deal.lockedRate,
+      amountBrl: deal.amountBrl,
+      amountUsdt: deal.amountUsdt,
+      quotedAt: deal.quotedAt,
+      lockedAt: deal.lockedAt,
+      completedAt: now,
+      ttlExpiresAt: deal.ttlExpiresAt,
+      ruleIdUsed: deal.ruleIdUsed,
+      ruleName: deal.ruleName,
+      pricingSource: deal.pricingSource,
+      spreadMode: deal.spreadMode,
+      sellSpread: deal.sellSpread,
+      buySpread: deal.buySpread,
+      metadata: deal.metadata,
+      completionReason: (deal.metadata?.completion_reason as CompletionReason) ?? null,
+      createdAt: deal.createdAt,
+      archivedAt: now,
+    }
+    return ok(historyRecord)
+  }
+
   const supabase = getSupabase()
   if (!supabase) return err('Supabase not initialized')
 

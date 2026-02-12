@@ -112,6 +112,8 @@ export const API_ENDPOINTS = {
   simulatorGroups: `${API_BASE_URL}/api/simulator/groups`,
   /** Simulator: send message */
   simulatorSend: `${API_BASE_URL}/api/simulator/send`,
+  /** Simulator: replay history through pipeline */
+  simulatorReplay: `${API_BASE_URL}/api/simulator/replay`,
   /** Simulator: message history for a group */
   simulatorHistory: (groupJid: string): string =>
     `${API_BASE_URL}/api/simulator/history/${encodeURIComponent(groupJid)}`,

@@ -10,6 +10,7 @@
 import { getSupabase } from './supabase.js'
 import { logger } from '../utils/logger.js'
 import { getCurrentPrice } from './binanceWebSocket.js'
+import { isSimulation } from '../utils/simulationContext.js'
 
 // ============================================================================
 // Configuration
@@ -120,6 +121,7 @@ export interface DealEventInput {
  * Fire-and-forget — never blocks the caller, never throws.
  */
 export function emitDealEvent(input: DealEventInput): void {
+  if (isSimulation()) return
   const supabase = getSupabase()
   if (!supabase) return
 

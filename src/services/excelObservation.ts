@@ -13,6 +13,7 @@
 import { ok, err, type Result } from '../utils/result.js'
 import { logger } from '../utils/logger.js'
 import { getConfig } from '../config.js'
+import { isSimulation } from '../utils/simulationContext.js'
 import { ensureValidToken, classifyGraphError } from './graph.js'
 import { getContentPreview, type OTCMessageType, type PlayerRole } from './messageClassifier.js'
 
@@ -282,6 +283,7 @@ async function appendObservationRowCore(
  * @returns Promise<Result<{rowNumber: number}>> - Row number on success
  */
 export async function logObservation(entry: ObservationLogEntry): Promise<Result<{ rowNumber: number }>> {
+  if (isSimulation()) return ok({ rowNumber: -1 })
   return appendObservationRowCore(entry, 'observation')
 }
 

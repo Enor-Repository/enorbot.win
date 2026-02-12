@@ -2,7 +2,7 @@ import { cn } from '@/lib/utils'
 
 export interface ChatMessage {
   id: string
-  type: 'user' | 'bot' | 'system'
+  type: 'user' | 'bot' | 'system' | 'history'
   text: string
   senderName?: string
   route?: {
@@ -40,23 +40,28 @@ export function SimulatorMessage({ message }: SimulatorMessageProps) {
   }
 
   const isUser = message.type === 'user'
+  const isHistory = message.type === 'history'
+  const isBot = message.type === 'bot'
+  const isRightAligned = isUser
 
   return (
-    <div className={cn('flex mb-2', isUser ? 'justify-end' : 'justify-start')}>
+    <div className={cn('flex mb-2', isRightAligned ? 'justify-end' : 'justify-start')}>
       <div
         className={cn(
           'max-w-[75%] rounded-xl px-3 py-2 shadow-sm',
           isUser
             ? 'bg-emerald-800/60 text-white rounded-br-sm'
+            : isHistory
+            ? 'bg-slate-700/60 text-white rounded-bl-sm'
             : 'bg-card border border-border text-foreground rounded-bl-sm'
         )}
       >
         {/* Sender name */}
         <div className={cn(
           'text-[11px] font-medium mb-0.5',
-          isUser ? 'text-emerald-300' : 'text-cyan-400'
+          isUser ? 'text-emerald-300' : isHistory ? 'text-amber-400' : 'text-cyan-400'
         )}>
-          {isUser ? (message.senderName || 'You') : 'eNorBOT'}
+          {isUser ? (message.senderName || 'You') : isBot ? 'eNorBOT' : (message.senderName || 'Unknown')}
         </div>
 
         {/* Message text */}
@@ -65,7 +70,7 @@ export function SimulatorMessage({ message }: SimulatorMessageProps) {
         {/* Footer: time + route badge */}
         <div className={cn(
           'flex items-center gap-2 mt-1',
-          isUser ? 'justify-end' : 'justify-between'
+          isRightAligned ? 'justify-end' : 'justify-between'
         )}>
           {!isUser && message.route && (
             <span className="text-[10px] font-mono text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">

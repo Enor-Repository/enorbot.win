@@ -13,6 +13,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { logger } from '../utils/logger.js'
+import { isSimulation } from '../utils/simulationContext.js'
 import { ok, err, type Result } from '../utils/result.js'
 import type { EnvConfig } from '../types/config.js'
 
@@ -338,6 +339,9 @@ export function logBotMessage(params: {
   isControlGroup?: boolean
   metadata?: Record<string, unknown>
 }): void {
+  // Simulation mode: skip all DB writes
+  if (isSimulation()) return
+
   // Fire-and-forget - don't await
   saveMessage({
     groupJid: params.groupJid,

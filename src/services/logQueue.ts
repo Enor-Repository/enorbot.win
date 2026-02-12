@@ -13,6 +13,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { ok, err, type Result } from '../utils/result.js'
 import { logger } from '../utils/logger.js'
+import { isSimulation } from '../utils/simulationContext.js'
 import { getConfig } from '../config.js'
 import { queueControlNotification } from '../bot/notifications.js'
 import type { LogEntry } from './excel.js'
@@ -215,6 +216,7 @@ export function setAppendObservationRowFn(fn: (entry: ObservationLogEntry) => Pr
  * @returns Promise<void> - Resolves when entry is queued
  */
 export async function queueLogEntry(entry: LogEntry): Promise<void> {
+  if (isSimulation()) return
   if (!supabase) {
     // Fallback to in-memory logging
     logger.warn('Log queue not initialized, entry will be lost', {
@@ -375,6 +377,7 @@ export async function getQueueLength(): Promise<Result<number>> {
  * @returns Promise<void> - Resolves when entry is queued
  */
 export async function queueObservationEntry(entry: ObservationLogEntry): Promise<void> {
+  if (isSimulation()) return
   if (!supabase) {
     logger.warn('Log queue not initialized, observation entry will be lost', {
       event: 'observation_entry_lost',
